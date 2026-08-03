@@ -1,0 +1,357 @@
+name: apex-phase0
+
+services:
+  ingest-gateway:
+    image: ${APEX_INGEST_IMAGE:?set APEX_INGEST_IMAGE to an approved, digest-pinned image}
+    command: ["/usr/local/bin/apex-event-ingest"]
+    environment:
+      APEX_TRUSTED_SECRET_BASE: /run/secrets
+      APEX_LISTEN_ADDR: 0.0.0.0:8443
+      APEX_NATS_URL: tls://jetstream:4222
+      APEX_NATS_CA_FILE: /run/secrets/nats_client_ca
+      APEX_NATS_CLIENT_CERT_FILE: /run/secrets/ingest_nats_client_cert
+      APEX_NATS_CLIENT_KEY_FILE: /run/secrets/ingest_nats_client_key
+      APEX_NATS_USERNAME_FILE: /run/secrets/nats_username
+      APEX_NATS_PASSWORD_FILE: /run/secrets/nats_password
+      APEX_CLICKHOUSE_ENDPOINT: ${APEX_CLICKHOUSE_ENDPOINT:-https://clickhouse-projection:8443/v1/events}
+      APEX_CLICKHOUSE_CA_FILE: /run/secrets/clickhouse_client_ca
+      APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/ingest_clickhouse_client_cert
+      APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/ingest_clickhouse_client_key
+      APEX_ARCHIVE_ENDPOINT: ${APEX_ARCHIVE_ENDPOINT:-https://archive-provider:8443/v1/events}
+      APEX_ARCHIVE_CA_FILE: /run/secrets/archive_client_ca
+      APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/ingest_archive_client_cert
+      APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/ingest_archive_client_key
+      APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
+      APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:?set APEX_ALLOWED_SCOPES to comma-separated workspace/namespace scopes}
+      APEX_GATEWAY_SERVER_CERT_FILE: /run/secrets/gateway_server_cert
+      APEX_GATEWAY_SERVER_KEY_FILE: /run/secrets/gateway_server_key
+      APEX_GATEWAY_CLIENT_CA_FILE: /run/secrets/gateway_client_ca
+      APEX_RETRY_ATTEMPTS: ${APEX_RETRY_ATTEMPTS:-3}
+      APEX_IDEMPOTENCY_CAPACITY: ${APEX_IDEMPOTENCY_CAPACITY:-50000}
+      APEX_ALLOW_IN_MEMORY_IDEMPOTENCY: ${APEX_ALLOW_IN_MEMORY_IDEMPOTENCY:?set APEX_ALLOW_IN_MEMORY_IDEMPOTENCY=true only for the Phase 0 staging gateway}
+    depends_on:
+      jetstream:
+        condition: service_started
+      clickhouse:
+        condition: service_started
+      archive-store:
+        condition: service_started
+      clickhouse-projection:
+        condition: service_started
+      archive-provider:
+        condition: service_started
+    networks: [apex-internal]
+    secrets:
+      - nats_client_ca
+      - ingest_nats_client_cert
+      - source: ingest_nats_client_key
+        target: /run/secrets/ingest_nats_client_key
+        mode: "0400"
+      - source: nats_username
+        target: /run/secrets/nats_username
+        mode: "0400"
+      - source: nats_password
+        target: /run/secrets/nats_password
+        mode: "0400"
+      - clickhouse_client_ca
+      - ingest_clickhouse_client_cert
+      - source: ingest_clickhouse_client_key
+        target: /run/secrets/ingest_clickhouse_client_key
+        mode: "0400"
+      - archive_client_ca
+      - ingest_archive_client_cert
+      - source: ingest_archive_client_key
+        target: /run/secrets/ingest_archive_client_key
+        mode: "0400"
+      - source: ingest_bearer_token
+        target: /run/secrets/ingest_bearer_token
+        mode: "0400"
+      - gateway_server_cert
+      - source: gateway_server_key
+        target: /run/secrets/gateway_server_key
+        mode: "0400"
+      - gateway_client_ca
+    ports:
+      - "${APEX_INGEST_BIND:-127.0.0.1}:${APEX_INGEST_PORT:-8443}:8443"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  jetstream:
+    image: ${NATS_IMAGE:?set NATS_IMAGE to an approved, digest-pinned image}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["! grep -q 'REPLACE_WITH' /run/secrets/nats_config && exec nats-server --config=/run/secrets/nats_config"]
+    volumes:
+      - jetstream-data:/data
+    networks: [apex-internal]
+    secrets:
+      - source: nats_config
+        target: nats_config
+      - source: nats_server_cert
+        target: nats_server_cert
+      - source: nats_server_key
+        target: nats_server_key
+        mode: "0400"
+      - source: nats_client_ca
+        target: nats_client_ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:?set CLICKHOUSE_IMAGE to an approved, digest-pinned image}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["! grep -q 'REPLACE_WITH' /run/secrets/clickhouse_users && exec /entrypoint.sh clickhouse-server"]
+    secrets:
+      - source: clickhouse_users
+        target: clickhouse_users
+      - source: clickhouse_users
+        target: /etc/clickhouse-server/users.d/apex.xml
+      - source: clickhouse_tls_config
+        target: /etc/clickhouse-server/config.d/apex-tls.xml
+      - source: clickhouse_server_cert
+        target: clickhouse_server_cert
+      - source: clickhouse_server_key
+        target: clickhouse_server_key
+        mode: "0400"
+      - source: clickhouse_client_ca
+        target: clickhouse_client_ca
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    networks: [apex-internal]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  clickhouse-projection:
+    image: ${CLICKHOUSE_API_IMAGE:?set CLICKHOUSE_API_IMAGE to an approved, digest-pinned image}
+    environment:
+      APEX_LISTEN_ADDR: 0.0.0.0:8443
+      APEX_CLICKHOUSE_URL: https://clickhouse:8443
+      APEX_CLICKHOUSE_DATABASE: apex
+      APEX_CLICKHOUSE_TABLE: events
+      APEX_MAX_EVENT_BYTES: 262144
+      APEX_SERVER_CERT_FILE: /run/secrets/clickhouse_api_server_cert
+      APEX_SERVER_KEY_FILE: /run/secrets/clickhouse_api_server_key
+      APEX_CLIENT_CA_FILE: /run/secrets/clickhouse_api_client_ca
+      APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/clickhouse_writer_cert
+      APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/clickhouse_writer_key
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks: [apex-internal]
+    secrets:
+      - source: clickhouse_api_server_cert
+        target: /run/secrets/clickhouse_api_server_cert
+      - source: clickhouse_api_server_key
+        target: /run/secrets/clickhouse_api_server_key
+        mode: "0400"
+      - source: clickhouse_api_client_ca
+        target: /run/secrets/clickhouse_api_client_ca
+      - source: clickhouse_writer_cert
+        target: /run/secrets/clickhouse_writer_cert
+      - source: clickhouse_writer_key
+        target: /run/secrets/clickhouse_writer_key
+        mode: "0400"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  archive-provider:
+    image: ${ARCHIVE_API_IMAGE:?set ARCHIVE_API_IMAGE to an approved, digest-pinned image}
+    environment:
+      APEX_LISTEN_ADDR: 0.0.0.0:8443
+      APEX_ARCHIVE_BACKEND_URL: https://archive-store:9000
+      APEX_ARCHIVE_BUCKET: ${APEX_ARCHIVE_BUCKET:-apex-events}
+      APEX_MAX_EVENT_BYTES: 262144
+      APEX_SERVER_CERT_FILE: /run/secrets/archive_api_server_cert
+      APEX_SERVER_KEY_FILE: /run/secrets/archive_api_server_key
+      APEX_CLIENT_CA_FILE: /run/secrets/archive_api_client_ca
+      APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/archive_writer_cert
+      APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/archive_writer_key
+      APEX_ARCHIVE_ACCESS_KEY_FILE: /run/secrets/archive_backend_access_key
+      APEX_ARCHIVE_SECRET_KEY_FILE: /run/secrets/archive_backend_secret_key
+      APEX_ARCHIVE_REQUIRE_OBJECT_LOCK: ${APEX_ARCHIVE_REQUIRE_OBJECT_LOCK:?set APEX_ARCHIVE_REQUIRE_OBJECT_LOCK=true for strict retention or false only for staging}
+    depends_on:
+      archive-store-init:
+        condition: service_completed_successfully
+    networks: [apex-internal]
+    secrets:
+      - source: archive_api_server_cert
+        target: /run/secrets/archive_api_server_cert
+      - source: archive_api_server_key
+        target: /run/secrets/archive_api_server_key
+        mode: "0400"
+      - source: archive_api_client_ca
+        target: /run/secrets/archive_api_client_ca
+      - source: archive_writer_cert
+        target: /run/secrets/archive_writer_cert
+      - source: archive_writer_key
+        target: /run/secrets/archive_writer_key
+        mode: "0400"
+      - source: archive_backend_access_key
+        target: /run/secrets/archive_backend_access_key
+        mode: "0400"
+      - source: archive_backend_secret_key
+        target: /run/secrets/archive_backend_secret_key
+        mode: "0400"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  archive-store:
+    image: ${MINIO_IMAGE:?set MINIO_IMAGE to an approved, digest-pinned image}
+    command: server --certs-dir /run/minio-certs /data
+    environment:
+      MINIO_BROWSER: "off"
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+    secrets:
+      - minio_root_user
+      - minio_root_password
+      - source: minio_server_cert
+        target: /run/minio-certs/public.crt
+      - source: minio_server_key
+        target: /run/minio-certs/private.key
+        mode: "0400"
+    volumes:
+      - archive-data:/data
+    networks: [apex-internal]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  archive-store-init:
+    image: ${MINIO_MC_IMAGE:?set MINIO_MC_IMAGE to an approved, digest-pinned MinIO client image}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        user="$$(cat /run/secrets/minio_root_user)" || { echo 'archive-store-init: cannot read MinIO root username' >&2; exit 1; }
+        password="$$(cat /run/secrets/minio_root_password)" || { echo 'archive-store-init: cannot read MinIO root password' >&2; exit 1; }
+        bucket="$${APEX_ARCHIVE_BUCKET}"
+        test "$$user" != REPLACE_WITH || { echo 'archive-store-init: replace the MinIO root username placeholder' >&2; exit 1; }
+        test "$$password" != REPLACE_WITH || { echo 'archive-store-init: replace the MinIO root password placeholder' >&2; exit 1; }
+        case "$$bucket" in *[!a-z0-9.-]*|'') echo 'archive-store-init: bucket must be lowercase DNS-safe text' >&2; exit 1;; esac
+        test "$${#bucket}" -ge 3 && test "$${#bucket}" -le 63 || { echo 'archive-store-init: bucket length must be 3 through 63 characters' >&2; exit 1; }
+        case "$$user" in *[!A-Za-z0-9_-]*|'') echo 'invalid MinIO root username format' >&2; exit 1;; esac
+        case "$$password" in *[!A-Za-z0-9._~-]*|'') echo 'invalid MinIO root password format' >&2; exit 1;; esac
+        mkdir -p /tmp/mc/certs/CAs
+        cp /run/secrets/minio_server_ca /tmp/mc/certs/CAs/minio-server-ca.pem || { echo 'archive-store-init: cannot install MinIO server CA' >&2; exit 1; }
+        chmod 0400 /tmp/mc/certs/CAs/minio-server-ca.pem
+        printf '{"version":"10","aliases":{"apex":{"url":"https://archive-store:9000","accessKey":"%s","secretKey":"%s","api":"S3v4","path":"auto"}}}' "$$user" "$$password" > /tmp/mc/config.json
+        chmod 0400 /tmp/mc/config.json
+        MC_CONFIG_DIR=/tmp/mc mc alias import apex /tmp/mc/config.json || { echo 'archive-store-init: failed to configure the TLS MinIO client' >&2; exit 1; }
+        MC_CONFIG_DIR=/tmp/mc mc mb --with-lock --ignore-existing "apex/$$bucket" || { echo 'archive-store-init: failed to create the Object-Lock bucket' >&2; exit 1; }
+        MC_CONFIG_DIR=/tmp/mc mc retention info "apex/$$bucket" || { echo 'archive-store-init: Object-Lock verification failed' >&2; exit 1; }
+    environment:
+      APEX_ARCHIVE_BUCKET: ${APEX_ARCHIVE_BUCKET:?set APEX_ARCHIVE_BUCKET to the archive bucket name}
+    depends_on:
+      archive-store:
+        condition: service_started
+    networks: [apex-internal]
+    secrets:
+      - source: minio_root_user
+        target: /run/secrets/minio_root_user
+        mode: "0400"
+      - source: minio_root_password
+        target: /run/secrets/minio_root_password
+        mode: "0400"
+      - source: minio_server_ca
+        target: /run/secrets/minio_server_ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    restart: "no"
+
+networks:
+  apex-internal:
+    internal: true
+
+volumes:
+  jetstream-data:
+  clickhouse-data:
+  archive-data:
+
+secrets:
+  gateway_server_cert:
+    file: ${GATEWAY_SERVER_CERT_FILE:?set GATEWAY_SERVER_CERT_FILE to a gateway certificate}
+  gateway_server_key:
+    file: ${GATEWAY_SERVER_KEY_FILE:?set GATEWAY_SERVER_KEY_FILE to a gateway private key}
+  gateway_client_ca:
+    file: ${GATEWAY_CLIENT_CA_FILE:?set GATEWAY_CLIENT_CA_FILE to a gateway client CA}
+  ingest_bearer_token:
+    file: ${INGEST_BEARER_TOKEN_FILE:?set INGEST_BEARER_TOKEN_FILE to a bearer token file}
+  nats_username:
+    file: ${NATS_USERNAME_FILE:?set NATS_USERNAME_FILE to an NATS user file}
+  nats_password:
+    file: ${NATS_PASSWORD_FILE:?set NATS_PASSWORD_FILE to an NATS password file}
+  ingest_nats_client_cert:
+    file: ${INGEST_NATS_CLIENT_CERT_FILE:?set INGEST_NATS_CLIENT_CERT_FILE to an NATS client certificate}
+  ingest_nats_client_key:
+    file: ${INGEST_NATS_CLIENT_KEY_FILE:?set INGEST_NATS_CLIENT_KEY_FILE to an NATS client key}
+  ingest_clickhouse_client_cert:
+    file: ${INGEST_CLICKHOUSE_CLIENT_CERT_FILE:?set INGEST_CLICKHOUSE_CLIENT_CERT_FILE to a ClickHouse client certificate}
+  ingest_clickhouse_client_key:
+    file: ${INGEST_CLICKHOUSE_CLIENT_KEY_FILE:?set INGEST_CLICKHOUSE_CLIENT_KEY_FILE to a ClickHouse client key}
+  archive_client_ca:
+    file: ${ARCHIVE_CLIENT_CA_FILE:?set ARCHIVE_CLIENT_CA_FILE to an archive-provider CA}
+  ingest_archive_client_cert:
+    file: ${INGEST_ARCHIVE_CLIENT_CERT_FILE:?set INGEST_ARCHIVE_CLIENT_CERT_FILE to an archive client certificate}
+  ingest_archive_client_key:
+    file: ${INGEST_ARCHIVE_CLIENT_KEY_FILE:?set INGEST_ARCHIVE_CLIENT_KEY_FILE to an archive client key}
+  nats_config:
+    file: ${NATS_CONFIG_FILE:?set NATS_CONFIG_FILE to a local secret config file}
+  clickhouse_users:
+    file: ${CLICKHOUSE_USERS_CONFIG_FILE:?set CLICKHOUSE_USERS_CONFIG_FILE to a local secret config file}
+  clickhouse_tls_config:
+    file: ${CLICKHOUSE_TLS_CONFIG_FILE:?set CLICKHOUSE_TLS_CONFIG_FILE to a local secret config file}
+  clickhouse_server_cert:
+    file: ${CLICKHOUSE_SERVER_CERT_FILE:?set CLICKHOUSE_SERVER_CERT_FILE to a local certificate file}
+  clickhouse_server_key:
+    file: ${CLICKHOUSE_SERVER_KEY_FILE:?set CLICKHOUSE_SERVER_KEY_FILE to a local private-key file}
+  clickhouse_client_ca:
+    file: ${CLICKHOUSE_CLIENT_CA_FILE:?set CLICKHOUSE_CLIENT_CA_FILE to a local CA certificate file}
+  minio_root_user:
+    file: ${MINIO_ROOT_USER_FILE:?set MINIO_ROOT_USER_FILE to a local secret file}
+  minio_root_password:
+    file: ${MINIO_ROOT_PASSWORD_FILE:?set MINIO_ROOT_PASSWORD_FILE to a local secret file}
+  minio_server_cert:
+    file: ${MINIO_SERVER_CERT_FILE:?set MINIO_SERVER_CERT_FILE to a local certificate file}
+  minio_server_key:
+    file: ${MINIO_SERVER_KEY_FILE:?set MINIO_SERVER_KEY_FILE to a local private-key file}
+  minio_server_ca:
+    file: ${MINIO_SERVER_CA_FILE:?set MINIO_SERVER_CA_FILE to the CA that issued the MinIO server certificate}
+  nats_server_cert:
+    file: ${NATS_SERVER_CERT_FILE:?set NATS_SERVER_CERT_FILE to a local certificate file}
+  nats_server_key:
+    file: ${NATS_SERVER_KEY_FILE:?set NATS_SERVER_KEY_FILE to a local private-key file}
+  nats_client_ca:
+    file: ${NATS_CLIENT_CA_FILE:?set NATS_CLIENT_CA_FILE to a local CA certificate file}
+  clickhouse_api_server_cert:
+    file: ${CLICKHOUSE_API_SERVER_CERT_FILE:?set CLICKHOUSE_API_SERVER_CERT_FILE to a projection API certificate}
+  clickhouse_api_server_key:
+    file: ${CLICKHOUSE_API_SERVER_KEY_FILE:?set CLICKHOUSE_API_SERVER_KEY_FILE to a projection API private key}
+  clickhouse_api_client_ca:
+    file: ${CLICKHOUSE_API_CLIENT_CA_FILE:?set CLICKHOUSE_API_CLIENT_CA_FILE to a projection API client CA}
+  clickhouse_writer_cert:
+    file: ${CLICKHOUSE_WRITER_CERT_FILE:?set CLICKHOUSE_WRITER_CERT_FILE to a ClickHouse writer certificate}
+  clickhouse_writer_key:
+    file: ${CLICKHOUSE_WRITER_KEY_FILE:?set CLICKHOUSE_WRITER_KEY_FILE to a ClickHouse writer private key}
+  archive_api_server_cert:
+    file: ${ARCHIVE_API_SERVER_CERT_FILE:?set ARCHIVE_API_SERVER_CERT_FILE to an archive API certificate}
+  archive_api_server_key:
+    file: ${ARCHIVE_API_SERVER_KEY_FILE:?set ARCHIVE_API_SERVER_KEY_FILE to an archive API private key}
+  archive_api_client_ca:
+    file: ${ARCHIVE_API_CLIENT_CA_FILE:?set ARCHIVE_API_CLIENT_CA_FILE to an archive API client CA}
+  archive_writer_cert:
+    file: ${ARCHIVE_WRITER_CERT_FILE:?set ARCHIVE_WRITER_CERT_FILE to an archive writer certificate}
+  archive_writer_key:
+    file: ${ARCHIVE_WRITER_KEY_FILE:?set ARCHIVE_WRITER_KEY_FILE to an archive writer private key}
+  archive_backend_access_key:
+    file: ${ARCHIVE_BACKEND_ACCESS_KEY_FILE:?set ARCHIVE_BACKEND_ACCESS_KEY_FILE to a least-privilege archive backend access key}
+  archive_backend_secret_key:
+    file: ${ARCHIVE_BACKEND_SECRET_KEY_FILE:?set ARCHIVE_BACKEND_SECRET_KEY_FILE to a least-privilege archive backend secret key}

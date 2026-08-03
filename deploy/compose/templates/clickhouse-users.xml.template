@@ -1,0 +1,15 @@
+<!-- Copy to deploy/compose/secrets/clickhouse-users.xml. Replace the user
+     name and SHA-256 password hash; never store a plaintext password here. -->
+<clickhouse>
+  <users>
+    <default remove="remove"/>
+    <REPLACE_WITH_CLICKHOUSE_USER>
+      <password_sha256_hex>REPLACE_WITH_SHA256_PASSWORD_HASH</password_sha256_hex>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+    </REPLACE_WITH_CLICKHOUSE_USER>
+  </users>
+</clickhouse>

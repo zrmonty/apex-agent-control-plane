@@ -1,0 +1,45 @@
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/settings.local.json
+.claude/
+.codex/
+.cursor/
+
+# JavaScript
+node_modules/
+dist/
+.next/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+*.profraw
+
+# Rust
+target/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data
+data/
+tmp/
+*.log
+deploy/compose/.env
+deploy/compose/secrets/
+.local/

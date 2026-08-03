@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apex-sdk"
+version = "0.1.0"
+description = "Apex Agent Control Plane instrumentation SDK"
+requires-python = ">=3.11"
+dependencies = ["rfc8785==0.1.4"]
+
+[project.optional-dependencies]
+test = ["pytest>=9.0", "pytest-cov>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=apex_sdk --cov-branch --cov-report=term-missing --cov-fail-under=95"

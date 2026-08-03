@@ -1,0 +1,26 @@
+# Copy this file into deploy/compose/secrets/nats.conf and replace both
+# placeholders with an ingest-publisher credential. Keep the resulting file
+# private. Give consumers and control services distinct credentials with only
+# the subjects they require; do not widen this account to apex.>.
+port: 4222
+jetstream {
+  store_dir: "/data"
+}
+authorization {
+  users: [
+    {
+      user: "REPLACE_WITH_INGEST_PUBLISHER_USER"
+      password: "REPLACE_WITH_LONG_RANDOM_SECRET"
+      permissions: {
+        publish: ["apex.events.>"]
+        subscribe: []
+      }
+    }
+  ]
+}
+tls {
+  cert_file: "/run/secrets/nats_server_cert"
+  key_file: "/run/secrets/nats_server_key"
+  ca_file: "/run/secrets/nats_client_ca"
+  verify: true
+}

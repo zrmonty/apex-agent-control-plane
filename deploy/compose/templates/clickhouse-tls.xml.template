@@ -1,0 +1,19 @@
+<!-- Copy to deploy/compose/secrets/clickhouse-tls.xml. The client CA must
+     issue certificates to every ClickHouse writer or reader. Plaintext native
+     and HTTP ports are deliberately removed. -->
+<clickhouse>
+  <tcp_port remove="remove"/>
+  <http_port remove="remove"/>
+  <tcp_port_secure>9440</tcp_port_secure>
+  <https_port>8443</https_port>
+  <openSSL>
+    <server>
+      <certificateFile>/run/secrets/clickhouse_server_cert</certificateFile>
+      <privateKeyFile>/run/secrets/clickhouse_server_key</privateKeyFile>
+      <caConfig>/run/secrets/clickhouse_client_ca</caConfig>
+      <verificationMode>strict</verificationMode>
+      <loadDefaultCAFile>false</loadDefaultCAFile>
+      <preferServerCiphers>true</preferServerCiphers>
+    </server>
+  </openSSL>
+</clickhouse>

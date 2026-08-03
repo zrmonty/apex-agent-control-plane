@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package apex.v1;
+
+import "google/protobuf/struct.proto";
+
+// The versioned, transport-neutral unit of observation in Apex.
+message EventEnvelope {
+  string event_id = 1;       // UUIDv7
+  string timestamp = 2;      // RFC 3339 UTC, microsecond precision
+  EventType type = 3;
+  string agent_id = 4;
+  string run_id = 5;
+  optional string parent_run_id = 6;
+  string trace_id = 7;
+  Scope scope = 8;
+  Actor actor = 9;
+  Version version = 10;
+  // Object-shaped type-specific data. Producers must keep the encoded
+  // envelope at or below 256 KiB; fields outside the frozen v1 contract are
+  // not part of the canonical integrity representation.
+  google.protobuf.Struct data = 11;
+  Integrity integrity = 12;
+  uint32 schema_version = 13;
+}
+
+// The authenticated v1 admission endpoint. Transport middleware establishes
+// caller identity before the service passes an envelope to the gateway.
+service EventIngest {
+  rpc Ingest(EventEnvelope) returns (IngestResponse);
+}
+
+message IngestResponse {
+  // True when this event_id was already durably accepted for this scope.
+  bool duplicate = 1;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  TURN_START = 1;
+  LLM = 2;
+  TOOL = 3;
+  MESSAGE = 4;
+  MEMORY = 5;
+  DECISION = 6;
+  WORKFLOW = 7;
+  AGENT_SPAWN = 8;
+  CONTROL = 9;
+  SCORE = 10;
+  TURN_END = 11;
+  ERROR = 12;
+}
+
+message Scope {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  repeated string agent_group_ids = 3;
+}
+
+message Actor {
+  ActorType type = 1;
+  string id = 2;
+}
+
+enum ActorType {
+  ACTOR_TYPE_UNSPECIFIED = 0;
+  USER = 1;
+  AGENT = 2;
+  SYSTEM = 3;
+  SCHEDULE = 4;
+}
+
+message Version {
+  string agent_code = 1;
+  // Stable prompt/revision identifier only; never place raw prompt text here.
+  string prompt = 2;
+  string model = 3;
+}
+
+message Integrity {
+  // Omitted at the chain root. Canonical JSON/JCS represents omission as
+  // prev_hash: null so protobuf and JSON producers hash the same envelope.
+  optional string prev_hash = 1; // lowercase SHA-256 hex, or absent at chain root
+  string event_hash = 2;         // lowercase SHA-256 hex
+}
+
+// V1 controls are delivered cooperatively by the instrumented runtime.
+message ControlPayload {
+  ControlAction action = 1;
+  ControlEnforcement enforcement = 2;
+  optional string reason_code = 3;
+  // Action-specific object. `inject.content` is untrusted data and must not
+  // be promoted into instructions or authorization decisions.
+  google.protobuf.Struct parameters = 4;
+}
+
+enum ControlAction {
+  CONTROL_ACTION_UNSPECIFIED = 0;
+  STOP = 1;
+  PAUSE = 2;
+  RESUME = 3;
+  INJECT = 4;
+  SET_BUDGET = 5;
+}
+
+enum ControlEnforcement {
+  CONTROL_ENFORCEMENT_UNSPECIFIED = 0;
+  COOPERATIVE = 1;
+}

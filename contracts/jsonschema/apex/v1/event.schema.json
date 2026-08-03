@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apex.dev/schemas/v1/event.schema.json",
+  "title": "Apex v1 Event Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "timestamp", "type", "agent_id", "run_id", "trace_id", "scope", "actor", "version", "data", "integrity", "schema_version"],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "type": {"enum": ["turn_start", "llm", "tool", "message", "memory", "decision", "workflow", "agent_spawn", "control", "score", "turn_end", "error"]},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "run_id": {"$ref": "#/$defs/id"},
+    "parent_run_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "trace_id": {"$ref": "#/$defs/id"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "actor": {"$ref": "#/$defs/actor"},
+    "version": {"$ref": "#/$defs/version"},
+    "data": {"type": "object"},
+    "integrity": {"$ref": "#/$defs/integrity"},
+    "schema_version": {"const": 1}
+  },
+  "allOf": [{"if": {"properties": {"type": {"const": "control"}}}, "then": {"properties": {"data": {"$ref": "#/$defs/control_data"}}}}],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,256}$"},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["workspace_id", "namespace_id", "agent_group_ids"], "properties": {"workspace_id": {"$ref": "#/$defs/id"}, "namespace_id": {"$ref": "#/$defs/id"}, "agent_group_ids": {"type": "array", "items": {"$ref": "#/$defs/id"}, "maxItems": 128}}},
+    "actor": {"type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": {"type": {"enum": ["user", "agent", "system", "schedule"]}, "id": {"$ref": "#/$defs/id"}}},
+    "version": {"type": "object", "additionalProperties": false, "required": ["agent_code", "prompt", "model"], "properties": {"agent_code": {"$ref": "#/$defs/id"}, "prompt": {"$ref": "#/$defs/id"}, "model": {"$ref": "#/$defs/id"}}},
+    "integrity": {"type": "object", "additionalProperties": false, "required": ["prev_hash", "event_hash"], "properties": {"prev_hash": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]}, "event_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "control_data": {"type": "object", "additionalProperties": false, "required": ["action", "enforcement", "reason_code", "parameters"], "properties": {"action": {"enum": ["stop", "pause", "resume", "inject", "set_budget"]}, "enforcement": {"const": "cooperative"}, "reason_code": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}, "parameters": {"type": "object"}}, "oneOf": [{"properties": {"action": {"const": "stop"}, "parameters": {"type": "object", "maxProperties": 0}}}, {"properties": {"action": {"const": "pause"}, "parameters": {"type": "object", "maxProperties": 0}}}, {"properties": {"action": {"const": "resume"}, "parameters": {"type": "object", "maxProperties": 0}}}, {"properties": {"action": {"const": "inject"}, "parameters": {"type": "object", "additionalProperties": false, "required": ["content", "content_classification"], "properties": {"content": {"type": "string", "minLength": 1, "maxLength": 32768}, "content_classification": {"const": "untrusted"}}}}}, {"properties": {"action": {"const": "set_budget"}, "parameters": {"type": "object", "additionalProperties": false, "required": ["budget_kind", "limit"], "properties": {"budget_kind": {"enum": ["tokens", "cost"]}, "limit": {"type": "number", "exclusiveMinimum": 0}}}}}]}
+  }
+}
