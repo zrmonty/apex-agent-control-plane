@@ -1,11 +1,12 @@
 use apex_event_ingest::{
     ArchivePublisher, AuthenticatedGrpcService, AuthenticatedHttpConfig,
     AuthenticatedIngestAdapter, BearerTokenResolver, BearerTokenVerifier, Caller, CallerVerifier,
-    ClickHousePublisher, DurableEventSink, DurableFanoutPublisher, EventPublisher, FindingType,
-    GatewayError, GatewayErrorCode, InMemoryPublisher, IngestGateway, IngestOutcome, IngestRequest,
-    JetStreamTransport, MAX_ENVELOPE_BYTES, NatsClient, NatsJetStreamTransport, NatsTlsConfig,
-    RetryingDurableSink, bounded_event_ingest_server, proto,
+    ClickHousePublisher, DurableEventSink, DurableFanoutPublisher, EventPublisher, FindingJournal,
+    FindingType, GatewayError, GatewayErrorCode, InMemoryPublisher, IngestGateway, IngestOutcome,
+    IngestRequest, JetStreamTransport, MAX_ENVELOPE_BYTES, NatsClient, NatsJetStreamTransport,
+    NatsTlsConfig, RetryingDurableSink, bounded_event_ingest_server, proto,
 };
+use prost::Message;
 use std::fs::{create_dir, remove_dir_all, write};
 use std::path::Path;
 use std::sync::{
@@ -327,13 +328,10 @@ async fn grpc_service_maps_verifier_rejection_without_exposing_details() {
     .unwrap_err();
 
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
-    assert!(
-        error
-            .message()
-            .starts_with("UNAUTHENTICATED: Ingest rejected an unauthenticated caller.")
+    assert_eq!(
+        error.message(),
+        "Authentication failed. Supply one valid bearer credential over the mTLS channel."
     );
-    assert!(error.message().contains("Cause:"));
-    assert!(error.message().contains("Next:"));
 }
 
 #[tokio::test]
@@ -358,7 +356,7 @@ async fn bearer_verifier_accepts_valid_metadata_and_rejects_malformed_headers() 
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
-    assert!(error.message().contains("INVALID_AUTHORIZATION_METADATA"));
+    assert!(error.message().contains("Authentication failed"));
     assert!(!error.message().contains("valid-token"));
 
     let mut whitespace = tonic::Request::new(envelope("018f5c91-2d88-7c00-8000-000000000003"));
@@ -369,7 +367,7 @@ async fn bearer_verifier_accepts_valid_metadata_and_rejects_malformed_headers() 
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
-    assert!(error.message().contains("INVALID_AUTHORIZATION_METADATA"));
+    assert!(error.message().contains("Authentication failed"));
 
     let mut oversized = tonic::Request::new(envelope("018f5c91-2d88-7c00-8000-000000000004"));
     oversized.metadata_mut().insert(
@@ -380,7 +378,7 @@ async fn bearer_verifier_accepts_valid_metadata_and_rejects_malformed_headers() 
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
-    assert!(error.message().contains("INVALID_AUTHORIZATION_METADATA"));
+    assert!(error.message().contains("Authentication failed"));
 
     let mut duplicate = tonic::Request::new(envelope("018f5c91-2d88-7c00-8000-000000000005"));
     duplicate
@@ -393,7 +391,7 @@ async fn bearer_verifier_accepts_valid_metadata_and_rejects_malformed_headers() 
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
-    assert!(error.message().contains("INVALID_AUTHORIZATION_METADATA"));
+    assert!(error.message().contains("Authentication failed"));
     assert!(!error.message().contains("attacker-token"));
 }
 
@@ -821,6 +819,14 @@ fn authenticated_adapter_rejects_invalid_integrity_and_group_limits() {
     assert!(error.summary.contains("integrity"));
     assert!(error.cause.contains("SHA-256"));
     assert_eq!(adapter.gateway().publisher().published_event_ids().len(), 0);
+
+    let mut duplicate_groups = envelope("018f5c91-2d88-7c00-8000-000000000002");
+    duplicate_groups.scope.as_mut().unwrap().agent_group_ids =
+        vec!["group".to_owned(), "group".to_owned()];
+    let duplicate_error = adapter
+        .ingest_envelope(&caller(), duplicate_groups)
+        .unwrap_err();
+    assert_eq!(duplicate_error.code, GatewayErrorCode::InvalidStructure);
 }
 
 #[test]
@@ -948,6 +954,53 @@ fn unauthorized_scope_denial_emits_redacted_security_finding() {
     assert_eq!(findings[0].finding_type, FindingType::ScopeIdentityDenied);
     assert_eq!(findings[0].evidence_refs[0].field_path, "event.envelope");
     assert!(!findings[0].evidence_refs[0].value_hash.contains("payload"));
+}
+
+#[test]
+fn bound_caller_identity_must_match_event_agent_and_agent_actor() {
+    let event_id = "018f5c91-2d88-7c00-8000-000000000001";
+    let encoded = envelope(event_id).encode_to_vec();
+    let request = IngestRequest::new(event_id, "acme", "prod", encoded);
+    let mut gateway = IngestGateway::new(InMemoryPublisher::default());
+    let bound =
+        Caller::authenticated_for_agent("spiffe://apex/workload/agent", "agent", ["acme/prod"]);
+    assert_eq!(
+        gateway.ingest(&bound, request).unwrap(),
+        IngestOutcome::Accepted
+    );
+
+    let mismatched =
+        IngestRequest::new(event_id, "acme", "prod", envelope(event_id).encode_to_vec());
+    let other =
+        Caller::authenticated_for_agent("spiffe://apex/workload/other", "other", ["acme/prod"]);
+    assert_eq!(
+        gateway.ingest(&other, mismatched).unwrap_err().code,
+        GatewayErrorCode::ScopeDenied
+    );
+}
+
+#[test]
+fn runnable_gateway_journal_backend_persists_scope_alerts_across_restart() {
+    let (base, _) = nats_test_files();
+    let path = base.join("security-findings.jsonl");
+    let journal = FindingJournal::open(&path, &base, 8).expect("journal opens");
+    let mut gateway =
+        IngestGateway::new(InMemoryPublisher::default()).with_security_journal(journal);
+    let error = gateway
+        .ingest(
+            &Caller::authenticated("spiffe://apex/workload/other", std::iter::empty::<&str>()),
+            event("018f5c91-2d88-7c00-8000-000000000001"),
+        )
+        .expect_err("unauthorized scope remains denied");
+    assert_eq!(error.code, GatewayErrorCode::ScopeDenied);
+    drop(gateway);
+    let reopened = FindingJournal::open(&path, &base, 8).expect("journal reopens");
+    assert_eq!(reopened.store().findings().len(), 1);
+    assert_eq!(
+        reopened.store().findings()[0].finding_type,
+        FindingType::ScopeIdentityDenied
+    );
+    remove_dir_all(base).expect("remove journal fixture");
 }
 
 #[test]
@@ -1088,6 +1141,10 @@ fn publisher_failure_is_retryable_and_does_not_claim_idempotent_acceptance() {
     assert_eq!(error.grpc_status(), "UNAVAILABLE");
     assert!(error.retryable);
     assert!(error.cause.contains("not marked accepted"));
+    let retry = gateway
+        .ingest(&caller(), event("018f5c91-2d88-7c00-8000-000000000001"))
+        .unwrap_err();
+    assert_eq!(retry.code, GatewayErrorCode::PublishFailed);
 }
 
 #[test]

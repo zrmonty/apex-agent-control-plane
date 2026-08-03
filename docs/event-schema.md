@@ -20,7 +20,7 @@ Event identifiers are restricted to 1-256 ASCII letters, digits, `.`, `_`, `:`, 
 
 `event_hash` is SHA-256 of the RFC 8785 JSON Canonicalization Scheme (JCS) serialization of the whole envelope after omitting `integrity.event_hash`. `prev_hash` is the preceding event hash for the same run, or `null` for its first event. In Protobuf, an omitted `prev_hash` is normalized to JSON `null` before hashing. The archive-provider API accepts the validated Protobuf envelope at its transport boundary, then stores the complete JCS-serialized envelope followed by a single LF byte as the canonical evidence representation. Provider manifests record the input event hash and the hash of the exact stored bytes. Do not hash the LF byte.
 
-All timestamps are RFC 3339 UTC strings ending in `Z`; emitters use microsecond precision. New events use lowercase UUIDv7 values. UUID version is validated at the API boundary because protobuf strings cannot encode that constraint.
+All timestamps are RFC 3339 UTC strings ending in `Z`, with a four-digit year from `0001` through `9999`; emitters use microsecond precision. New events use lowercase UUIDv7 values. UUID version is validated at the API boundary because protobuf strings cannot encode that constraint.
 
 ## Telemetry export
 
@@ -29,3 +29,5 @@ Apex events are canonical. OpenTelemetry GenAI attributes are an optional, one-w
 ## Control semantics
 
 V1 supports `stop`, `pause`, `resume`, `inject`, and `set_budget` only as cooperative controls. The runtime receives a request and chooses a documented safe boundary at which to honor it; Apex does not claim that a running process has been preempted. `control` event data must include `action`, `enforcement: "cooperative"`, `reason_code`, and action-specific parameters. Injection text is always marked `content_classification: "untrusted"`. Forced termination is out of scope until process isolation and its safety model are available.
+
+`set_budget` limits must be finite, positive numbers no greater than `1e15`; booleans, non-finite values, zero, negatives, and larger values are rejected at admission. This bound keeps numeric policy values portable across Rust and Python implementations and prevents impractical values from bypassing resource controls.

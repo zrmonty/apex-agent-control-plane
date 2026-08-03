@@ -156,6 +156,9 @@ fn validate_secret_path(
             return Err(GatewayError::invalid_nats_configuration());
         }
     }
+    if _private_key && !crate::permissions::private_key_permissions_restricted(&canonical) {
+        return Err(GatewayError::invalid_nats_configuration());
+    }
     Ok(canonical)
 }
 

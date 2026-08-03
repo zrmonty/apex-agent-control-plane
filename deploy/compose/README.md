@@ -32,7 +32,9 @@ to run on a non-Darwin host. Make the scripts executable after checkout with
 
 It verifies digest pinning, every certificate/key/credential path, explicit
 Object-Lock mode, bucket naming, the Docker daemon, and rendered Compose
-configuration without printing secret values.
+configuration without printing secret values. It also rejects a non-loopback
+`APEX_INGEST_BIND` unless `APEX_ALLOW_NONLOCAL_INGEST_BIND=true` is explicitly
+set; binding `0.0.0.0` requires an approved firewall and mTLS network policy.
 
 ```powershell
 docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml up -d

@@ -114,7 +114,14 @@ caps records at 1 MiB and the journal at 256 MiB, flushes and syncs each
 accepted record, and replays immutable findings before status updates. It is
 appropriate for local development and deterministic tests; an authoritative
 single-writer seam, not a multi-writer database, and an authoritative
-PostgreSQL/control-plane store is still required for production.
+PostgreSQL/control-plane store is still required for production. Scoped RBAC,
+enrollment, and policy-engine integration are not yet present in the runnable
+binary; compliance language for those controls describes the target surface,
+not an assertion that production enforcement already exists.
+
+`control.inject` content is untrusted data, never an instruction source. Every
+future consumer must preserve that taint and reject promotion into system or
+developer instructions, authorization, policy, or tool permissions.
 
 ### Phase 1 — visual response
 

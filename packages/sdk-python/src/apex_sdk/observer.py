@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock, Thread
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .diagnostics import DiagnosticReporter, EmergencySpool
 from .errors import ApexError, ConfigurationError, ObserverExportError
@@ -80,7 +80,7 @@ class JsonlSink:
 class BoundedObserver:
     """Queues export work without ever blocking an instrumented agent."""
 
-    def __init__(self, sink: EventSink, *, capacity: int = 1_024, diagnostic_reporter: DiagnosticReporter | None = None, emergency_spool: EmergencySpool | None = None) -> None:
+    def __init__(self, sink: EventSink, *, capacity: int = 1_024, diagnostic_reporter: DiagnosticReporter | None = None, emergency_spool: EmergencySpool | None = None, drop_reporter: Callable[[str], None] | None = None) -> None:
         if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 1:
             raise ConfigurationError("observer capacity must be at least one")
         self._sink = sink
@@ -93,6 +93,7 @@ class BoundedObserver:
         self._failed = 0
         self._diagnostic_reporter = diagnostic_reporter
         self._emergency_spool = emergency_spool
+        self._drop_reporter = drop_reporter
         self._worker = Thread(target=self._run, name="apex-observer", daemon=True)
         self._worker.start()
 
@@ -105,38 +106,56 @@ class BoundedObserver:
         """Accept an event if space is available; otherwise drop the newest one."""
         with self._lock:
             if self._closed:
+                self._record_drop("closed")
                 return False
         try:
             validate_event(event)
             snapshot = copy.deepcopy(event)
         except ApexError as error:
             with self._lock:
-                self._dropped += 1
+                self._record_drop("validation")
             self._report_error(error, event if isinstance(event, dict) else {})
             return False
         except Exception:
             with self._lock:
-                self._dropped += 1
+                self._record_drop("snapshot")
             self._report_error(ObserverExportError(), event if isinstance(event, dict) else {})
             return False
         with self._lock:
             if self._closed:
+                self._record_drop("closed")
                 return False
             try:
                 self._queue.put_nowait(snapshot)
             except Full:
-                self._dropped += 1
+                self._record_drop("queue_full")
                 return False
             self._accepted += 1
             return True
 
-    def close(self, *, timeout: float | None = None) -> None:
-        """Stop accepting events and drain events accepted before close."""
+    def _record_drop(self, reason: str) -> None:
+        self._dropped += 1
+        if self._drop_reporter is not None:
+            try:
+                self._drop_reporter(reason)
+            except Exception:
+                # Metrics must never make the telemetry boundary fail open or
+                # block the instrumented agent.
+                return
+
+    def close(self, *, timeout: float | None = None) -> bool:
+        """Stop accepting events and report whether the worker fully drained.
+
+        A false result means the timeout expired while work was still queued or
+        being written; callers performing fast shutdown must treat that as an
+        incomplete audit flush and use the durable spool/retry path.
+        """
         with self._lock:
             if self._closed:
-                return
+                return not self._worker.is_alive()
             self._closed = True
         self._worker.join(timeout)
+        return not self._worker.is_alive()
 
     def _run(self) -> None:
         while True:

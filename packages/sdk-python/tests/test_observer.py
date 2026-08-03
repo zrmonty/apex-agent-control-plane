@@ -112,6 +112,21 @@ def test_close_drains_accepted_events() -> None:
     assert observer.stats.exported == 2
 
 
+def test_observer_reports_drop_reasons_for_operator_metrics() -> None:
+    reasons: list[str] = []
+    sink = BlockingSink()
+    observer = BoundedObserver(sink, capacity=1, drop_reporter=reasons.append)
+    try:
+        assert observer.emit(valid_event("018f5c91-2d88-7c00-8000-000000000001")) is True
+        assert sink.started.wait(timeout=1)
+        assert observer.emit(valid_event("018f5c91-2d88-7c00-8000-000000000002")) is True
+        assert observer.emit(valid_event("018f5c91-2d88-7c00-8000-000000000003")) is False
+        assert reasons == ["queue_full"]
+    finally:
+        sink.release.set()
+        observer.close(timeout=1)
+
+
 def test_jsonl_sink_persists_one_event_per_line(tmp_path) -> None:
     path = tmp_path / "events.jsonl"
     sink = JsonlSink(path, base_dir=tmp_path)

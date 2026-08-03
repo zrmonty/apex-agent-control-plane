@@ -84,6 +84,15 @@ def test_report_contains_a_safe_cause_and_next_steps_for_an_ai_troubleshooter() 
     assert "secret" not in str(report.to_ai_payload()).lower()
 
 
+def test_error_text_redacts_bearer_jwt_keys_and_pem_blocks() -> None:
+    error = ApexError(
+        "eyJheaderpayload.signature and sk-abcdefghijklmnopqrstuvwxyz",
+        cause="-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+    )
+    assert error.summary == ApexError.safe_message
+    assert error.cause == ApexError.cause
+
+
 @pytest.mark.parametrize("error", [EventIntegrityError(), TelemetryMappingError(), ControlValidationError()])
 def test_all_sdk_errors_expose_actionable_safe_diagnostic_fields(error) -> None:
     payload = error.to_diagnostic()

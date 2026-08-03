@@ -26,6 +26,12 @@ Phase 0 is being worked as six parallel deliverables. A track is not complete un
 - Rust ingest-admission core with authenticated-caller/scope checks, strict Bearer metadata parsing with injected workload-token resolution, UUIDv7 validation, decoded Protobuf envelope metadata checks, RFC 8785/SHA-256 integrity verification, envelope-size limits, bounded test idempotency, generated-contract support without a system `protoc`, a verifier-injected runnable tonic service, a scope-safe JetStream publisher boundary, and safe gateway diagnostics.
 - Redacted diagnostic reports for human and AI troubleshooting. They preserve stable codes, retryability, safe correlation, causal evidence, and recovery steps while omitting payloads, identities, raw transport errors, and secret-bearing text.
 - Security Alerts Phase 0 finding foundation now provides immutable scoped finding records, validated hashed evidence references, stable fingerprints, append-only status/containment audit updates, exact scope isolation, bounded capacity, redacted actionable errors, deterministic event-boundary detectors, a bounded restart-safe JSONL journal, and opt-in ingest-boundary findings for scope denial and idempotency conflicts. PostgreSQL/control-plane integration and broader policy-boundary wiring remain next.
+- Ingest idempotency now has a transactional reserve/commit/abort seam. The in-memory implementation remains explicitly staging-only; the PostgreSQL table and transaction contract are defined in `deploy/postgres/idempotency.sql` and `contracts/postgres-idempotency.md`, with the production adapter still required before removing the staging startup acknowledgement.
+- In-flight idempotency reservations now return `IDEMPOTENCY_IN_PROGRESS` (`ABORTED`/retryable) rather than a duplicate success; only committed reservations can acknowledge a duplicate.
+- If downstream publish succeeds but idempotency commit fails, the gateway now preserves the reservation as uncertain/in-progress instead of aborting it. Recovery must reconcile the durable sinks before making the key duplicable again.
+- The split-projection hazard now has an outbox seam: `OutboxedPublisher` persists an event before ordered fanout and marks it complete only after JetStream, ClickHouse, and archive acknowledge. PostgreSQL outbox schema/replay requirements are defined in `deploy/postgres/outbox.sql` and `contracts/postgres-outbox.md`; the local outbox remains staging-only until its worker and database adapter are deployed.
+- `OutboxedPublisher` now treats `AlreadyPending` as `IDEMPOTENCY_IN_PROGRESS` and never republishes it on the live request path. Replay workers require an explicit atomic claim/lease API before taking ownership of pending rows.
+- Until the PostgreSQL outbox worker is deployed, the runnable Compose profile requires an explicit staging acknowledgement; ordered fanout remains subject to provider-side event-ID idempotency and is not represented as an atomic cross-sink transaction.
 - The Python bounded observer validates every event before enqueueing and deep-snapshots accepted events, preventing invalid envelopes or caller mutations from reaching custom background sinks.
 - The tonic service rejects oversized decoded messages before credential verification or gateway work, and the exported bounded server builder enforces tonic's encoded-message limit before protobuf service dispatch.
 - gRPC verifier and publisher panics are contained as safe internal statuses, and idempotency keys are scoped by workspace/namespace to prevent cross-tenant collisions.
@@ -35,14 +41,22 @@ Phase 0 is being worked as six parallel deliverables. A track is not complete un
 - Bearer authentication fails closed on duplicate authorization metadata, preventing proxy/parser disagreement over which credential is authoritative.
 - Authentication diagnostics distinguish missing credentials (`UNAUTHENTICATED`) from malformed or ambiguous metadata (`INVALID_AUTHORIZATION_METADATA`) with safe recovery guidance.
 - Rust admission now enforces the JSON Schema control-event shape for Protobuf `type=CONTROL`, including cooperative enforcement, safe reason codes, bounded untrusted injection content, and budget limits.
+- Non-control event data now receives server-side secret admission checks for credential-like keys, bearer/JWT/API-key patterns, and PEM private-key blocks; rejected payloads receive a stable `SECRET_EXPOSURE` error before fanout.
 - Protobuf `Struct` canonicalization enforces a 64-level nesting limit to prevent stack-exhaustion payloads inside the 256 KiB envelope bound.
 - Rust ingest transport/authentication and publisher concerns are split into focused `auth.rs` and `publisher.rs` modules; `lib.rs` retains the shared contract, validation, diagnostics, and gateway core.
 - The ingest hot path stores the normalized scope key on each admitted request and reuses it for authorization/idempotency, avoiding repeated formatting and allocation during gateway admission.
+- The tonic service now runs on a four-worker Tokio runtime and moves blocking mTLS/HTTP fanout into a bounded 64-permit `spawn_blocking` pool, so slow projections no longer stall async worker threads. The adapter's mutable admission/idempotency state is still serialized; scope-sharded state is the follow-up throughput step.
+- gRPC work now has a five-second bounded wait for the blocking-fanout semaphore and returns retryable `RATE_LIMITED` instead of accumulating indefinitely under overload. The shared adapter mutex remains a throughput limitation until scope-sharded state lands.
+- Authentication attempts now have a bounded process-local budget and return a generic external authentication failure message; per-IP/certificate distributed limits remain a Valkey/control-plane deployment task.
 - A deterministic Python `ReferenceReasonActLoop` now emits validated, hash-chained turn-start, LLM, tool, message, and turn-end traces through the bounded observer.
 - The reference loop can emit `agent_spawn` plus a child trace linked by `parent_run_id` and shared `trace_id`, covering the Phase 0 A2A relationship.
 - The JetStream boundary includes a bounded retry adapter that retries only explicitly retryable failures and preserves broker message-id deduplication semantics.
 - The NATS transport foundation now requires a `tls://` endpoint, rejects embedded credentials/ambiguous URL forms, validates CA/client certificate/private-key files as regular files within a trusted base, and exposes only a narrow publish client trait for the concrete NATS library adapter.
 - The NATS seam also performs defense-in-depth publish admission (safe non-wildcard subjects, bounded message IDs/payloads), rejects empty/oversized/aliased TLS material, enforces private-key permissions where supported, and converts client panics into redacted structured failures.
+- Private-key admission is platform-aware: Unix boundaries reject group/other-readable modes, while native Windows production builds fail closed unless a PowerShell SDDL probe confirms broad principals (Everyone, Authenticated Users, or Users) are absent. Probe failures are rejected before credentials are loaded.
+- The Windows ACL probe is used by process startup as well as NATS/HTTP sink boundaries, requires owner/DACL-shaped SDDL, rejects broad principals, fails closed on command/output errors, and emits no ACL or path contents. Unit fixtures bypass only the platform probe because mutating developer ACLs is unsafe.
+- Caller identity is retained as a bounded, control-free subject on every authenticated request. The staging file-bearer resolver accepts `APEX_BEARER_SUBJECT` (defaulting to `configured-file-token` for compatibility); the `BearerTokenResolver` seam is ready for per-agent workload identity and rotation without changing gateway authorization code.
+- Callers can now carry an explicit bound agent identity (`APEX_BEARER_AGENT_ID` in the staging resolver); admission rejects mismatched event `agent_id` or AGENT actor IDs before idempotency reservation or publication.
 - The validated seam now has a concrete `async-nats` 0.50 JetStream client with mTLS, `Nats-Msg-Id` deduplication headers, bounded publish acknowledgements, and safe sync-to-Tokio bridging. A durable fanout publisher orders JetStream, ClickHouse, and archive acknowledgements and stops before later sinks on failure.
 - Downstream ClickHouse/archive seams now support the same bounded 1–8 attempt retry policy as JetStream, retrying only explicitly transient failures and preserving event-ID idempotency expectations.
 - Python durability tests now demonstrate duplicate replay acknowledgement and JSONL sink reopen/restart recovery for readable reference traces.
@@ -59,8 +73,15 @@ Phase 0 is being worked as six parallel deliverables. A track is not complete un
 - Diagnostic AI handoff re-sanitizes data at render time to prevent mutation, secret leakage, Markdown injection, and prompt injection.
 - Local file sinks and emergency spools require a trusted base directory and reject path escapes and symbolic links.
 - Compose has no default credentials, no broker/database/object API/console host ports, no NATS monitoring endpoint, and no credentials in command-line arguments.
+- Compose preflight rejects non-loopback ingest binds unless an explicit non-local override is present; `0.0.0.0` is treated as a reviewed network-policy decision, not a safe default.
 - Python JSONL and emergency diagnostic spools enforce bounded record/file sizes, and authenticated HTTP sinks reject localhost, loopback, link-local, private, and unspecified IP endpoints plus localhost aliases before loading credentials.
+- HTTP sink endpoints are deployment-admin configuration only in Phase 0; the boundary rejects IP literals and private aliases, while Compose preflight keeps the gateway bind local by default. A future tenant-controlled endpoint feature must add request-time DNS resolution and post-resolution IP policy checks before enabling arbitrary hostnames.
 - The concrete async NATS client bounds its Tokio worker/blocking pools, connection/reconnect attempts, JetStream request/acknowledgement timeouts, and redacts all client failures.
+- Bearer and HTTP sink tokens are held in zeroizing containers and cleared on drop; rotation/reload remains a Phase 1 workload-identity requirement.
+- The runnable tonic server explicitly sets `client_auth_optional(false)` after installing the client CA, preventing a library-default change from weakening mTLS. A live certificate/no-certificate handshake test remains a deployment integration gate.
+- The Python observer exposes bounded drop counters and optional fixed-reason drop metrics (`validation`, `snapshot`, `queue_full`, `closed`) so operators can detect incomplete agent-side audit streams.
+- The in-process Security Alerts store now exposes an exact-scope query seam; its unfiltered slice remains test/local-only and is not an authorization API.
+- Gateway operations can inspect findings through one backend-independent accessor, including journal-backed findings; authorization-facing consumers must still apply exact scope filtering.
 
 ## Verification gates
 
@@ -75,7 +96,7 @@ Run Rust tests and lint from `apps/event-ingest`:
 ```powershell
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo llvm-cov --all-targets --all-features --summary-only --fail-under-lines 95 --fail-under-functions 95 --ignore-filename-regex "(main|http_sinks|nats|validation)\\.rs$"
+cargo llvm-cov --all-targets --all-features --summary-only --fail-under-lines 95 --fail-under-functions 95 --ignore-filename-regex "(main|http_sinks|nats)\\.rs$"
 ```
 
 The current gates are at least 95% coverage. The latest verified results were 135 Python tests at 95.24% coverage and 57 Rust gateway tests plus the gRPC/restart E2E test passing. The scoped LLVM gate reports 96.41% line coverage, 95.61% function coverage, and Security Alerts at 98.37% line / 100% function coverage.

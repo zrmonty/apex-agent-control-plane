@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::security::{
-    ContainmentAction, FindingError, FindingStatus, FindingStatusUpdate, FindingStore,
-    SecurityFinding,
+    ContainmentAction, DetectionInput, FindingError, FindingStatus, FindingStatusUpdate,
+    FindingStore, SecurityFinding, detection_finding,
 };
 
 const MAX_JOURNAL_LINE_BYTES: usize = 1024 * 1024;
@@ -198,6 +198,13 @@ impl FindingJournal {
 
     pub fn store(&self) -> &FindingStore {
         &self.store
+    }
+
+    pub fn record_detection(
+        &mut self,
+        input: DetectionInput,
+    ) -> Result<bool, FindingPersistenceError> {
+        self.append(detection_finding(input).map_err(FindingPersistenceError::Store)?)
     }
 
     pub fn append(&mut self, finding: SecurityFinding) -> Result<bool, FindingPersistenceError> {

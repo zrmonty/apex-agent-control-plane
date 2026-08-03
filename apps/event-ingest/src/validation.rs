@@ -7,10 +7,13 @@ use sha2::{Digest, Sha256};
 use crate::{GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES, proto};
 
 const MAX_STRUCT_DEPTH: usize = 64;
+const MAX_CONTROL_BUDGET_LIMIT: f64 = 1_000_000_000_000_000.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caller {
     pub(crate) authenticated: bool,
+    pub(crate) subject: Option<String>,
+    pub(crate) bound_agent_id: Option<String>,
     pub(crate) allowed_scopes: HashSet<String>,
 }
 
@@ -88,21 +91,11 @@ impl IngestRequest {
         {
             return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
         }
-        if envelope.r#type == 9 {
-            validate_control_data(
-                envelope
-                    .data
-                    .as_ref()
-                    .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?,
-            )?;
-        }
-        if canonical_event_hash(&envelope)? != integrity.event_hash {
-            return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
-        }
         let scope = envelope
             .scope
             .as_ref()
             .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
+        let unique_agent_groups = scope.agent_group_ids.iter().collect::<HashSet<_>>();
         if envelope.schema_version != 1
             || !matches!(envelope.r#type, 1..=12)
             || !matches!(
@@ -120,6 +113,7 @@ impl IngestRequest {
             || !is_scope_identifier(&scope.workspace_id)
             || !is_scope_identifier(&scope.namespace_id)
             || scope.agent_group_ids.len() > 128
+            || unique_agent_groups.len() != scope.agent_group_ids.len()
             || scope
                 .agent_group_ids
                 .iter()
@@ -136,7 +130,31 @@ impl IngestRequest {
         {
             return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
         }
+        if envelope.r#type != 9
+            && envelope
+                .data
+                .as_ref()
+                .map(contains_secret_like_data)
+                .transpose()?
+                .unwrap_or(false)
+        {
+            return Err(GatewayError::new(GatewayErrorCode::SecretExposure));
+        }
+        if envelope.r#type == 9 {
+            validate_control_data(
+                envelope
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?,
+            )?;
+        }
+        if canonical_event_hash(&envelope)? != integrity.event_hash {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
+        }
         let serialized = envelope.encode_to_vec();
+        if serialized.len() > MAX_ENVELOPE_BYTES {
+            return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
+        }
         Ok(Self {
             event_id: envelope.event_id,
             workspace_id: scope.workspace_id.clone(),
@@ -144,6 +162,38 @@ impl IngestRequest {
             scope_key: format!("{}/{}", scope.workspace_id, scope.namespace_id),
             envelope: serialized,
         })
+    }
+}
+
+fn contains_secret_like_data(data: &prost_types::Struct) -> Result<bool, GatewayError> {
+    Ok(contains_secret_like_value(&prost_struct_to_json(data)?))
+}
+
+fn contains_secret_like_value(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            normalized.contains("authorization")
+                || normalized.contains("apikey")
+                || normalized.contains("password")
+                || normalized.contains("secret")
+                || normalized.contains("privatekey")
+                || normalized == "token"
+                || contains_secret_like_value(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_secret_like_value),
+        Value::String(text) => {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("-----begin ")
+                || lower.contains("bearer ey")
+                || lower.contains("sk-")
+                || (text.starts_with("eyJ") && text.matches('.').count() == 2)
+        }
+        _ => false,
     }
 }
 
@@ -180,17 +230,18 @@ fn validate_control_data(data: &prost_types::Struct) -> Result<(), GatewayError>
         .and_then(Value::as_object)
         .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
     match action {
-        "stop" | "pause" | "resume" if !parameters.is_empty() => {
+        "stop" | "pause" | "resume" if parameters.is_empty() => {}
+        "stop" | "pause" | "resume" => {
             return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
         }
         "inject"
-            if parameters.len() != 2
-                || !matches!(parameters.get("content").and_then(Value::as_str), Some(content) if !content.is_empty() && content.len() <= 32 * 1024)
-                || parameters
+            if parameters.len() == 2
+                && matches!(parameters.get("content").and_then(Value::as_str), Some(content) if !content.is_empty() && content.len() <= 32 * 1024)
+                && parameters
                     .get("content_classification")
                     .and_then(Value::as_str)
-                    != Some("untrusted") =>
-        {
+                    == Some("untrusted") => {}
+        "inject" => {
             return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
         }
         "set_budget" => {
@@ -198,12 +249,14 @@ fn validate_control_data(data: &prost_types::Struct) -> Result<(), GatewayError>
             let limit = parameters.get("limit").and_then(Value::as_f64);
             if parameters.len() != 2
                 || !matches!(budget_kind, Some("tokens" | "cost"))
-                || !limit.is_some_and(|value| value.is_finite() && value > 0.0)
+                || !limit.is_some_and(|value| {
+                    value.is_finite() && value > 0.0 && value <= MAX_CONTROL_BUDGET_LIMIT
+                })
             {
                 return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
             }
         }
-        _ => {}
+        _ => unreachable!("control action was checked against the supported action set"),
     }
     Ok(())
 }
@@ -339,6 +392,8 @@ fn prost_struct_to_json_at_depth(
     value: &prost_types::Struct,
     depth: usize,
 ) -> Result<Value, GatewayError> {
+    // Depth zero is the root object; depth 64 is the deepest accepted level.
+    // Reject only once traversal would enter level 65.
     if depth > MAX_STRUCT_DEPTH {
         return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
     }
@@ -457,6 +512,13 @@ fn is_rfc3339_utc(value: &str) -> bool {
     let minute = two_digits(&bytes[14..16]);
     let second = two_digits(&bytes[17..19]);
     let year = four_digits(&bytes[..4]);
+    // Python's datetime (used by the reference SDK) and common SQL timestamp
+    // types do not represent year zero. Reject it at the ingress boundary so
+    // clients cannot produce an event that is valid in Rust but unportable to
+    // the rest of the project.
+    if year == 0 {
+        return false;
+    }
     let days_in_month = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -578,6 +640,7 @@ mod tests {
         assert!(!is_lowercase_sha256(&"A".repeat(64)));
         assert!(is_rfc3339_utc("2024-02-29T23:59:59.000000Z"));
         assert!(!is_rfc3339_utc("2023-02-29T23:59:59.000000Z"));
+        assert!(!is_rfc3339_utc("0000-02-29T23:59:59.000000Z"));
         assert!(!is_rfc3339_utc("2024-13-01T00:00:00.000000Z"));
         assert!(is_scope_identifier("a.b_c:d-1"));
         assert!(!is_scope_identifier(""));
@@ -636,6 +699,14 @@ mod tests {
             Value::Number(Number::from_f64(-1.0).unwrap()),
         );
         assert!(validate_control_data(&control("set_budget", bad_budget)).is_err());
+
+        let mut oversized_budget = Map::new();
+        oversized_budget.insert("budget_kind".to_owned(), Value::String("tokens".to_owned()));
+        oversized_budget.insert(
+            "limit".to_owned(),
+            Value::Number(Number::from_f64(MAX_CONTROL_BUDGET_LIMIT * 2.0).unwrap()),
+        );
+        assert!(validate_control_data(&control("set_budget", oversized_budget)).is_err());
     }
 
     #[test]

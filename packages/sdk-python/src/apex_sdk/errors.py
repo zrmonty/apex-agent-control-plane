@@ -8,7 +8,13 @@ from typing import Any
 
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
-_SENSITIVE_TEXT = re.compile(r"(?:api[_-]?key|authorization|password|secret|token)\s*(?:=|:)\s*\S+|bearer\s+\S+", re.IGNORECASE)
+_SENSITIVE_TEXT = re.compile(
+    r"(?:api[_-]?key|authorization|password|secret|token)\s*(?:=|:)\s*\S+"
+    r"|bearer\s+\S+"
+    r"|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----"
+    r"|\b(?:eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}|sk-[a-zA-Z0-9_-]{16,})\b",
+    re.IGNORECASE | re.DOTALL,
+)
 _SAFE_CORRELATION_KEYS = frozenset({"event_id", "trace_id", "run_id"})
 _SAFE_CONTEXT_KEYS = frozenset({"grpc_status", "attempt_count", "failure_threshold", "validation_code"})
 _KNOWN_GRPC_STATUSES = frozenset({"ABORTED", "ALREADY_EXISTS", "CANCELLED", "DATA_LOSS", "DEADLINE_EXCEEDED", "FAILED_PRECONDITION", "INTERNAL", "INVALID_ARGUMENT", "NOT_FOUND", "OUT_OF_RANGE", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "UNAUTHENTICATED", "UNAVAILABLE", "UNIMPLEMENTED", "UNKNOWN", "UNRECOGNIZED"})

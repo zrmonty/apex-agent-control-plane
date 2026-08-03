@@ -57,6 +57,15 @@ if ($values['APEX_ARCHIVE_BUCKET'] -notmatch '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
     throw 'Compose preflight: APEX_ARCHIVE_BUCKET must be a lowercase DNS-safe bucket name.'
 }
 
+$bind = if ([string]::IsNullOrWhiteSpace($values['APEX_INGEST_BIND'])) { '127.0.0.1' } else { $values['APEX_INGEST_BIND'] }
+$allowNonLocal = $values['APEX_ALLOW_NONLOCAL_INGEST_BIND'] -eq 'true'
+if ($bind -notin @('127.0.0.1', '::1', 'localhost') -and -not $allowNonLocal) {
+    throw 'Compose preflight: APEX_INGEST_BIND is non-local; set APEX_ALLOW_NONLOCAL_INGEST_BIND=true only with an approved network policy and client-certificate boundary.'
+}
+if ($allowNonLocal -and $bind -in @('0.0.0.0', '::')) {
+    Write-Warning 'Compose preflight: ingest is exposed on every interface; verify firewalling and mTLS before continuing.'
+}
+
 docker info --format '{{.ServerVersion}}' *> $null
 if ($LASTEXITCODE -ne 0) {
     throw 'Compose preflight: Docker daemon is unavailable. Start Docker Desktop or the configured daemon.'

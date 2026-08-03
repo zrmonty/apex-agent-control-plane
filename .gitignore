@@ -22,10 +22,16 @@ venv/
 *.egg-info/
 .pytest_cache/
 .coverage
+# LLVM/Rust coverage output (cargo llvm-cov and profraw instrumentation).
 *.profraw
 
 # Rust
 target/
+# Keep generated Rust build trees and per-test secret fixtures out of every
+# workspace crate, including crates added below the current directory.
+**/target/
+**/test-secrets/
+**/test-secrets-*/
 
 # Local configuration and secrets
 .env

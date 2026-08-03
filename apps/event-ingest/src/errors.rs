@@ -15,10 +15,13 @@ pub enum GatewayErrorCode {
     InvalidEventId,
     InvalidEnvelope,
     InvalidStructure,
+    SecretExposure,
     InvalidTimestamp,
     InvalidIntegrity,
     PayloadTooLarge,
     IdempotencyCapacity,
+    IdempotencyInProgress,
+    RateLimited,
     PublishFailed,
     Internal,
     SubjectTooLong,
@@ -39,10 +42,13 @@ impl GatewayErrorCode {
             Self::InvalidEventId => "INVALID_EVENT_ID",
             Self::InvalidEnvelope => "INVALID_ENVELOPE",
             Self::InvalidStructure => "INVALID_ENVELOPE_STRUCTURE",
+            Self::SecretExposure => "SECRET_EXPOSURE",
             Self::InvalidTimestamp => "INVALID_TIMESTAMP",
             Self::InvalidIntegrity => "INVALID_INTEGRITY",
             Self::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
             Self::IdempotencyCapacity => "IDEMPOTENCY_CAPACITY",
+            Self::IdempotencyInProgress => "IDEMPOTENCY_IN_PROGRESS",
+            Self::RateLimited => "RATE_LIMITED",
             Self::PublishFailed => "PUBLISH_FAILED",
             Self::Internal => "INTERNAL_FAILURE",
             Self::SubjectTooLong => "JETSTREAM_SUBJECT_TOO_LONG",
@@ -264,6 +270,16 @@ impl GatewayError {
                     "Validate the decoded envelope against the Protobuf and JSON Schema contracts before retrying.",
                 ],
             },
+            GatewayErrorCode::SecretExposure => Self {
+                code,
+                summary: "Ingest rejected an event containing a credential-like value.",
+                cause: "The server-side content policy detected secret material in a non-control event payload.",
+                retryable: false,
+                recommended_next_steps: &[
+                    "Remove credentials and secret-bearing fields before retrying.",
+                    "Send references or redacted hashes instead of secret material.",
+                ],
+            },
             GatewayErrorCode::InvalidTimestamp => Self {
                 code,
                 summary: "Ingest rejected an event with an invalid UTC timestamp.",
@@ -302,6 +318,26 @@ impl GatewayError {
                 recommended_next_steps: &[
                     "Restore or configure the durable idempotency store.",
                     "Retry the same event_id only after capacity is available.",
+                ],
+            },
+            GatewayErrorCode::IdempotencyInProgress => Self {
+                code,
+                summary: "The event is currently being published by another request.",
+                cause: "An idempotency reservation exists but has not committed, so acknowledging this request would risk a false duplicate success.",
+                retryable: true,
+                recommended_next_steps: &[
+                    "Retry the same event_id after the in-flight publish completes.",
+                    "Do not generate a new event_id for the same logical event.",
+                ],
+            },
+            GatewayErrorCode::RateLimited => Self {
+                code,
+                summary: "The ingest authentication boundary is temporarily rate-limited.",
+                cause: "The bounded admission budget for authentication attempts was exhausted.",
+                retryable: true,
+                recommended_next_steps: &[
+                    "Reduce authentication probe frequency.",
+                    "Retry after the server-provided backoff window.",
                 ],
             },
             GatewayErrorCode::PublishFailed => Self {
@@ -405,10 +441,13 @@ impl GatewayError {
             GatewayErrorCode::InvalidEventId => "INVALID_ARGUMENT",
             GatewayErrorCode::InvalidEnvelope => "INVALID_ARGUMENT",
             GatewayErrorCode::InvalidStructure => "INVALID_ARGUMENT",
+            GatewayErrorCode::SecretExposure => "INVALID_ARGUMENT",
             GatewayErrorCode::InvalidTimestamp => "INVALID_ARGUMENT",
             GatewayErrorCode::InvalidIntegrity => "INVALID_ARGUMENT",
             GatewayErrorCode::PayloadTooLarge => "RESOURCE_EXHAUSTED",
             GatewayErrorCode::IdempotencyCapacity => "RESOURCE_EXHAUSTED",
+            GatewayErrorCode::IdempotencyInProgress => "ABORTED",
+            GatewayErrorCode::RateLimited => "RESOURCE_EXHAUSTED",
             GatewayErrorCode::PublishFailed => "UNAVAILABLE",
             GatewayErrorCode::Internal => "INTERNAL",
             GatewayErrorCode::SubjectTooLong => "INVALID_ARGUMENT",
@@ -423,6 +462,7 @@ impl GatewayError {
 
     pub(crate) fn grpc_status_value(&self) -> tonic::Status {
         let code = match self.grpc_status() {
+            "ABORTED" => tonic::Code::Aborted,
             "UNAUTHENTICATED" => tonic::Code::Unauthenticated,
             "PERMISSION_DENIED" => tonic::Code::PermissionDenied,
             "RESOURCE_EXHAUSTED" => tonic::Code::ResourceExhausted,
@@ -437,16 +477,22 @@ impl GatewayError {
             .first()
             .copied()
             .unwrap_or("Follow the documented recovery procedure.");
-        tonic::Status::new(
-            code,
+        let message = if matches!(
+            self.code,
+            GatewayErrorCode::Unauthenticated | GatewayErrorCode::InvalidAuthorization
+        ) {
+            "Authentication failed. Supply one valid bearer credential over the mTLS channel."
+                .to_owned()
+        } else {
             format!(
                 "{}: {} Cause: {} Next: {}",
                 self.code.as_str(),
                 self.summary,
                 self.cause,
                 next_step
-            ),
-        )
+            )
+        };
+        tonic::Status::new(code, message)
     }
 
     pub fn diagnostic_report(
@@ -509,10 +555,13 @@ impl GatewayError {
             GatewayErrorCode::InvalidEventId
             | GatewayErrorCode::InvalidEnvelope
             | GatewayErrorCode::InvalidStructure
+            | GatewayErrorCode::SecretExposure
             | GatewayErrorCode::InvalidTimestamp
             | GatewayErrorCode::InvalidIntegrity
             | GatewayErrorCode::PayloadTooLarge => "validation",
             GatewayErrorCode::IdempotencyCapacity => "durability",
+            GatewayErrorCode::IdempotencyInProgress => "durability",
+            GatewayErrorCode::RateLimited => "authentication",
             GatewayErrorCode::PublishFailed => "durability",
             GatewayErrorCode::Internal => "runtime",
             GatewayErrorCode::SubjectTooLong => "validation",

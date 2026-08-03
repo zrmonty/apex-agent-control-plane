@@ -4,17 +4,21 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 use apex_event_ingest::{
     ArchiveHttpPublisher, AsyncNatsJetStreamClient, AuthenticatedGrpcService,
     AuthenticatedHttpConfig, AuthenticatedIngestAdapter, BearerTokenResolver, BearerTokenVerifier,
-    Caller, DurableFanoutPublisher, GatewayError, IngestGateway, NatsJetStreamTransport,
-    NatsTlsConfig, RetryingDurableSink, RetryingJetStreamTransport, bounded_event_ingest_server,
+    Caller, DurableFanoutPublisher, FindingJournal, GatewayError, IngestGateway,
+    NatsJetStreamTransport, NatsTlsConfig, RetryingDurableSink, RetryingJetStreamTransport,
+    bounded_event_ingest_server,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 struct FileBearerResolver {
-    token: String,
+    token: Zeroizing<String>,
+    subject: String,
+    agent_id: Option<String>,
     scopes: Arc<HashSet<String>>,
 }
 
@@ -25,15 +29,22 @@ impl BearerTokenResolver for FileBearerResolver {
         if !constant_time_token_eq(token, &self.token) {
             return Err(apex_event_ingest::GatewayError::unauthenticated());
         }
-        Ok(Caller::authenticated(
-            "configured-file-token",
-            self.scopes.iter().cloned(),
-        ))
+        Ok(match &self.agent_id {
+            Some(agent_id) => Caller::authenticated_for_agent(
+                self.subject.clone(),
+                agent_id.clone(),
+                self.scopes.iter().cloned(),
+            ),
+            None => Caller::authenticated(self.subject.clone(), self.scopes.iter().cloned()),
+        })
     }
 }
 
 fn constant_time_token_eq(left: &str, right: &str) -> bool {
     const MAX_TOKEN_BYTES: usize = 4096;
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
     let left = left.as_bytes();
     let right = right.as_bytes();
     let mut difference = left.len() ^ right.len();
@@ -48,6 +59,42 @@ fn constant_time_token_eq(left: &str, right: &str) -> bool {
 fn required(name: &str) -> Result<String, io::Error> {
     env::var(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("{name} is required")))
+}
+
+fn bearer_subject() -> Result<String, io::Error> {
+    let subject =
+        env::var("APEX_BEARER_SUBJECT").unwrap_or_else(|_| "configured-file-token".to_owned());
+    validate_bearer_subject(&subject)?;
+    Ok(subject)
+}
+
+fn bearer_agent_id() -> Result<Option<String>, io::Error> {
+    let Some(agent_id) = env::var("APEX_BEARER_AGENT_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !valid_identifier(&agent_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_BEARER_AGENT_ID must be a safe 1-256 character identifier",
+        ));
+    }
+    Ok(Some(agent_id))
+}
+
+fn validate_bearer_subject(subject: &str) -> Result<(), io::Error> {
+    if subject.is_empty()
+        || subject.len() > 256
+        || subject.chars().any(|character| character.is_control())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_BEARER_SUBJECT must be 1-256 bytes and contain no control characters",
+        ));
+    }
+    Ok(())
 }
 
 fn startup_gateway_error(error: GatewayError) -> io::Error {
@@ -154,6 +201,12 @@ fn trusted_secret_path(
             format!("{label} is outside the trusted secret policy"),
         ));
     }
+    if _private && !apex_event_ingest::permissions::private_key_permissions_restricted(&canonical) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} permissions are too broad"),
+        ));
+    }
     #[cfg(unix)]
     if _private {
         use std::os::unix::fs::PermissionsExt;
@@ -201,7 +254,7 @@ fn attempts_value(value: Option<&str>) -> Result<usize, io::Error> {
         })
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::var("APEX_ALLOW_IN_MEMORY_IDEMPOTENCY").as_deref() != Ok("true") {
         return Err(io::Error::new(
@@ -268,7 +321,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let gateway = IngestGateway::with_idempotency_capacity(fanout, capacity);
+    let alert_capacity = env::var("APEX_SECURITY_ALERT_CAPACITY")
+        .unwrap_or_else(|_| "100000".to_owned())
+        .parse::<usize>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_SECURITY_ALERT_CAPACITY must be a positive integer",
+            )
+        })?;
+    let gateway = if let Some(journal_path) = optional_path("APEX_SECURITY_FINDINGS_FILE")? {
+        let journal_base = optional_path("APEX_SECURITY_FINDINGS_BASE")?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_SECURITY_FINDINGS_BASE is required when APEX_SECURITY_FINDINGS_FILE is set",
+            )
+        })?;
+        let journal = FindingJournal::open(&journal_path, &journal_base, alert_capacity)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        IngestGateway::with_idempotency_capacity(fanout, capacity).with_security_journal(journal)
+    } else {
+        IngestGateway::with_idempotency_capacity(fanout, capacity)
+            .with_security_store(alert_capacity)
+            .map_err(startup_gateway_error)?
+    };
     let token_path = trusted_secret_path(
         &path("APEX_BEARER_TOKEN_FILE")?,
         &trusted_base,
@@ -276,7 +352,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,
         "APEX_BEARER_TOKEN_FILE",
     )?;
-    let token = read_token(&token_path, "APEX_BEARER_TOKEN_FILE")?;
+    let token = Zeroizing::new(read_token(&token_path, "APEX_BEARER_TOKEN_FILE")?);
+    let subject = bearer_subject()?;
+    let agent_id = bearer_agent_id()?;
     let scopes_value = required("APEX_ALLOWED_SCOPES")?;
     if scopes_value.len() > 64 * 1024 {
         return Err(io::Error::new(
@@ -307,6 +385,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let verifier = BearerTokenVerifier::new(FileBearerResolver {
         token,
+        subject,
+        agent_id,
         scopes: Arc::new(scopes),
     });
     let service = AuthenticatedGrpcService::new(AuthenticatedIngestAdapter::new(gateway), verifier);
@@ -344,7 +424,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_ca = read_bounded(&client_ca_path, 1024 * 1024, "APEX_GATEWAY_CLIENT_CA_FILE")?;
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(server_cert, server_key))
-        .client_ca_root(Certificate::from_pem(client_ca));
+        .client_ca_root(Certificate::from_pem(client_ca))
+        // Keep this explicit so a tonic upgrade cannot silently make client
+        // certificates optional at the gRPC boundary.
+        .client_auth_optional(false);
     let listen = required("APEX_LISTEN_ADDR")?.parse()?;
     Server::builder()
         .tls_config(tls)?
@@ -368,11 +451,20 @@ fn valid_scope(value: &str) -> bool {
     })
 }
 
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         attempts_value, constant_time_token_eq, optional_path_value, read_bounded, read_token,
-        required, startup_gateway_error, trusted_secret_path, valid_scope,
+        required, startup_gateway_error, trusted_secret_path, valid_scope, validate_bearer_subject,
     };
     use apex_event_ingest::GatewayError;
     use std::fs;
@@ -380,6 +472,7 @@ mod tests {
 
     #[test]
     fn token_comparison_handles_length_boundaries_without_aliasing() {
+        assert!(!constant_time_token_eq("", ""));
         assert!(constant_time_token_eq("a", "a"));
         assert!(!constant_time_token_eq("a", "a\0"));
         assert!(!constant_time_token_eq(&"a".repeat(256), &"a".repeat(512)));
@@ -405,6 +498,14 @@ mod tests {
         assert_eq!(attempts_value(Some("8")).unwrap(), 8);
         assert!(attempts_value(Some("0")).is_err());
         assert!(attempts_value(Some("not-a-number")).is_err());
+    }
+
+    #[test]
+    fn bearer_subject_is_bounded_and_control_free() {
+        assert!(validate_bearer_subject("spiffe://apex/workload/agent-1").is_ok());
+        assert!(validate_bearer_subject("").is_err());
+        assert!(validate_bearer_subject(&"a".repeat(257)).is_err());
+        assert!(validate_bearer_subject("agent\n1").is_err());
     }
 
     #[test]

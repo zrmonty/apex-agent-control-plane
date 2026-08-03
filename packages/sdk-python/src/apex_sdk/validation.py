@@ -20,6 +20,7 @@ ACTOR_TYPES = frozenset({"user", "agent", "system", "schedule"})
 HASH = re.compile(r"^[0-9a-f]{64}$")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 CONTROL_ACTIONS = frozenset({"stop", "pause", "resume", "inject", "set_budget"})
+MAX_CONTROL_BUDGET_LIMIT = 1_000_000_000_000_000.0
 MAX_UNTRUSTED_CONTROL_CONTENT_BYTES = 32 * 1024
 
 
@@ -74,8 +75,8 @@ def _validate_control_data(data: Mapping[str, Any]) -> None:
     if set(parameters) != {"budget_kind", "limit"} or parameters["budget_kind"] not in {"tokens", "cost"}:
         raise EventValidationError("set_budget requires budget_kind of tokens or cost")
     limit = parameters["limit"]
-    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit <= 0:
-        raise EventValidationError("set_budget requires a positive limit that is finite")
+    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit <= 0 or limit > MAX_CONTROL_BUDGET_LIMIT:
+        raise EventValidationError("set_budget requires a positive limit that is finite and no greater than 1e15")
 
 
 def validate_event(event: Mapping[str, Any]) -> None:
@@ -101,6 +102,8 @@ def validate_event(event: Mapping[str, Any]) -> None:
         _id(event["parent_run_id"], "parent_run_id")
     if not isinstance(event["timestamp"], str) or not event["timestamp"].endswith("Z"):
         raise EventValidationError("timestamp must be UTC RFC 3339")
+    if event["timestamp"][:4] == "0000":
+        raise EventValidationError("timestamp year must be between 0001 and 9999")
     try:
         datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
     except ValueError as exc:

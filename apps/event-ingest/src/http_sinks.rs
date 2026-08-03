@@ -3,6 +3,7 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use prost::Message;
 
@@ -27,7 +28,7 @@ impl AuthenticatedHttpConfig {
     pub fn build_client(
         &self,
         trusted_base: &Path,
-    ) -> Result<(reqwest::blocking::Client, Option<String>), GatewayError> {
+    ) -> Result<(reqwest::blocking::Client, Option<Zeroizing<String>>), GatewayError> {
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|_| GatewayError::invalid_sink_configuration())?;
         if endpoint.scheme() != "https"
@@ -99,7 +100,7 @@ impl AuthenticatedHttpConfig {
         let token = self
             .bearer_token_file
             .as_ref()
-            .map(|path| read_token(path, &base))
+            .map(|path| read_token(path, &base).map(Zeroizing::new))
             .transpose()?;
         let client = builder.build().map_err(|_| GatewayError::internal())?;
         Ok((client, token))
@@ -179,6 +180,9 @@ fn canonical_secret_path(
             return Err(GatewayError::invalid_sink_configuration());
         }
     }
+    if _private_key && !crate::permissions::private_key_permissions_restricted(&canonical) {
+        return Err(GatewayError::invalid_sink_configuration());
+    }
     Ok(canonical)
 }
 
@@ -199,7 +203,7 @@ fn read_token(path: &Path, base: &Path) -> Result<String, GatewayError> {
 pub struct ClickHouseHttpPublisher {
     client: reqwest::blocking::Client,
     endpoint: String,
-    bearer_token: Option<String>,
+    bearer_token: Option<Zeroizing<String>>,
 }
 
 impl ClickHouseHttpPublisher {
@@ -224,7 +228,7 @@ impl DurableEventSink for ClickHouseHttpPublisher {
             .header("X-Apex-Event-Id", &event.event_id)
             .header("X-Apex-Event-Hash", &event_hash);
         if let Some(token) = &self.bearer_token {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.as_str());
         }
         let response = request.send().map_err(|_| GatewayError::publish_failed())?;
         if response.status().is_success() {
@@ -239,7 +243,7 @@ impl ClickHousePublisher for ClickHouseHttpPublisher {}
 pub struct ArchiveHttpPublisher {
     client: reqwest::blocking::Client,
     endpoint: String,
-    bearer_token: Option<String>,
+    bearer_token: Option<Zeroizing<String>>,
 }
 
 impl ArchiveHttpPublisher {
@@ -256,11 +260,7 @@ impl ArchiveHttpPublisher {
 impl DurableEventSink for ArchiveHttpPublisher {
     fn write_event(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
         let event_hash = validate_sink_event(event)?;
-        let url = format!(
-            "{}/{}.pb",
-            self.endpoint.trim_end_matches('/'),
-            event.event_id
-        );
+        let url = archive_event_url(&self.endpoint, &event.event_id)?;
         let mut request = self
             .client
             .put(url)
@@ -270,7 +270,7 @@ impl DurableEventSink for ArchiveHttpPublisher {
             .header("X-Apex-Event-Hash", &event_hash)
             .body(event.envelope.clone());
         if let Some(token) = &self.bearer_token {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.as_str());
         }
         let response = request.send().map_err(|_| GatewayError::publish_failed())?;
         if response.status().is_success() || response.status().as_u16() == 412 {
@@ -330,6 +330,18 @@ fn response_event_hash_matches(headers: &reqwest::header::HeaderMap, expected: &
     values.next().is_none() && value.to_str().ok().is_some_and(|value| value == expected)
 }
 
+fn archive_event_url(endpoint: &str, event_id: &str) -> Result<String, GatewayError> {
+    if !crate::is_lowercase_uuidv7(event_id) {
+        return Err(GatewayError::new(GatewayErrorCode::InvalidEventId));
+    }
+    let mut url =
+        reqwest::Url::parse(endpoint).map_err(|_| GatewayError::invalid_sink_configuration())?;
+    url.path_segments_mut()
+        .map_err(|_| GatewayError::invalid_sink_configuration())?
+        .push(&format!("{event_id}.pb"));
+    Ok(url.to_string())
+}
+
 fn http_failure(status: reqwest::StatusCode) -> GatewayError {
     match status.as_u16() {
         400 | 413 => GatewayError::new(GatewayErrorCode::InvalidEnvelope),
@@ -343,7 +355,8 @@ fn http_failure(status: reqwest::StatusCode) -> GatewayError {
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::{
-        canonical_secret_path, http_failure, read_secret, read_token, validate_sink_event,
+        archive_event_url, canonical_secret_path, http_failure, read_secret, read_token,
+        validate_sink_event,
     };
     use crate::{IngestRequest, proto};
     use prost::Message;
@@ -545,6 +558,17 @@ mod tests {
     }
 
     #[test]
+    fn archive_url_is_path_segment_safe_and_rejects_invalid_event_ids() {
+        let url = archive_event_url(
+            "https://archive.internal/v1/events",
+            "018f5c91-2d88-7c00-8000-000000000001",
+        )
+        .unwrap();
+        assert!(url.ends_with("/018f5c91-2d88-7c00-8000-000000000001.pb"));
+        assert!(archive_event_url("https://archive.internal/v1/events", "../secret").is_err());
+    }
+
+    #[test]
     fn token_reader_trims_only_safe_ascii_tokens() {
         let root = std::env::current_dir()
             .unwrap()
@@ -596,7 +620,7 @@ mod tests {
         let mut clickhouse = super::ClickHouseHttpPublisher {
             client: client.clone(),
             endpoint,
-            bearer_token: Some("test-token".to_owned()),
+            bearer_token: Some("test-token".to_owned().into()),
         };
         let result = crate::DurableEventSink::write_event(&mut clickhouse, &event);
         assert!(result.is_ok(), "{result:?}");

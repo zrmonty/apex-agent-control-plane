@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from .errors import ApexError
-from .validation import MAX_UNTRUSTED_CONTROL_CONTENT_BYTES, SAFE_IDENTIFIER
+from .validation import MAX_CONTROL_BUDGET_LIMIT, MAX_UNTRUSTED_CONTROL_CONTENT_BYTES, SAFE_IDENTIFIER
 
 
 class ControlAction(StrEnum):
@@ -57,8 +57,8 @@ class ControlCommand:
         if action is ControlAction.SET_BUDGET:
             if budget_kind not in {"tokens", "cost"}:
                 raise ControlValidationError("set_budget requires budget_kind of tokens or cost")
-            if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit <= 0:
-                raise ControlValidationError("set_budget requires a positive limit that is finite")
+            if not isinstance(limit, (int, float)) or isinstance(limit, bool) or not math.isfinite(limit) or limit <= 0 or limit > MAX_CONTROL_BUDGET_LIMIT:
+                raise ControlValidationError("set_budget requires a positive limit that is finite and no greater than 1e15")
             if content is not None:
                 raise ControlValidationError("set_budget does not accept content")
             return cls(action, enforcement, reason_code, {"budget_kind": budget_kind, "limit": limit})

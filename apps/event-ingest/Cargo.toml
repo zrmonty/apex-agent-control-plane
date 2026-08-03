@@ -17,6 +17,7 @@ serde_jcs = "0.2"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls"] }
+zeroize = "1.8"
 
 [build-dependencies]
 prost-build = "0.13"

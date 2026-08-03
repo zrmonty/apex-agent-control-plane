@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock
-from time import sleep
+from time import monotonic, sleep
 from typing import Any, Callable, Protocol
 
 from .errors import ApexError, ConfigurationError
@@ -72,6 +72,9 @@ class BoundedGrpcExporter:
         self._lock = Lock()
         self._stats = _ExporterStats(0, 0, 0, 0)
         self._consecutive_failures = 0
+        self._circuit_opened_at: float | None = None
+        self._probe_in_flight = False
+        self._circuit_cooldown_seconds = 30.0
 
     @property
     def stats(self) -> dict[str, int]:
@@ -98,7 +101,10 @@ class BoundedGrpcExporter:
         correlation = {"event_id": event_id}
         with self._lock:
             if self._consecutive_failures >= self._failure_threshold:
-                raise ExportDeliveryError("Ingest delivery circuit is open after repeated failures.", correlation=correlation, code="INGEST_CIRCUIT_OPEN", category="ingest", retryable=True, cause="The exporter reached its consecutive delivery-failure threshold.", recommended_next_steps=("Wait for ingest health to recover before retrying.", "Check recent ingest diagnostics using the event_id."), context={"failure_threshold": self._failure_threshold})
+                now = monotonic()
+                if self._circuit_opened_at is None or now - self._circuit_opened_at < self._circuit_cooldown_seconds or self._probe_in_flight:
+                    raise ExportDeliveryError("Ingest delivery circuit is open after repeated failures.", correlation=correlation, code="INGEST_CIRCUIT_OPEN", category="ingest", retryable=True, cause="The exporter reached its consecutive delivery-failure threshold.", recommended_next_steps=("Wait for the circuit half-open probe window.", "Check recent ingest diagnostics using the event_id."), context={"failure_threshold": self._failure_threshold})
+                self._probe_in_flight = True
         failure: ExportDeliveryError | None = None
         for attempt in range(1, self._max_attempts + 1):
             self._increment("attempted")
@@ -119,12 +125,17 @@ class BoundedGrpcExporter:
             self._increment("delivered" if inserted else "duplicates")
             with self._lock:
                 self._consecutive_failures = 0
+                self._circuit_opened_at = None
+                self._probe_in_flight = False
             return
         self._increment("failed")
         if failure is not None:
             failure.context["attempt_count"] = attempt
         with self._lock:
             self._consecutive_failures += 1
+            if self._consecutive_failures >= self._failure_threshold:
+                self._circuit_opened_at = monotonic()
+            self._probe_in_flight = False
         raise failure or ExportDeliveryError(correlation=correlation)
 
     def close(self) -> None:

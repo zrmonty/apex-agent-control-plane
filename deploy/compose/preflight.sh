@@ -68,6 +68,16 @@ object_lock="$(require_value APEX_ARCHIVE_REQUIRE_OBJECT_LOCK)"
 bucket="$(require_value APEX_ARCHIVE_BUCKET)"
 [[ "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail 'APEX_ARCHIVE_BUCKET must be lowercase DNS-safe text'
 
+bind="$(env_value APEX_INGEST_BIND)"
+bind="${bind:-127.0.0.1}"
+allow_nonlocal="$(env_value APEX_ALLOW_NONLOCAL_INGEST_BIND)"
+if [[ "$bind" != 127.0.0.1 && "$bind" != ::1 && "$bind" != localhost && "$allow_nonlocal" != true ]]; then
+  fail 'APEX_INGEST_BIND is non-local; set APEX_ALLOW_NONLOCAL_INGEST_BIND=true only with an approved network policy and client-certificate boundary'
+fi
+if [[ "$allow_nonlocal" == true && ( "$bind" == 0.0.0.0 || "$bind" == :: ) ]]; then
+  printf 'Compose preflight warning: ingest is exposed on every interface; verify firewalling and mTLS before continuing.\n' >&2
+fi
+
 command -v docker >/dev/null 2>&1 || fail 'Docker CLI is not installed'
 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || fail 'Docker daemon is unavailable; start Docker Desktop or the configured daemon'
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet || fail 'rendered Compose configuration is invalid'

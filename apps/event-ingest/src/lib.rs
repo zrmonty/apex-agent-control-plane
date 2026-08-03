@@ -9,7 +9,10 @@ mod auth;
 mod errors;
 mod gateway;
 mod http_sinks;
+mod idempotency;
 mod nats;
+mod outbox;
+pub mod permissions;
 mod persistence;
 mod publisher;
 mod security;
@@ -25,7 +28,12 @@ pub use errors::{
 };
 pub use gateway::{AuthenticatedIngestAdapter, EventPublisher, IngestGateway, IngestOutcome};
 pub use http_sinks::{ArchiveHttpPublisher, AuthenticatedHttpConfig, ClickHouseHttpPublisher};
+pub use idempotency::{
+    IdempotencyKey, IdempotencyReservation, IdempotencyStore, InMemoryIdempotencyStore,
+    ReservationResult,
+};
 pub use nats::{AsyncNatsJetStreamClient, NatsClient, NatsJetStreamTransport, NatsTlsConfig};
+pub use outbox::{EnqueueResult, EventOutbox, InMemoryOutbox, OutboxKey, OutboxedPublisher};
 pub use persistence::{FindingJournal, FindingPersistenceError};
 pub use publisher::{
     InMemoryPublisher, JetStreamPublisher, JetStreamTransport, RetryingJetStreamTransport,
@@ -34,7 +42,7 @@ pub use security::{
     ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingError,
     FindingErrorCode, FindingInput, FindingSeverity, FindingStatus, FindingStatusUpdate,
     FindingStore, FindingType, PolicyDecision, SecurityFinding, SecuritySignal, detect_and_record,
-    new_finding,
+    detection_finding, new_finding,
 };
 pub use sinks::{
     ArchivePublisher, ClickHousePublisher, DurableEventSink, DurableFanoutPublisher,
