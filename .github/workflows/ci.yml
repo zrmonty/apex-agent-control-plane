@@ -18,9 +18,8 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: |
-          python -m pip install -U pip
-          python -m pip install -e ".[dev]" 2>/dev/null || python -m pip install -e .
-          python -m pip install pytest pytest-cov cryptography
+          python -m pip install --upgrade pip
+          python -m pip install --editable ".[dev]"
       - name: Test
         env:
           TEMP: /tmp
@@ -36,9 +35,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Test (core features)
-        run: cargo test --lib --features "test-support,valkey,postgres"
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo test --locked --lib --features "test-support,valkey,postgres"
       - name: Clippy
-        run: cargo clippy --all-targets --features "test-support,valkey,postgres" -- -D warnings
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo clippy --locked --all-targets --features "test-support,valkey,postgres" -- -D warnings
 
   signed-bundles:
     runs-on: ubuntu-latest
@@ -51,5 +56,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: |
-          python -m pip install -U pip cryptography pytest
-          PYTHONPATH=src python -m pytest tests/test_bundle_signing.py -q
+          python -m pip install --upgrade pip
+          python -m pip install --editable ".[test]"
+          python -m pytest tests/test_bundle_signing.py -q --no-cov

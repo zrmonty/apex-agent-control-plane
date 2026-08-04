@@ -536,7 +536,7 @@ def load_trust_public_keys(
             continue
         try:
             pem = path.read_text(encoding="ascii")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise BundleSignatureError(f"could not read trust key {key_id}") from exc
         _load_public_key(pem)
         fp = fingerprint_public_key(pem)
