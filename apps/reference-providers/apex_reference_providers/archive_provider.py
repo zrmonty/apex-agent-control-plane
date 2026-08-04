@@ -13,7 +13,6 @@ The ingest gateway never imports cloud SDKs; only this adapter process does.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from http.server import ThreadingHTTPServer
