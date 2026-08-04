@@ -48,16 +48,12 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
-          # Absolute bind-mount for reference providers (reliable on GitHub runners).
-          export APEX_REFERENCE_PROVIDERS_SRC="${GITHUB_WORKSPACE}/apps/reference-providers/apex_reference_providers"
-          export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256)"
-          test -d "$APEX_REFERENCE_PROVIDERS_SRC"
-          echo "Providers mount: $APEX_REFERENCE_PROVIDERS_SRC"
-          # Avoid `ls | head` under pipefail (SIGPIPE can fail the step).
-          ls -la "$APEX_REFERENCE_PROVIDERS_SRC"
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256 || true)"
           docker compose -f compose.yaml down --remove-orphans || true
+          docker compose -f compose.yaml build clickhouse-projection archive-provider
           docker compose -f compose.yaml up -d --force-recreate --remove-orphans
           docker compose -f compose.yaml ps -a
+          docker compose -f compose.yaml logs --tail 50
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
         working-directory: deploy/compose

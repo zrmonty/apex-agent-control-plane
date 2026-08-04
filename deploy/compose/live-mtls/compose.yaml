@@ -10,7 +10,7 @@ name: apex-live-mtls
 
 services:
   valkey:
-    image: valkey/valkey@sha256:70956f1339ef77d8dae58459c1ff282a74a88ca68d281f4d816dfc74a6ba916b
+    image: valkey/valkey:8.0
     # Official entrypoint drops privileges; keep a minimal capability set for local live tests.
     user: "0:0"
     entrypoint: ["valkey-server"]
@@ -35,7 +35,7 @@ services:
     tmpfs: [/tmp, /data]
 
   jetstream:
-    image: nats@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+    image: nats:2.10
     command: ["--config", "/run/secrets/nats_config"]
     ports:
       - "127.0.0.1:14222:4222"
@@ -56,13 +56,13 @@ services:
     tmpfs: [/tmp, /data]
 
   clickhouse-projection:
-    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    build:
+      context: ../../../apps/reference-providers
+      dockerfile: Dockerfile
+    image: apex-reference-providers:live-mtls
     working_dir: /app
     command:
       [
-        "python",
-        "-m",
-        "apex_reference_providers",
         "clickhouse_projection",
         "--bind",
         "0.0.0.0",
@@ -79,13 +79,11 @@ services:
       ]
     ports:
       - "127.0.0.1:18443:8443"
-    volumes:
-      # Override with absolute path in CI via APEX_REFERENCE_PROVIDERS_SRC.
-      - ${APEX_REFERENCE_PROVIDERS_SRC:-../../../apps/reference-providers/apex_reference_providers}:/app/apex_reference_providers:ro
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      # Optional write binding; empty allows any CA-trusted client (lab default).
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     networks: [live-mtls]
     secrets:
       - source: clickhouse_server_cert
@@ -97,26 +95,15 @@ services:
         target: ca
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    # Keep a simple start signal for compose tooling / operators.
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8443),2); s.close()\"",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 5s
 
   archive-provider:
-    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    build:
+      context: ../../../apps/reference-providers
+      dockerfile: Dockerfile
+    image: apex-reference-providers:live-mtls
     working_dir: /app
     command:
       [
-        "python",
-        "-m",
-        "apex_reference_providers",
         "archive_provider",
         "--bind",
         "0.0.0.0",
@@ -133,12 +120,10 @@ services:
       ]
     ports:
       - "127.0.0.1:18444:8444"
-    volumes:
-      - ${APEX_REFERENCE_PROVIDERS_SRC:-../../../apps/reference-providers/apex_reference_providers}:/app/apex_reference_providers:ro
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     networks: [live-mtls]
     secrets:
       - source: archive_server_cert
@@ -150,16 +135,6 @@ services:
         target: ca
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8444),2); s.close()\"",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 5s
 
 networks:
   live-mtls:

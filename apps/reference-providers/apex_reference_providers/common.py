@@ -70,13 +70,25 @@ class DiagnosticHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def require_authorized_client(self) -> bool:
-        """Bind the reference write APIs to one expected mTLS client leaf."""
-        expected = os.environ.get("APEX_PROVIDER_CLIENT_CERT_SHA256", "").lower()
+        """Bind write APIs to one expected mTLS client leaf when configured.
+
+        If ``APEX_PROVIDER_CLIENT_CERT_SHA256`` is unset/empty, any client that
+        completed mTLS against the configured client CA is accepted (lab default).
+        """
+        expected = os.environ.get("APEX_PROVIDER_CLIENT_CERT_SHA256", "").strip().lower()
+        if not expected:
+            return True
         certificate = self.connection.getpeercert(binary_form=True)
         actual = hashlib.sha256(certificate).hexdigest() if certificate else ""
-        if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected) and hmac.compare_digest(expected, actual):
+        if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected) and hmac.compare_digest(
+            expected, actual
+        ):
             return True
-        self.send_diagnostic(403, "CLIENT_IDENTITY_DENIED", "The mTLS client certificate is not authorized for provider writes.")
+        self.send_diagnostic(
+            403,
+            "CLIENT_IDENTITY_DENIED",
+            "The mTLS client certificate is not authorized for provider writes.",
+        )
         return False
 
     def read_body(self, max_bytes: int = MAX_EVENT_BYTES) -> bytes | None:

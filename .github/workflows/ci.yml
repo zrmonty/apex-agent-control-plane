@@ -52,13 +52,8 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        # Lint the library only (same code path as unit tests). Integration
-        # harnesses under tests/ remain covered by cargo test jobs / live-mtls.
-        run: |
-          set -euo pipefail
-          rustc --version
-          cargo clippy --version
-          cargo clippy --locked --lib --features test-support -- -D warnings
+        # Lint the library only (same code path as unit tests).
+        run: cargo clippy --locked --lib --features test-support -- -D warnings
 
   signed-bundles:
     runs-on: ubuntu-latest
