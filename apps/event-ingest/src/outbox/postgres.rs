@@ -3,11 +3,12 @@
 use std::str::FromStr;
 
 use postgres::{Client, NoTls};
+use prost::Message;
 use uuid::Uuid;
 
 use super::types::{EnqueueResult, EventOutbox, OutboxKey};
 use crate::{
-    GatewayError, GatewayErrorCode, IngestRequest, is_lowercase_uuidv7, is_scope_identifier,
+    GatewayError, GatewayErrorCode, IngestRequest, is_lowercase_uuidv7, is_scope_identifier, proto,
 };
 
 /// Authoritative outbox backed by `deploy/postgres/outbox.sql`.
@@ -148,14 +149,21 @@ impl EventOutbox for PostgresOutbox {
         for row in rows {
             let workspace_id: String = row.get(0);
             let namespace_id: String = row.get(1);
-            let event_id: Uuid = row.get(2);
+            let _event_id: Uuid = row.get(2);
             let envelope: Vec<u8> = row.get(3);
-            events.push(IngestRequest::new(
-                event_id.to_string(),
-                workspace_id,
-                namespace_id,
-                envelope,
-            ));
+            let Ok(decoded) = proto::EventEnvelope::decode(envelope.as_slice()) else {
+                continue;
+            };
+            // Rows are untrusted durable state. Re-run the same envelope
+            // validation used at admission instead of constructing an
+            // unchecked request from database columns.
+            let Ok(event) = IngestRequest::from_validated_transport(decoded) else {
+                continue;
+            };
+            if event.scope_key() != format!("{workspace_id}/{namespace_id}") {
+                continue;
+            }
+            events.push(event);
         }
         events
     }

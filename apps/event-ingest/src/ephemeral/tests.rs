@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "valkey")]
 use std::collections::HashMap;
 use std::time::Duration;
 

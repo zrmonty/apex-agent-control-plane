@@ -83,6 +83,7 @@ impl std::fmt::Display for EphemeralError {
 impl std::error::Error for EphemeralError {}
 
 pub(crate) const MAX_FINGERPRINT_HEX: usize = 64;
+#[cfg(feature = "valkey")]
 pub(crate) const KEY_PREFIX: &str = "apex:ingest";
 
 pub(crate) fn validate_rate_key(key: &RateLimitKey) -> Result<(), EphemeralError> {
@@ -120,14 +121,17 @@ pub(crate) fn validate_deny_key(key: &DenyHintKey) -> Result<(), EphemeralError>
     Ok(())
 }
 
+#[cfg(feature = "valkey")]
 pub(crate) fn rate_limit_redis_key(key: &RateLimitKey) -> String {
     format!("{KEY_PREFIX}:rl:{}:{}", key.namespace, key.bucket)
 }
 
+#[cfg(feature = "valkey")]
 pub(crate) fn fingerprint_redis_key(key: &FingerprintCounterKey) -> String {
     format!("{KEY_PREFIX}:fp:{}:{}", key.namespace, key.fingerprint_hex)
 }
 
+#[cfg(feature = "valkey")]
 pub(crate) fn deny_hint_redis_key(key: &DenyHintKey) -> String {
     format!(
         "{KEY_PREFIX}:deny:{}:{}",

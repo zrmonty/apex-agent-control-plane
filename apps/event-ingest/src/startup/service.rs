@@ -237,7 +237,9 @@ where
     P: apex_event_ingest::EventPublisher + Send + 'static,
     V: apex_event_ingest::CallerVerifier,
 {
-    use apex_event_ingest::{EphemeralStore, FallbackEphemeralStore, InMemoryEphemeralStore};
+    use apex_event_ingest::{EphemeralStore, InMemoryEphemeralStore};
+    #[cfg(feature = "valkey")]
+    use apex_event_ingest::FallbackEphemeralStore;
     use std::sync::Mutex;
 
     // Always install a process-local store. When Valkey is configured and the
