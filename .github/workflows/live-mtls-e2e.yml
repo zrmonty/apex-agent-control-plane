@@ -44,47 +44,29 @@ jobs:
           print("APEX_BEARER_CERT_SHA256=" + fp)
           PY
 
-      - name: Start live-mTLS stack (force recreate so mounts match new PKI)
+      - name: Start and wait for live-mTLS stack
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
           export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256 || true)"
+          export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml build clickhouse-projection archive-provider
-          docker compose -f compose.yaml up -d --force-recreate --remove-orphans
-          sleep 8
+          # Compose --wait uses service healthchecks (internal container ports).
+          docker compose -f compose.yaml up -d --force-recreate --remove-orphans --wait --wait-timeout 180
           docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 100
-          # Soft diagnostics only — wait step enforces readiness.
-          python - <<'PY'
-          import socket
-          for port in (14222, 16379, 18443, 18444):
-              try:
-                  with socket.create_connection(("127.0.0.1", port), timeout=3):
-                      print(f"port {port} open")
-              except OSError as exc:
-                  print(f"port {port} not open yet: {exc}")
-          PY
-
-      - name: Wait for live-mTLS services
-        working-directory: deploy/compose/live-mtls
-        run: |
-          set -eu
-          export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256 || true)"
-          # Wait immediately after start (before e2e compose) so ports stay free of cross-project noise.
+          docker compose -f compose.yaml logs --tail 50
+          # Host port reachability for cargo tests.
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
-            --attempts 90 \
+            --attempts 30 \
             --sleep 2 \
             --tcp-only
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
-            --attempts 20 \
+            --attempts 15 \
             --sleep 2 \
             || echo "HTTPS /health probe did not pass; cargo tests will verify mTLS."
-          docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 40
 
       - name: Start E2E compose (Postgres, MinIO)
         working-directory: deploy/compose

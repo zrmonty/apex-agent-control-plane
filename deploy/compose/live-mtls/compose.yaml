@@ -96,6 +96,16 @@ services:
         target: ca
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8443),2); s.close()\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
 
   archive-provider:
     build:
@@ -136,6 +146,16 @@ services:
         target: ca
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket; s=socket.create_connection(('127.0.0.1',8444),2); s.close()\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
 
 networks:
   live-mtls:
