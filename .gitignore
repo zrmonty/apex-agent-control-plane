@@ -10,9 +10,11 @@ Thumbs.db
 
 # JavaScript
 node_modules/
+.pnpm-store/
 dist/
 .next/
 coverage/
+*.tsbuildinfo
 
 # Python
 __pycache__/

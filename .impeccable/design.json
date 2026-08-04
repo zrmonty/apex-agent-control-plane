@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-03T00:00:00Z",
+  "title": "Design System: Apex Agent Control Plane",
+  "extensions": {
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Operations Canvas", "canonical": "#f7f8fc", "tonalRamp": ["#14213a", "#344259", "#60708b", "#a1adbd", "#cdd6e5", "#e0e6f0", "#f0f3f8", "#f7f8fc"] },
+      "primary": { "role": "primary", "displayName": "Route Cobalt", "canonical": "#263ac2", "tonalRamp": ["#111c6e", "#182aa8", "#263ac2", "#4355c9", "#7584df", "#a5aff0", "#d5d9fb", "#eff0ff"] }
+    },
+    "motion": [{ "name": "node-arrive", "value": "cubic-bezier(.16,1,.3,1)", "purpose": "Brings topology nodes into the map in causal order." }],
+    "breakpoints": [{ "name": "sidebar-collapse", "value": "980px" }, { "name": "mobile-map", "value": "700px" }]
+  },
+  "components": [{ "name": "Connect Button", "kind": "button", "refersTo": "button-primary", "description": "Starts agent connection setup.", "html": "<button class=\"ds-connect\">CONNECT AN AGENT</button>", "css": ".ds-connect { background:#263ac2; border:0; border-radius:8px; color:#fff; cursor:pointer; font:800 12px Manrope,sans-serif; padding:13px 16px; } .ds-connect:hover { background:#182aa8; } .ds-connect:focus-visible { outline:3px solid #7584df; outline-offset:3px; }" }],
+  "narrative": { "northStar": "The Operations Map", "overview": "Apex presents scope, durable flow, and evidence storage as a readable topology before it presents a queue of records.", "keyCharacteristics": ["Light workspace and compact utility sidebar.", "Cobalt routes signal safe movement.", "Topology canvas before metric walls."], "rules": [{ "name": "Map-Only Grid Rule", "body": "Fine grid lines are permitted only inside an actual topology or measurement canvas.", "section": "layout" }], "dos": ["Do make scope, event path, and evidence destination readable together."], "donts": ["Don't lead with metric cards, decorative gradients, or an arbitrary dark dashboard shell."] }
+}
