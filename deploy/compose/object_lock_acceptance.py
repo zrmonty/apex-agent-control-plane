@@ -110,6 +110,15 @@ def main() -> None:
     parsed = urlparse(args.endpoint)
     endpoint = f"{parsed.scheme}://{parsed.netloc}"
     verify: bool | str = args.ca_file if args.ca_file else True
+    # Newer botocore defaults can force flexible checksums that MinIO rejects on
+    # LegalHold with MissingContentMD5. Prefer when_required when supported.
+    client_config_kwargs = {"signature_version": "s3v4"}
+    try:
+        client_config_kwargs["request_checksum_calculation"] = "when_required"
+        client_config_kwargs["response_checksum_validation"] = "when_required"
+        client_config = Config(**client_config_kwargs)
+    except TypeError:
+        client_config = Config(signature_version="s3v4")
     s3 = boto3.client(
         "s3",
         endpoint_url=endpoint,
@@ -117,7 +126,7 @@ def main() -> None:
         aws_secret_access_key=secret,
         region_name="us-east-1",
         verify=verify,
-        config=Config(signature_version="s3v4"),
+        config=client_config,
     )
 
     key = "object-lock-acceptance/probe.bin"
