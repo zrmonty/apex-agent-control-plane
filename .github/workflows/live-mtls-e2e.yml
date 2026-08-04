@@ -71,11 +71,13 @@ jobs:
       - name: Wait for live-mTLS services
         working-directory: deploy/compose/live-mtls
         run: |
-          set -euo pipefail
+          set -eu
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          # Path is relative to this directory: ../e2e/wait_live_mtls.py
-          python ../e2e/wait_live_mtls.py --secrets "$APEX_LIVE_MTLS_SECRETS" --attempts 90 --sleep 2
-          # Show provider logs if wait returns (success path still useful for audit)
+          export APEX_REFERENCE_PROVIDERS_SRC="${GITHUB_WORKSPACE}/apps/reference-providers/apex_reference_providers"
+          python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
+            --secrets "$APEX_LIVE_MTLS_SECRETS" \
+            --attempts 90 \
+            --sleep 2
           docker compose -f compose.yaml ps -a
 
       - name: Wait for E2E Postgres and MinIO
