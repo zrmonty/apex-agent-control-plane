@@ -52,8 +52,20 @@ jobs:
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml build clickhouse-projection archive-provider
           docker compose -f compose.yaml up -d --force-recreate --remove-orphans
+          sleep 3
           docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 50
+          docker compose -f compose.yaml logs --tail 80
+          # Fail the start step if any container already exited (bind/config crash).
+          if docker compose -f compose.yaml ps -a | grep -E 'Exit|exited|dead'; then
+            echo "A live-mTLS container exited immediately." >&2
+            exit 1
+          fi
+          # Confirm host ports are published.
+          ss -lnt | grep -E ':(14222|16379|18443|18444)\s' || {
+            echo "Expected host ports not listening." >&2
+            docker compose -f compose.yaml ps -a
+            exit 1
+          }
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
         working-directory: deploy/compose
