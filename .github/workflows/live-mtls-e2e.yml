@@ -52,20 +52,33 @@ jobs:
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml build clickhouse-projection archive-provider
           docker compose -f compose.yaml up -d --force-recreate --remove-orphans
-          sleep 3
+          sleep 5
           docker compose -f compose.yaml ps -a
           docker compose -f compose.yaml logs --tail 80
-          # Fail the start step if any container already exited (bind/config crash).
-          if docker compose -f compose.yaml ps -a | grep -E 'Exit|exited|dead'; then
-            echo "A live-mTLS container exited immediately." >&2
+          # Fail if any service is not running.
+          running="$(docker compose -f compose.yaml ps --status running --services | wc -l | tr -d ' ')"
+          echo "Running services count: $running"
+          if [ "$running" -lt 4 ]; then
+            echo "Expected 4 running services (valkey jetstream clickhouse archive)." >&2
+            docker compose -f compose.yaml ps -a
+            docker compose -f compose.yaml logs --tail 120
             exit 1
           fi
-          # Confirm host ports are published.
-          ss -lnt | grep -E ':(14222|16379|18443|18444)\s' || {
-            echo "Expected host ports not listening." >&2
-            docker compose -f compose.yaml ps -a
-            exit 1
-          }
+          # Confirm host ports accept TCP (no ss dependency).
+          python - <<'PY'
+          import socket
+          import sys
+          failed = []
+          for port in (14222, 16379, 18443, 18444):
+              try:
+                  with socket.create_connection(("127.0.0.1", port), timeout=3):
+                      print(f"port {port} open")
+              except OSError as exc:
+                  failed.append(f"{port}: {exc}")
+          if failed:
+              print("ports not open:", "; ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          PY
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
         working-directory: deploy/compose
