@@ -253,6 +253,7 @@ fn secret_reader_enforces_trusted_base_and_size() {
 
 #[test]
 fn publishers_use_local_http_server_for_success_and_failure_paths() {
+    crate::install_rustls_provider();
     let event = valid_event();
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -306,6 +307,7 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
 
 #[test]
 fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
+    crate::install_rustls_provider();
     let event = valid_event();
     let (endpoint, handle) = local_http_server(412, "X-Apex-Event-Hash: wrong\r\n");
     let mut archive = ArchiveHttpPublisher {
