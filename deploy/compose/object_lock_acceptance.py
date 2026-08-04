@@ -87,6 +87,11 @@ def main() -> None:
     )
     parser.add_argument("--bucket", default=os.environ.get("MINIO_BUCKET", "apex-events"))
     parser.add_argument("--ca-file", default=os.environ.get("MINIO_CA_FILE"))
+    parser.add_argument(
+        "--allow-missing-legal-hold",
+        action="store_true",
+        help="report partial assurance instead of failing when the provider cannot prove legal hold",
+    )
     args = parser.parse_args()
     access = _cred("MINIO_ACCESS_KEY") or _cred("MINIO_ROOT_USER")
     secret = _cred("MINIO_SECRET_KEY") or _cred("MINIO_ROOT_PASSWORD")
@@ -171,10 +176,13 @@ def main() -> None:
         print("legal hold ok")
     except ClientError as err:
         code = err.response.get("Error", {}).get("Code", "")
-        # Some MinIO builds require Content-MD5 on this API; retention+version
-        # still prove Object-Lock enablement for Phase 0 acceptance.
         if code in {"MissingContentMD5", "NotImplemented", "InvalidRequest"}:
-            print(f"legal hold API skipped ({code}); Object-Lock retention remains verified")
+            if not args.allow_missing_legal_hold:
+                raise SystemExit(
+                    f"legal hold proof is required for strict retention acceptance ({code}); "
+                    "use --allow-missing-legal-hold only for an explicitly partial local check"
+                ) from err
+            print(f"legal hold API skipped ({code}); retention check is PARTIAL")
         else:
             raise
 
