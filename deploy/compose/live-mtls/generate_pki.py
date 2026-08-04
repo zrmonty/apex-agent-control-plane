@@ -44,8 +44,11 @@ def _write_key(path: Path, key: rsa.RSAPrivateKey) -> None:
             encryption_algorithm=serialization.NoEncryption(),
         )
     )
+    # Lab-only: 0644 so Docker Compose file-secrets are readable by nats/python
+    # containers. Compose on Linux ignores secret mode/uid/gid. Do not reuse
+    # these keys in production (production mounts use 0400 operator secrets).
     try:
-        path.chmod(0o600)
+        path.chmod(0o644)
     except OSError:
         pass
 
@@ -53,6 +56,10 @@ def _write_key(path: Path, key: rsa.RSAPrivateKey) -> None:
 def _write_cert(path: Path, cert: x509.Certificate) -> None:
     _prepare_write(path)
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    try:
+        path.chmod(0o644)
+    except OSError:
+        pass
 
 
 def _write_runtime_secret(path: Path) -> None:

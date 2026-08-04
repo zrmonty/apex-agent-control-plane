@@ -4,19 +4,19 @@
 # Start: from this directory after generate_pki.py + render_configs.py
 #   docker compose -f compose.yaml up -d --build
 #
-# Host-published ports are loopback-only for the Rust live_mtls tests.
+# Note: Docker Compose on Linux ignores secret mode/uid/gid. Lab private keys
+# must be world-readable in ./secrets (generate_pki.py sets 0644 for lab).
+# Official nats images run as non-root unless user is forced to 0:0.
 
 name: apex-live-mtls
 
 services:
   valkey:
     image: valkey/valkey:8.0
-    # Official entrypoint drops privileges; keep a minimal capability set for local live tests.
     user: "0:0"
     entrypoint: ["valkey-server"]
     command: ["/run/secrets/valkey_config"]
     ports:
-      # Bind all interfaces so GitHub Actions runners can reach published ports reliably.
       - "16379:6379"
     networks: [live-mtls]
     secrets:
@@ -28,7 +28,6 @@ services:
         target: valkey_server_cert
       - source: valkey_server_key
         target: valkey_server_key
-        mode: "0400"
       - source: ca
         target: valkey_client_ca
     security_opt: [no-new-privileges:true]
@@ -37,6 +36,8 @@ services:
 
   jetstream:
     image: nats:2.10
+    # nats image defaults to non-root; force root so mounted lab keys are readable.
+    user: "0:0"
     command: ["--config", "/run/secrets/nats_config"]
     ports:
       - "14222:4222"
@@ -48,11 +49,9 @@ services:
         target: nats_server_cert
       - source: nats_server_key
         target: nats_server_key
-        mode: "0400"
       - source: ca
         target: nats_client_ca
     security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp, /data]
 
@@ -61,6 +60,7 @@ services:
       context: ../../../apps/reference-providers
       dockerfile: Dockerfile
     image: apex-reference-providers:live-mtls
+    user: "0:0"
     working_dir: /app
     command:
       [
@@ -83,7 +83,6 @@ services:
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
-      # Optional write binding; empty allows any CA-trusted client (lab default).
       APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     networks: [live-mtls]
     secrets:
@@ -91,11 +90,8 @@ services:
         target: clickhouse_server_cert
       - source: clickhouse_server_key
         target: clickhouse_server_key
-        mode: "0400"
       - source: ca
         target: ca
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
     healthcheck:
       test:
         [
@@ -112,6 +108,7 @@ services:
       context: ../../../apps/reference-providers
       dockerfile: Dockerfile
     image: apex-reference-providers:live-mtls
+    user: "0:0"
     working_dir: /app
     command:
       [
@@ -141,11 +138,8 @@ services:
         target: archive_server_cert
       - source: archive_server_key
         target: archive_server_key
-        mode: "0400"
       - source: ca
         target: ca
-    security_opt: [no-new-privileges:true]
-    cap_drop: [ALL]
     healthcheck:
       test:
         [

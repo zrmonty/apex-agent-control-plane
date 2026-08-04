@@ -12,9 +12,6 @@ jobs:
   live-mtls-and-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Do not fail the overall commit status when only this optional Docker path fails.
-    # Required checks remain the "CI" workflow (python-sdk / rust-ingest / signed-bundles).
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +31,10 @@ jobs:
           set -euo pipefail
           python generate_pki.py --out secrets
           python render_configs.py
+          # Ensure mounted private keys are readable inside containers (lab only).
+          # Host-generated 0600 keys + non-root image users → permission denied on CI.
+          chmod 644 secrets/*.pem secrets/*.key 2>/dev/null || true
+          chmod 644 secrets/nats.conf secrets/valkey.conf secrets/valkey.acl 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
           fi
