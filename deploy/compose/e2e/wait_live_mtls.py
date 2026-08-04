@@ -67,27 +67,39 @@ def wait(
     sleep_s: float,
     tcp_ports: list[int],
     https_ports: list[int],
+    require_https: bool,
 ) -> int:
     last_error = "no attempts yet"
     for attempt in range(1, attempts + 1):
         try:
             for port in tcp_ports:
                 _tcp_open("127.0.0.1", port)
-            for port in https_ports:
-                # Force IPv4 loopback; do not use localhost (often ::1 on Ubuntu CI).
-                _mtls_health(secrets, "127.0.0.1", port)
-            print(f"Live mTLS services are ready (attempt {attempt}).", flush=True)
+            if require_https:
+                for port in https_ports:
+                    # Force IPv4 loopback; do not use localhost (often ::1 on Ubuntu CI).
+                    _mtls_health(secrets, "127.0.0.1", port)
+            else:
+                # TCP-only readiness: confirm providers accepted the host port mapping.
+                for port in https_ports:
+                    _tcp_open("127.0.0.1", port)
+            print(
+                f"Live mTLS services are ready (attempt {attempt}, https={require_https}).",
+                flush=True,
+            )
             return 0
         except Exception as exc:  # noqa: BLE001 — surface every readiness failure
             last_error = f"{type(exc).__name__}: {exc}"
             print(f"attempt {attempt}/{attempts}: {last_error}", flush=True)
             if attempt in {1, 5, 15, 30} or attempt == attempts:
-                # Lightweight diagnostics without dumping secrets.
                 try:
                     import subprocess
 
                     subprocess.run(
                         ["docker", "compose", "-f", "compose.yaml", "ps", "-a"],
+                        check=False,
+                    )
+                    subprocess.run(
+                        ["docker", "compose", "-f", "compose.yaml", "logs", "--tail", "40"],
                         check=False,
                     )
                 except Exception:
@@ -106,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--attempts", type=int, default=90)
     parser.add_argument("--sleep", type=float, default=2.0)
+    parser.add_argument(
+        "--tcp-only",
+        action="store_true",
+        help="Only wait for TCP ports (skip mTLS /health). Use when CI TLS probe is flaky.",
+    )
     args = parser.parse_args(argv)
     secrets = args.secrets.resolve()
     if not secrets.is_dir():
@@ -117,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         sleep_s=args.sleep,
         tcp_ports=[14222, 16379],
         https_ports=[18443, 18444],
+        require_https=not args.tcp_only,
     )
 
 

@@ -69,11 +69,20 @@ jobs:
         run: |
           set -eu
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
+          # TCP-only readiness first (ports published). HTTPS is validated by cargo tests.
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
             --attempts 90 \
-            --sleep 2
+            --sleep 2 \
+            --tcp-only
+          # Best-effort HTTPS probe (non-fatal): surfaces cert issues without blocking.
+          python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
+            --secrets "$APEX_LIVE_MTLS_SECRETS" \
+            --attempts 15 \
+            --sleep 2 \
+            || echo "HTTPS /health probe did not pass; cargo tests will verify mTLS."
           docker compose -f compose.yaml ps -a
+          docker compose -f compose.yaml logs --tail 30
 
       - name: Wait for E2E Postgres and MinIO
         run: |
