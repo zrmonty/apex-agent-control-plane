@@ -73,7 +73,6 @@ jobs:
         run: |
           set -eu
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          export APEX_REFERENCE_PROVIDERS_SRC="${GITHUB_WORKSPACE}/apps/reference-providers/apex_reference_providers"
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
             --attempts 90 \
