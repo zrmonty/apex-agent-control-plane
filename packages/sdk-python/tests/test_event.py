@@ -215,3 +215,41 @@ def test_control_commands_produce_valid_control_event_data(command: ControlComma
     event["data"] = command.to_event_data()
     event["integrity"]["event_hash"] = event_hash(event)
     validate_event(event)
+
+
+def test_secret_policy_matches_gateway_shapes_and_allows_hash_references() -> None:
+    event = valid_event()
+    event["data"] = {"prompt_ref": "a" * 64, "content_ref": "b" * 64}
+    event["integrity"]["event_hash"] = event_hash(event)
+    validate_event(event)
+
+    event["data"] = {"api_key": "opaque-secret"}
+    event["integrity"]["event_hash"] = event_hash(event)
+    with pytest.raises(EventValidationError, match="secret-like"):
+        validate_event(event)
+
+    event["data"] = {"message": "-----BEGIN PRIVATE KEY-----"}
+    event["integrity"]["event_hash"] = event_hash(event)
+    with pytest.raises(EventValidationError, match="secret-like"):
+        validate_event(event)
+
+
+def test_control_text_allows_untrusted_prose_but_rejects_credentials() -> None:
+    event = valid_event()
+    event["type"] = "control"
+    event["data"] = {
+        "action": "inject",
+        "enforcement": "cooperative",
+        "reason_code": None,
+        "parameters": {
+            "content": "The operator says the word secret in ordinary prose.",
+            "content_classification": "untrusted",
+        },
+    }
+    event["integrity"]["event_hash"] = event_hash(event)
+    validate_event(event)
+
+    event["data"]["parameters"]["content"] = "-----BEGIN PRIVATE KEY-----"
+    event["integrity"]["event_hash"] = event_hash(event)
+    with pytest.raises(EventValidationError, match="secret-like"):
+        validate_event(event)

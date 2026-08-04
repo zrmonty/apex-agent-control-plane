@@ -1,0 +1,27 @@
+# Overlay: point archive-provider at Google Cloud Storage.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.gcs.yaml up -d
+#
+# Prerequisites:
+#   - archive-provider with google-cloud-storage installed
+#   - Bucket pre-created with retention policy as required by the deployment profile
+#   - Workload identity or service-account JSON mounted read-only
+#
+# Gateway never loads GCS credentials; only the archive-provider adapter does.
+
+services:
+  archive-provider:
+    environment:
+      APEX_ARCHIVE_BACKEND: gcs
+      APEX_ARCHIVE_GCS_BUCKET: ${APEX_ARCHIVE_GCS_BUCKET:?set APEX_ARCHIVE_GCS_BUCKET}
+      APEX_ARCHIVE_GCS_PROJECT: ${APEX_ARCHIVE_GCS_PROJECT:-}
+      APEX_ARCHIVE_GCS_CREDENTIALS_FILE: /run/secrets/gcs_credentials
+    secrets:
+      - source: gcs_credentials
+        target: /run/secrets/gcs_credentials
+        mode: "0400"
+
+secrets:
+  gcs_credentials:
+    file: ${GCS_CREDENTIALS_FILE:?set GCS_CREDENTIALS_FILE to a service-account JSON path}

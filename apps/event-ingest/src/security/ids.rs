@@ -1,32 +1,44 @@
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static FINDING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static FINDING_SEED: OnceLock<u64> = OnceLock::new();
+use super::error::FindingError;
 
-pub(crate) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> Result<u64, FindingError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|_| FindingError::clock_unavailable())
 }
 
-pub(crate) fn uuid7() -> String {
-    let time = now_ms();
-    let seq = FINDING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let seed = *FINDING_SEED.get_or_init(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos() as u64)
-    });
-    let entropy = seed.wrapping_add(seq.rotate_left(17));
-    format!(
-        "{:08x}-{:04x}-7{:03x}-8{:03x}-{:012x}",
-        time >> 16,
-        time & 0xffff,
-        entropy & 0xfff,
-        (entropy >> 12) & 0xfff,
-        entropy & 0xffffffffffff
-    )
+pub(crate) fn uuid7() -> Result<String, FindingError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| FindingError::entropy_unavailable())?;
+
+    // UUIDv7: a big-endian 48-bit Unix-millisecond timestamp, version 7,
+    // and 74 cryptographically random bits. The random tail is deliberately
+    // not sequence-derived or process-seeded, so IDs remain unpredictable
+    // across restarts and concurrent producers.
+    let timestamp = now_ms()? & 0x0000_ffff_ffff_ffff;
+    bytes[..6].copy_from_slice(&timestamp.to_be_bytes()[2..]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
 }

@@ -1,0 +1,8 @@
+# Apex Valkey ACL — no default user, ingest-only command set and key pattern.
+# Replace REPLACE_WITH_INGEST_PASSWORD before mounting. Never commit real passwords.
+
+user default off
+
+# Least-privilege application identity for apex-event-ingest.
+# Key pattern matches the Rust KEY_PREFIX (apex:ingest:...).
+user apex-ingest on sanitize-payload >REPLACE_WITH_INGEST_PASSWORD ~apex:ingest:* resetchannels -@all +ping +incr +incrby +get +set +setex +expire +ttl +exists

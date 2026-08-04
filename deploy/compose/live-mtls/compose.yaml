@@ -1,0 +1,168 @@
+# Local-only live mTLS handshake stack.
+# Not for production. Uses short-lived generated certs under ./secrets.
+#
+# Start: from this directory after generate_pki.py + render_configs.py
+#   docker compose -f compose.yaml up -d --build
+#
+# Host-published ports are loopback-only for the Rust live_mtls tests.
+
+name: apex-live-mtls
+
+services:
+  valkey:
+    image: valkey/valkey:8.0
+    # Official entrypoint drops privileges; keep a minimal capability set for local live tests.
+    user: "0:0"
+    entrypoint: ["valkey-server"]
+    command: ["/run/secrets/valkey_config"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    networks: [live-mtls]
+    secrets:
+      - source: valkey_config
+        target: valkey_config
+      - source: valkey_acl
+        target: valkey_acl
+      - source: valkey_server_cert
+        target: valkey_server_cert
+      - source: valkey_server_key
+        target: valkey_server_key
+        mode: "0400"
+      - source: ca
+        target: valkey_client_ca
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp, /data]
+
+  jetstream:
+    image: nats:2.10
+    command: ["--config", "/run/secrets/nats_config"]
+    ports:
+      - "127.0.0.1:14222:4222"
+    networks: [live-mtls]
+    secrets:
+      - source: nats_config
+        target: nats_config
+      - source: nats_server_cert
+        target: nats_server_cert
+      - source: nats_server_key
+        target: nats_server_key
+        mode: "0400"
+      - source: ca
+        target: nats_client_ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp, /data]
+
+  clickhouse-projection:
+    image: python:3.12-slim
+    working_dir: /app
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "clickhouse_projection",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--cert",
+        "/run/secrets/clickhouse_server_cert",
+        "--key",
+        "/run/secrets/clickhouse_server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+      ]
+    ports:
+      - "127.0.0.1:18443:8443"
+    volumes:
+      - ../../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    environment:
+      PYTHONPATH: /app
+    networks: [live-mtls]
+    secrets:
+      - source: clickhouse_server_cert
+        target: clickhouse_server_cert
+      - source: clickhouse_server_key
+        target: clickhouse_server_key
+        mode: "0400"
+      - source: ca
+        target: ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  archive-provider:
+    image: python:3.12-slim
+    working_dir: /app
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "archive_provider",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8444",
+        "--cert",
+        "/run/secrets/archive_server_cert",
+        "--key",
+        "/run/secrets/archive_server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+      ]
+    ports:
+      - "127.0.0.1:18444:8444"
+    volumes:
+      - ../../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    environment:
+      PYTHONPATH: /app
+    networks: [live-mtls]
+    secrets:
+      - source: archive_server_cert
+        target: archive_server_cert
+      - source: archive_server_key
+        target: archive_server_key
+        mode: "0400"
+      - source: ca
+        target: ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+networks:
+  live-mtls:
+    driver: bridge
+
+secrets:
+  ca:
+    file: ./secrets/ca.pem
+  valkey_config:
+    file: ./secrets/valkey.conf
+  valkey_acl:
+    file: ./secrets/valkey.acl
+  valkey_server_cert:
+    file: ./secrets/valkey-server.pem
+  valkey_server_key:
+    file: ./secrets/valkey-server.key
+  nats_config:
+    file: ./secrets/nats.conf
+  nats_server_cert:
+    file: ./secrets/nats-server.pem
+  nats_server_key:
+    file: ./secrets/nats-server.key
+  clickhouse_server_cert:
+    file: ./secrets/clickhouse-projection-server.pem
+  clickhouse_server_key:
+    file: ./secrets/clickhouse-projection-server.key
+  archive_server_cert:
+    file: ./secrets/archive-provider-server.pem
+  archive_server_key:
+    file: ./secrets/archive-provider-server.key

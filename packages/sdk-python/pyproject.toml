@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 dependencies = ["rfc8785==0.1.4"]
 
 [project.optional-dependencies]
-test = ["pytest>=9.0", "pytest-cov>=7.0"]
+# cryptography: Ed25519 sign/verify for staging/production agent bundles
+signing = ["cryptography>=42"]
+test = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42"]
+dev = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

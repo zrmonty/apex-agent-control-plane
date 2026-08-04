@@ -1,0 +1,77 @@
+# Optional Valkey acceleration overlay.
+#
+# Usage (from deploy/compose):
+#   docker compose --env-file .env -f compose.yaml -f compose.valkey.yaml up -d
+#
+# Prerequisites:
+#   - Gateway image built with: cargo build --features valkey
+#   - VALKEY_IMAGE set to an approved digest-pinned Valkey image
+#   - Secret files rendered from templates/valkey.conf.template and valkey.acl.template
+#   - mTLS material for Valkey server and ingest client
+#
+# Valkey is never authoritative for authorization, audit, cost, or durable events.
+
+services:
+  valkey:
+    image: ${VALKEY_IMAGE:?set VALKEY_IMAGE to an approved, digest-pinned Valkey image}
+    command: ["valkey-server", "/run/secrets/valkey_config"]
+    networks: [apex-internal]
+    secrets:
+      - source: valkey_config
+        target: valkey_config
+      - source: valkey_acl
+        target: valkey_acl
+      - source: valkey_server_cert
+        target: valkey_server_cert
+      - source: valkey_server_key
+        target: valkey_server_key
+        mode: "0400"
+      - source: valkey_client_ca
+        target: valkey_client_ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    # No host-published ports.
+
+  ingest-gateway:
+    environment:
+      APEX_VALKEY_HOST: valkey
+      APEX_VALKEY_PORT: "6379"
+      APEX_VALKEY_USERNAME: ${APEX_VALKEY_USERNAME:-apex-ingest}
+      APEX_VALKEY_PASSWORD_FILE: /run/secrets/valkey_ingest_password
+      APEX_VALKEY_CA_FILE: /run/secrets/valkey_server_ca
+      APEX_VALKEY_CLIENT_CERT_FILE: /run/secrets/ingest_valkey_client_cert
+      APEX_VALKEY_CLIENT_KEY_FILE: /run/secrets/ingest_valkey_client_key
+    depends_on:
+      valkey:
+        condition: service_started
+    secrets:
+      - source: valkey_ingest_password
+        target: /run/secrets/valkey_ingest_password
+        mode: "0400"
+      - valkey_server_ca
+      - ingest_valkey_client_cert
+      - source: ingest_valkey_client_key
+        target: /run/secrets/ingest_valkey_client_key
+        mode: "0400"
+
+secrets:
+  valkey_config:
+    file: ${VALKEY_CONFIG_FILE:?set VALKEY_CONFIG_FILE to the rendered valkey.conf}
+  valkey_acl:
+    file: ${VALKEY_ACL_FILE:?set VALKEY_ACL_FILE to the rendered valkey.acl}
+  valkey_server_cert:
+    file: ${VALKEY_SERVER_CERT_FILE:?set VALKEY_SERVER_CERT_FILE to the Valkey server certificate}
+  valkey_server_key:
+    file: ${VALKEY_SERVER_KEY_FILE:?set VALKEY_SERVER_KEY_FILE to the Valkey server private key}
+  valkey_client_ca:
+    file: ${VALKEY_CLIENT_CA_FILE:?set VALKEY_CLIENT_CA_FILE to the CA for Valkey client certs}
+  valkey_server_ca:
+    file: ${VALKEY_SERVER_CA_FILE:?set VALKEY_SERVER_CA_FILE to the CA that signed the Valkey server cert}
+  valkey_ingest_password:
+    file: ${VALKEY_INGEST_PASSWORD_FILE:?set VALKEY_INGEST_PASSWORD_FILE to the apex-ingest ACL password}
+  ingest_valkey_client_cert:
+    file: ${INGEST_VALKEY_CLIENT_CERT_FILE:?set INGEST_VALKEY_CLIENT_CERT_FILE to the ingest mTLS cert}
+  ingest_valkey_client_key:
+    file: ${INGEST_VALKEY_CLIENT_KEY_FILE:?set INGEST_VALKEY_CLIENT_KEY_FILE to the ingest mTLS key}

@@ -74,7 +74,11 @@ struct TestResolver;
 impl BearerTokenResolver for TestResolver {
     fn resolve(&self, token: &str) -> Result<Caller, GatewayError> {
         if token == "e2e-token" {
-            Ok(Caller::authenticated("e2e-test", ["acme/prod"]))
+            Ok(Caller::authenticated_for_agent(
+                "e2e-test",
+                "agent",
+                ["acme/prod"],
+            )?)
         } else {
             Err(GatewayError::unauthenticated())
         }
@@ -217,7 +221,7 @@ async fn full_grpc_path_replays_across_restart_and_preserves_conflicts() {
     assert_eq!(state.archive.lock().unwrap().len(), 1);
 
     let mut changed = envelope(EVENT_ID, EVENT_HASH);
-    changed.agent_id = "different-agent".to_owned();
+    changed.run_id = "different-run".to_owned();
     let changed_hash = apex_event_ingest::IngestRequest::canonical_hash_for_test(&changed)
         .expect("hash changed event");
     changed.integrity.as_mut().expect("integrity").event_hash = changed_hash;

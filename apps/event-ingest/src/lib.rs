@@ -6,6 +6,7 @@ pub mod proto {
 }
 
 mod auth;
+mod ephemeral;
 mod errors;
 mod gateway;
 mod http_sinks;
@@ -20,29 +21,41 @@ mod sinks;
 mod validation;
 pub use auth::{
     AuthenticatedGrpcService, BearerTokenResolver, BearerTokenVerifier, CallerVerifier,
-    bounded_event_ingest_server,
+    PeerIdentity, bounded_event_ingest_server,
 };
+pub use ephemeral::{
+    DenyHintKey, EphemeralError, EphemeralErrorCode, EphemeralStore, FallbackEphemeralStore,
+    FingerprintCounterKey, InMemoryEphemeralStore, RateLimitDecision, RateLimitKey,
+};
+#[cfg(feature = "valkey")]
+pub use ephemeral::{ValkeyConfig, ValkeyEphemeralStore};
 pub use errors::{
     DiagnosticCorrelation, DiagnosticEvidence, DiagnosticFailure, DiagnosticScope,
     GatewayDiagnosticReport, GatewayError, GatewayErrorCode, RedactionSummary,
 };
 pub use gateway::{AuthenticatedIngestAdapter, EventPublisher, IngestGateway, IngestOutcome};
 pub use http_sinks::{ArchiveHttpPublisher, AuthenticatedHttpConfig, ClickHouseHttpPublisher};
+#[cfg(feature = "postgres")]
+pub use idempotency::PostgresIdempotencyStore;
 pub use idempotency::{
-    IdempotencyKey, IdempotencyReservation, IdempotencyStore, InMemoryIdempotencyStore,
-    ReservationResult,
+    FileIdempotencyStore, IdempotencyKey, IdempotencyReservation, IdempotencyStore,
+    InMemoryIdempotencyStore, ReservationResult,
 };
 pub use nats::{AsyncNatsJetStreamClient, NatsClient, NatsJetStreamTransport, NatsTlsConfig};
-pub use outbox::{EnqueueResult, EventOutbox, InMemoryOutbox, OutboxKey, OutboxedPublisher};
+#[cfg(feature = "postgres")]
+pub use outbox::PostgresOutbox;
+pub use outbox::{
+    EnqueueResult, EventOutbox, FileOutbox, InMemoryOutbox, OutboxKey, OutboxedPublisher,
+    PendingEventReplayer,
+};
 pub use persistence::{FindingJournal, FindingPersistenceError};
 pub use publisher::{
     InMemoryPublisher, JetStreamPublisher, JetStreamTransport, RetryingJetStreamTransport,
 };
 pub use security::{
     ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingError,
-    FindingErrorCode, FindingInput, FindingSeverity, FindingStatus, FindingStatusUpdate,
-    FindingStore, FindingType, PolicyDecision, SecurityFinding, SecuritySignal, detect_and_record,
-    detection_finding, new_finding,
+    FindingErrorCode, FindingSeverity, FindingStatus, FindingStatusUpdate, FindingStore,
+    FindingType, PolicyDecision, SecurityFinding, SecuritySignal, detect_and_record,
 };
 pub use sinks::{
     ArchivePublisher, ClickHousePublisher, DurableEventSink, DurableFanoutPublisher,

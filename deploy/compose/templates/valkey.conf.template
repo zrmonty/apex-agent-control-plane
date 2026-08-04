@@ -1,0 +1,38 @@
+# Apex optional Valkey acceleration profile.
+# Copy to secrets/valkey.conf and replace certificate paths with mounted secret paths.
+# Plaintext is disabled. mTLS is required for clients.
+
+bind 0.0.0.0
+protected-mode yes
+port 0
+tls-port 6379
+tls-cert-file /run/secrets/valkey_server_cert
+tls-key-file /run/secrets/valkey_server_key
+tls-ca-cert-file /run/secrets/valkey_client_ca
+tls-auth-clients yes
+tls-protocols "TLSv1.2 TLSv1.3"
+tls-prefer-server-ciphers no
+
+# ACL file disables the default user and grants only ingest acceleration commands.
+aclfile /run/secrets/valkey_acl
+
+# Non-authoritative data only. Eviction must never be treated as audit truth.
+maxmemory 256mb
+maxmemory-policy allkeys-lru
+maxclients 256
+timeout 30
+tcp-keepalive 60
+
+# Refuse dangerous remote management surfaces.
+rename-command FLUSHDB ""
+rename-command FLUSHALL ""
+rename-command CONFIG ""
+rename-command SHUTDOWN ""
+rename-command MODULE ""
+rename-command SCRIPT ""
+rename-command EVAL ""
+rename-command EVALSHA ""
+rename-command FUNCTION ""
+rename-command ACL ""
+rename-command DEBUG ""
+rename-command KEYS ""

@@ -3,23 +3,17 @@
 **Status:** Accepted  
 **Date:** 2026-08-03
 
-The first Phase 0 implementation slice is now present in the Rust ingest
-foundation: immutable scoped findings, hashed evidence references, stable
-scope-aware fingerprints, append-only status/containment updates, bounded
-capacity, redacted typed errors, a deterministic redacted signal adapter, and a
-bounded JSONL journal for restart-safe replay. The ingest gateway can opt into
-redacted findings for scope denials and idempotency conflicts; PostgreSQL/control-plane
-integration and broader detector wiring remain open work.
+The first Phase 0 implementation slice is present in the Rust ingest foundation. It includes immutable scoped findings, hashed evidence references, stable scope-aware fingerprints, append-only status and containment updates, bounded capacity, redacted typed errors, a deterministic redacted signal adapter, and a bounded JSONL journal for restart-safe replay. The ingest gateway can opt into redacted findings for scope denials and idempotency conflicts. PostgreSQL and control-plane integration and broader detector wiring remain open work.
 
 ## Purpose
 
-Security Alerts turns trusted Apex telemetry and policy results into scoped, explainable, actionable security findings. It protects agent workloads from prompt injection, malicious tools, data exposure, identity abuse, control-plane tampering, and telemetry integrity failures without treating untrusted content as instructions.
+Security Alerts turns trusted Apex telemetry and policy results into scoped, explainable, actionable security findings. It protects agent workloads from prompt injection, malicious tools, data exposure, identity abuse, control-plane tampering, and telemetry integrity failures. It does not treat untrusted content as instructions.
 
-This is a control-plane capability, not a generic log-alerting feature. A finding links to redacted evidence, the detector/policy version, scope, and a safe response path.
+This is a control-plane capability. It is not a generic log-alerting feature. A finding links to redacted evidence, the detector or policy version, scope, and a safe response path.
 
 ## Security finding contract
 
-`SecurityFinding` is an immutable derived record, created by the detection service and linked to canonical event IDs. It does not change the frozen v1 agent event vocabulary.
+`SecurityFinding` is an immutable derived record. The detection service creates it and links it to canonical event IDs. It does not change the frozen v1 agent event vocabulary.
 
 ```text
 finding_id             UUIDv7
@@ -35,16 +29,17 @@ fingerprint            stable deduplication key
 created_at/updated_at  UTC timestamps
 ```
 
-Findings are append-only. Status changes, suppression, exception, containment, and resolution create linked audit events; they do not overwrite the original finding. The record never embeds raw prompts, model output, tool output, credentials, or restricted content.
+Findings are append-only. Status changes, suppression, exception, containment, and resolution create linked audit events. They do not overwrite the original finding. The record never embeds raw prompts, model output, tool output, credentials, or restricted content.
+
+All read and status-change APIs are scope-authorized. Callers must present an authenticated subject with an exact `workspace/namespace` claim. A caller-supplied scope string is not an authorization grant. There is no unfiltered finding or status-history accessor. Finding fingerprints bind the finding type, severity, confidence, policy decision, detector, scope, and structured evidence references. A record cannot be downgraded or reclassified without failing validation. Status updates persist the authenticated actor subject for audit.
+
+The alert store applies a quota independently to each workspace/namespace. It also enforces a bounded global hard cap. One tenant that exhausts its quota cannot starve detection for another tenant. Both quota failures are explicit, retryable capacity errors. They are not silent eviction.
+
+Every finding must carry at least one bounded, hashed evidence reference. UUIDv7 finding IDs use operating-system cryptographic randomness. The status playbook requires acknowledgement before resolution. It requires a containment action when entering or releasing containment. It treats false-positive closure as terminal. Unknown IDs fail closed instead of appearing `Open`.
 
 ## Detection and response model
 
-The Rust detector boundary accepts only `DetectionInput`: a signal category,
-validated scope, UUIDv7 event ID, safe field path, and lowercase SHA-256 value
-hash. `detect_and_record` maps the signal to a fixed detector version, severity,
-policy decision, and finding type, then delegates to the append-only store.
-Raw hostile content is not part of the API and cannot enter a finding through
-this path.
+The Rust detector boundary accepts only `DetectionInput`: a signal category, validated scope, UUIDv7 event ID, safe field path, and lowercase SHA-256 value hash. `detect_and_record` maps the signal to a fixed detector version, severity, policy decision, and finding type. It then delegates to the append-only store. Raw `SecurityFinding` append is an internal persistence seam. External callers cannot bypass the detector classification boundary. Raw hostile content is not part of the API. It cannot enter a finding through this path.
 
 | Lane | Implementation | Allowed result |
 |---|---|---|
@@ -62,6 +57,7 @@ An LLM is never the only prompt-injection detector or policy decision-maker. It 
 | **Malicious or compromised tool** | Unapproved tool identity/version, manifest/signature mismatch, unexpected endpoint, privilege/mount request, shell execution, unsafe file path, SSRF-like destination, egress-policy violation, or tool output attempting instruction escalation. | Deny execution/egress; quarantine the tool binding or AgentGroup only under a high-confidence policy; alert administrators. |
 | **Data exfiltration or secret exposure** | Secret/token/private-key patterns, restricted classification sent to an unauthorized model/tool/export, anomalous outbound volume/destination, sensitive content in a diagnostic/export field. | Redact/block at the boundary, revoke ephemeral capability where configured, and create a critical finding. |
 | **Identity and authorization abuse** | Repeated denials, impossible scope use, role-grant escalation, expired/invalid workload identity, suspicious break-glass use, or a service identity acting outside its delegated scope. | Deny inline; notify scoped administrators; require review for privileged changes. |
+| **Admission and resource abuse** | Authenticated request/byte budget exhaustion, idempotency-capacity exhaustion, oversized payload floods, or blocking-work semaphore exhaustion. | Rate limit inline, preserve a redacted scoped finding, and recover through the bounded retry/backoff path. |
 | **Policy and control tampering** | Attempts to weaken inherited policy, bypass an approval, change archive/retention controls, replay into production side effects, or submit stale/conflicting resource versions repeatedly. | Reject inline, create audit/finding records, and escalate according to policy. |
 | **Telemetry integrity attack** | Invalid event hash, broken run hash chain, duplicate ID with changed content, malformed/oversized event flood, producer clock anomaly, or unauthorized event type. | Reject/quarantine input, rate limit where applicable, and alert platform security. |
 | **Runaway or evasive agent behavior** | Budget/iteration evasion, abnormal retry/loop patterns, rapid permission denials, unexpected model/tool switching, or deviation from the approved workflow/execution profile. | Enforce admitted limits; create a finding; pause new work only if the effective policy authorizes it. |
@@ -76,7 +72,7 @@ An LLM is never the only prompt-injection detector or policy decision-maker. It 
 | High | Strong policy violation or corroborated attack signal. | Immediate Security Center alert, incident creation, and configured on-call notification. |
 | Critical | Deterministic block of secrets/restricted-data exfiltration, integrity compromise, or high-confidence malicious execution. | Block/contain at the boundary, notify immediately, and require explicit resolution/audit. |
 
-Automated containment is allowlisted and reversible: deny a request, disable a tool binding, pause new work, or quarantine an AgentGroup. It never deletes data, changes retention/legal hold, transfers ownership, alters policy, or takes action outside the target scope. A containment policy names who can release it and when approval is required.
+Automated containment is allowlisted and reversible. It may deny a request, disable a tool binding, pause new work, or quarantine an AgentGroup. It never deletes data, changes retention or legal hold, transfers ownership, alters policy, or takes action outside the target scope. A containment policy names who can release it and when approval is required.
 
 ## Security Center GUI
 
@@ -89,56 +85,50 @@ The Operator UI includes **Security Center** as a first-class view:
 - visible detector version, confidence, evidence references, suppression/exception expiry, and false-positive feedback;
 - text/table equivalents, keyboard support, high-contrast support, and no raw hostile content rendering.
 
-External notifications are optional adapters. They receive a scoped, redacted finding summary and deep link; no prompt, tool output, token, secret, or restricted content is sent to email, chat, SIEM, or an AI assistant by default.
+External notifications are optional adapters. They receive a scoped, redacted finding summary and deep link. No prompt, tool output, token, secret, or restricted content is sent to email, chat, SIEM, or an AI assistant by default.
 
 ## Permissions and operations
 
 - `security.finding.read` permits a scoped finding summary. Evidence still follows data classification and redaction policy.
 - `security.finding.manage` permits acknowledgement, case management, and time-limited suppression in scope.
-- `security.containment.execute` permits an already-policy-allowed pause/quarantine/disable action; it does not grant policy administration.
+- `security.containment.execute` permits an already-policy-allowed pause, quarantine, or disable action. It does not grant policy administration.
 - `security.policy.manage` and `security.exception.approve` remain separate, higher-risk permissions.
-- Suppressions require reason, owner, scope, expiry, matching fingerprint, and an audit event. They may reduce notification noise but cannot suppress a deterministic inline block.
+- Suppressions require reason, owner, scope, expiry, matching fingerprint, and an audit event. They may reduce notification noise. They cannot suppress a deterministic inline block.
 
 ## Delivery roadmap
 
 ### Phase 0 — prevention and evidence foundation
 
-1. Implement the `SecurityFinding` store/contract, immutable audit linkage, fingerprints, severities, and scoped RBAC.
-2. Emit findings for malformed/integrity-invalid telemetry, scope/identity denial, untrusted `control.inject` boundary violation, secret/redaction block, tool allowlist/egress denial, and agent-template noncompliance.
-3. Implement deterministic inline controls: untrusted-to-instruction taint block, signed/approved tool identity, denied-by-default egress, bounded execution profiles, and server-side redaction.
+1. Implement the `SecurityFinding` store and contract, immutable audit linkage, fingerprints, severities, and scoped RBAC.
+2. Emit findings for malformed or integrity-invalid telemetry, scope or identity denial, untrusted `control.inject` boundary violation, secret or redaction block, tool allowlist or egress denial, and agent-template noncompliance.
+3. Implement deterministic inline controls: untrusted-to-instruction taint block, signed or approved tool identity, denied-by-default egress, bounded execution profiles, and server-side redaction.
 4. Test every block, finding, deduplication, redaction, scope-isolation, and containment path under replay, restart, and load.
 
-The current journal is intentionally a local persistence seam: it requires an
-absolute path inside a trusted non-symlink base, rejects symlinked targets,
-caps records at 1 MiB and the journal at 256 MiB, flushes and syncs each
-accepted record, and replays immutable findings before status updates. It is
-appropriate for local development and deterministic tests; an authoritative
-single-writer seam, not a multi-writer database, and an authoritative
-PostgreSQL/control-plane store is still required for production. Scoped RBAC,
-enrollment, and policy-engine integration are not yet present in the runnable
-binary; compliance language for those controls describes the target surface,
-not an assertion that production enforcement already exists.
+The current journal is intentionally a local persistence seam. It requires an absolute path inside a trusted non-symlink base. It rejects symlinked targets. It caps records at 1 MiB and the journal at 256 MiB. It flushes and syncs each accepted record. It replays immutable findings before status updates. It is appropriate for local development and deterministic tests. It is an authoritative single-writer seam, not a multi-writer database. An authoritative PostgreSQL or control-plane store is still required for production. Scoped RBAC, enrollment, and policy-engine integration are not yet present in the runnable binary. Compliance language for those controls describes the target surface. It does not assert that production enforcement already exists.
 
-`control.inject` content is untrusted data, never an instruction source. Every
-future consumer must preserve that taint and reject promotion into system or
-developer instructions, authorization, policy, or tool permissions.
+`control.inject` content is untrusted data. It is never an instruction source. Every future consumer must preserve that taint. It must reject promotion into system or developer instructions, authorization, policy, or tool permissions.
 
 ### Phase 1 — visual response
 
-1. Deliver Security Center, finding timeline, acknowledgements, severity/status filters, and scoped case workflow.
-2. Add redacted SIEM/webhook adapters and policy-controlled notification routing.
-3. Add safe containment actions with approval/expiry and full audit trails.
+1. Deliver Security Center, finding timeline, acknowledgements, severity and status filters, and scoped case workflow.
+2. Add redacted SIEM and webhook adapters and policy-controlled notification routing.
+3. Add safe containment actions with approval, expiry, and full audit trails.
 
 ### Phase 2 — correlated detection
 
-1. Add behavioral rules for retry loops, tool/model drift, repeated denials, anomalous egress, and budget evasion.
+1. Add behavioral rules for retry loops, tool or model drift, repeated denials, anomalous egress, and budget evasion.
 2. Add detector health, rule simulation, false-positive feedback, and expiry-bound suppression.
 
 ### Phase 3 — continuous assurance
 
 1. Add cross-signal attack campaigns, detection coverage reporting, and compliance evidence export.
-2. Add optional redacted analytical enrichment under explicit policy; keep enforcement deterministic and local.
+2. Add optional redacted analytical enrichment under explicit policy. Keep enforcement deterministic and local.
 
 ## Release gate
 
-No production security profile is complete until an untrusted tool result and indirect prompt-injection attempt are demonstrably prevented from changing system/developer instructions, authorization, policy, or tool permissions; the blocked attempt must appear as a redacted, scoped, immutable finding in Security Center.
+No production security profile is complete until an untrusted tool result and an indirect prompt-injection attempt are demonstrably prevented from changing system or developer instructions, authorization, policy, or tool permissions. The blocked attempt must appear as a redacted, scoped, immutable finding in Security Center.
+
+
+---
+
+Writing style: [ASD-STE100 Simplified Technical English](../writing-style-ste100.md).

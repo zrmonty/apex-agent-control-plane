@@ -5,11 +5,19 @@
 
 ## Purpose
 
-Every LLM execution must state what the agent requested, what the provider actually executed, and what usage/cost evidence was returned. This makes model fallback, reasoning-effort selection, routing, and billing explainable in Cost Lens without collecting prompt or completion content.
+Every LLM execution must state:
+
+1. What the agent requested.
+2. What the provider executed.
+3. What usage and cost evidence returned.
+
+This makes fallback, reasoning-effort selection, routing, and billing explainable in Cost Lens. It does not collect prompt or completion content.
 
 ## LLM execution attribution
 
-The canonical `llm` event data gains a versioned `execution` object. The existing `provider`, `model`, `input_tokens`, and `output_tokens` fields remain supported during migration, but the `execution` object becomes the FinOps source.
+The canonical `llm` event data gains a versioned `execution` object.
+
+The fields `provider`, `model`, `input_tokens`, and `output_tokens` stay supported during migration. The `execution` object is the FinOps source.
 
 ```text
 execution:
@@ -45,39 +53,43 @@ execution:
     currency?
 ```
 
-All identifiers are validated as bounded safe identifiers. Token/unit fields are non-negative integers. Provider-specific values are mapped through a single adapter and preserved only when they are safe identifiers; arbitrary provider response text is never stored.
+All identifiers must be bounded safe identifiers. Token and unit fields must be non-negative integers.
+
+Map provider-specific values through one adapter. Keep them only when they are safe identifiers. Never store arbitrary provider response text.
 
 ## Truthfulness rules
 
-1. `requested` means the caller configuration, never proof of execution.
-2. `effective` means the model/provider/tier reported by the provider or trusted routing layer. If unavailable, it is absent—not copied from `requested` and mislabeled.
+1. `requested` is caller configuration. It is not proof of execution.
+2. `effective` is the model, provider, or tier reported by the provider or trusted routing layer. If it is unavailable, omit it. Do not copy `requested` and label it as effective.
 3. `provider_receipt` is the highest-confidence billing evidence. `sdk_observed` is next. `configured` and `estimated` are planning data only.
-4. A fallback/reroute is always explicit through differing requested/effective values and a `routing_reason`.
-5. Actual billed usage is immutable. Reconciliation adds a linked adjustment; it never overwrites a historical event or ledger entry.
-6. Reasoning effort and token categories are metadata only. Prompts, completions, chain-of-thought, and provider raw receipts remain excluded unless separately allowed by content-capture policy.
+4. A fallback or reroute must be explicit through different requested and effective values and a `routing_reason`.
+5. Actual billed usage is immutable. Reconciliation adds a linked adjustment. It never overwrites a historical event or ledger entry.
+6. Reasoning effort and token categories are metadata only. Prompts, completions, chain-of-thought, and raw provider receipts stay excluded unless a separate content-capture policy allows them.
 
 ## Cost Lens outcomes
 
 This contract enables per-run through yearly analysis of:
 
-- cost, latency, quality, and error rate by requested/effective model and reasoning effort;
-- fallback and routing cost deltas;
-- actual versus estimated/reconciled spend;
-- cache effectiveness by model/tier;
-- cost per successful task or evaluation gate; and
-- safe budget caps based on the effective provider/model/tier's current rate card.
+- Cost, latency, quality, and error rate by requested or effective model and reasoning effort
+- Fallback and routing cost deltas
+- Actual versus estimated or reconciled spend
+- Cache effectiveness by model or tier
+- Cost per successful task or evaluation gate
+- Safe budget caps based on the effective provider, model, and tier rate card
 
 ## Phase 0 delivery
 
-1. Extend Protobuf/JSON Schema and Python/Rust validators while preserving v1 compatibility through an optional `execution` object.
-2. Add provider-adapter extraction for the reference runtime and the first supported providers; unsupported providers emit only known, truthful fields.
-3. Add typed SDK builders and OpenTelemetry mapping for normalized requested/effective model and usage categories.
-4. Add ClickHouse projection fields and immutable cost-ledger linkage with evidence source/confidence.
+1. Extend Protobuf and JSON Schema and Python and Rust validators. Keep v1 compatibility through an optional `execution` object.
+2. Add provider-adapter extraction for the reference runtime and the first supported providers. Unsupported providers emit only known, truthful fields.
+3. Add typed SDK builders and OpenTelemetry mapping for normalized requested and effective model and usage categories.
+4. Add ClickHouse projection fields and immutable cost-ledger linkage with evidence source and confidence.
 5. Test fallback, partial provider receipts, absent reasoning effort, retry, cache tokens, malformed units, price-card change, and redaction paths.
 
 ## Acceptance criteria
 
-- A model fallback is visible as a requested/effective difference on the exact run.
-- A provider does not support reasoning effort or a token category: Apex shows it as unavailable, never zero or actual by assumption.
+- A model fallback is visible as a requested versus effective difference on the exact run.
+- If a provider does not support reasoning effort or a token category, Apex shows it as unavailable. Apex does not invent zero or actual values.
 - Cost Lens can filter and aggregate by effective model, effective effort, provider, evidence source, and confidence without reading content.
-- Any provider receipt or SDK adapter change is traceable to its adapter/version and cannot alter historic accounting.
+- Any provider receipt or SDK adapter change is traceable to its adapter and version. It cannot alter historic accounting.
+
+Writing style: [ASD-STE100 Simplified Technical English](../writing-style-ste100.md).

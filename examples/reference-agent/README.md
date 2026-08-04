@@ -1,25 +1,35 @@
 # Gold-standard reference agent
 
-This is the smallest local agent that follows the Apex Phase 0 contract. It:
+This is the smallest local agent that follows the Apex Phase 0 contract.
 
-- declares the apex-agent-template.v1 controls;
-- refuses to run if the manifest is noncompliant;
-- emits a validated, UUIDv7, hash-chained lifecycle trace;
-- records only bounded references and hashes, not prompts or tool output;
-- writes JSONL locally, so ClickHouse and NATS are optional for this demo.
+The agent:
 
-From the repository root:
+- Connects with `Apex.connect()` and a local-development preflight.
+- Assesses the gold-standard agent template before work starts.
+- Emits a validated, UUIDv7, hash-chained lifecycle trace with model execution attribution.
+- Records only bounded references and hashes. It does not record prompts or tool output.
+- Writes JSONL locally. ClickHouse and NATS are optional for this demo.
 
-    $env:PYTHONPATH = "packages/sdk-python/src"
-    python examples/reference-agent/run_demo.py
-    Get-Content .local/apex/events.jsonl -Wait
+## Run from the repository root
 
-The demo writes:
+```powershell
+$env:PYTHONPATH = "packages/sdk-python/src"
+python examples/reference-agent/run_demo.py
+Get-Content .local/apex/events.jsonl -Wait
+```
 
-- .local/apex/agent-template.json — non-secret capability manifest;
-- .local/apex/events.jsonl — observable Apex event stream.
+## Output files
 
-For production, replace the JSONL sink with an authenticated exporter only
-after workload identity, scope, TLS, redaction, and provider configuration
-have passed preflight. The template controls provide implementation evidence;
-they do not by themselves certify SOC 2, HIPAA, SEC, or FedRAMP compliance.
+- `.local/apex/agent-bundle.json` — non-secret local integration bundle
+- `.local/apex/agent-template.json` — template assessment metadata
+- `.local/apex/events.jsonl` — observable Apex event stream
+
+## Production note
+
+For production, replace the JSONL sink with an authenticated exporter only after workload identity, scope, TLS, redaction, and provider configuration pass preflight.
+
+Template controls are implementation evidence. They do not certify SOC 2, HIPAA, SEC, or FedRAMP compliance.
+
+Day-one paths: [Getting started](../../docs/getting-started.md).
+
+Writing style: [ASD-STE100](../../docs/writing-style-ste100.md).

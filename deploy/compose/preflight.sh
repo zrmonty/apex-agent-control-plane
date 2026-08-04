@@ -63,6 +63,11 @@ for key in "${secret_keys[@]}"; do
   [[ -f "$resolved" ]] || fail "secret file for ${key} does not exist"
 done
 
+agent_id="$(require_value APEX_BEARER_AGENT_ID)"
+[[ "$agent_id" =~ ^[A-Za-z0-9._:-]{1,256}$ && "$agent_id" != *..* ]] || fail 'APEX_BEARER_AGENT_ID must be a safe 1-256 character workload identifier'
+bearer_cert_sha256="$(require_value APEX_BEARER_CERT_SHA256)"
+[[ "$bearer_cert_sha256" =~ ^[A-Fa-f0-9]{64}$ ]] || fail 'APEX_BEARER_CERT_SHA256 must be exactly 64 hexadecimal characters'
+
 object_lock="$(require_value APEX_ARCHIVE_REQUIRE_OBJECT_LOCK)"
 [[ "$object_lock" == true || "$object_lock" == false ]] || fail 'APEX_ARCHIVE_REQUIRE_OBJECT_LOCK must be explicitly true or false'
 bucket="$(require_value APEX_ARCHIVE_BUCKET)"

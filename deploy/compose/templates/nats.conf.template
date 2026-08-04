@@ -23,4 +23,6 @@ tls {
   key_file: "/run/secrets/nats_server_key"
   ca_file: "/run/secrets/nats_client_ca"
   verify: true
+  # Required by the gateway's async-nats ConnectOptions::tls_first().
+  handshake_first: true
 }

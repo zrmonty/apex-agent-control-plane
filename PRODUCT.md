@@ -8,67 +8,87 @@ web
 
 ## Stack
 
-Delegated decision: **React 19 + TypeScript + Vite** for the operator UI. The console is a static single-page application served separately from, or by, the Rust control-plane edge. It uses TanStack Router for typed, file-based routes and TanStack Query for server state. The production UI does not require a Node.js server, React Server Components, or a managed frontend host.
+Delegated decision: **React 19 + TypeScript + Vite** for the operator UI.
 
-Use `pnpm` for JavaScript package management. Keep browser state minimal and local; server state belongs in TanStack Query and authoritative state belongs in the control-plane API. Use accessible, unstyled primitives and project-owned design tokens rather than a pre-styled component suite. Use OpenAPI/Protobuf-derived TypeScript clients; do not hand-maintain a second API type system.
+The console is a static single-page application. Serve it with the Rust control-plane edge or serve it separately. Use TanStack Router for typed, file-based routes. Use TanStack Query for server state.
+
+The production UI does not need a Node.js server, React Server Components, or a managed frontend host.
+
+Use `pnpm` for JavaScript packages. Keep browser state small and local. Put server state in TanStack Query. Put authoritative state in the control-plane API.
+
+Use accessible, unstyled primitives and project design tokens. Do not use a pre-styled component suite as the system of record. Use OpenAPI/Protobuf-derived TypeScript clients. Do not hand-maintain a second API type system.
 
 ## Users
 
-- Platform owners who configure installation-wide identity, security, archive, retention, and policy controls.
-- Administrators and AI engineers who operate AgentGroups, create visual evaluation flows, manage approved integrations, and investigate incidents.
-- Operators who need a fast, visual view of fleet health, runs, failures, and remediation actions.
-- Compliance reviewers and auditors who need read-oriented access to evidence, annotations, policy posture, retention, and scoped exports.
-- Finance and engineering users who need accountable cost attribution, budgets, and operational cost decisions.
+- Platform owners who configure installation-wide identity, security, archive, retention, and policy.
+- Administrators and AI engineers who operate AgentGroups, build evaluation flows, manage integrations, and investigate incidents.
+- Operators who need a fast visual view of fleet health, runs, failures, and remediation.
+- Compliance reviewers and auditors who need read access to evidence, annotations, policy posture, retention, and scoped exports.
+- Finance and engineering users who need cost attribution, budgets, and cost decisions.
 
-## Product Purpose
+## Product purpose
 
-Apex is a self-hosted, cloud-agnostic control plane for operating AI agents safely at scale. It makes agent activity observable, governable, evaluable, diagnosable, and financially accountable across local, on-premises, and cloud deployments.
+Apex is a self-hosted, cloud-agnostic control plane for AI agents. It makes agent activity observable, governable, evaluable, diagnosable, and financially accountable. It runs on local, on-premises, and cloud systems.
 
-Success means a company can operate a growing fleet of agents through a clear GUI and API while maintaining least privilege, evidence-quality auditability, durable records, and actionable cost controls.
+Success means a company can operate a growing agent fleet through a clear GUI and API. The company keeps least privilege, audit evidence, durable records, and useful cost controls.
 
 ## Positioning
 
-Apex joins an event-first agent runtime control plane with Kubernetes-style scope, deep diagnostics, policy enforcement, regulated-deployment evidence, immutable archive adapters, visual operations, and agent-specific FinOps. It does not require a proprietary hosted control plane.
+Apex joins an event-first agent control plane with Kubernetes-style scope, deep diagnostics, policy enforcement, regulated-deployment evidence, immutable archive adapters, visual operations, and agent FinOps. It does not require a proprietary hosted control plane.
 
-## Operating Context
+## Operating context
 
-Users operate in an installation, workspace, namespace, AgentGroup, agent, and run hierarchy. They use a browser-based operator console and audited APIs to inspect agent turns, model calls, tool calls, decisions, memory activity, workflow topology, evaluations, incidents, policy changes, archive state, and cost.
+Users work in this hierarchy: installation, workspace, namespace, AgentGroup, agent, and run.
 
-Deployments must support a single-host local profile and a high-availability Kubernetes profile without a contract or data-model rewrite. Organizations may self-host identity and connect it to local accounts, LDAP/AD, Google Workspace, Microsoft Entra ID, or other OIDC/SAML providers.
+They use a browser console and audited APIs. They inspect turns, model calls, tool calls, decisions, memory activity, workflow topology, evaluations, incidents, policy changes, archive state, and cost.
 
-## Capabilities and Constraints
+Deployments must support a single-host local profile and a high-availability Kubernetes profile without a contract rewrite. Organizations can self-host identity. They can connect local accounts, LDAP/AD, Google Workspace, Microsoft Entra ID, or other OIDC/SAML providers.
 
-- Rust services ingest versioned Protobuf events over gRPC and use durable event processing.
-- Mutable control state, analytical trace storage, and immutable/WORM archive storage are separate concerns behind portable provider contracts.
-- The scope model is installation → workspace → namespace → AgentGroup → agent → run. Scope is mandatory for production events.
-- A single installation owner exists; built-in and administrator-defined custom roles are composed from atomic permissions and bounded by scope and delegation.
-- The GUI must be accessible, keyboard-operable, high-contrast capable, and safe when displaying untrusted agent, tool, trace, and diagnostic content.
-- Deep error reports are append-only, correlated, redacted by default, and can form a user-approved safe diagnostic bundle for AI-assisted troubleshooting.
-- Cost Lens distinguishes actual, reconciled, estimated, allocated, and forecast cost. It covers model/provider, tool/API, evaluation, infrastructure, and data-lifecycle cost.
-- Deployment must remain cloud-agnostic and economical for self-hosting. A mandatory managed SaaS dependency is not acceptable.
-- Archive providers must prove retention, legal hold, retrieval, and verification capabilities before strict records profiles are enabled.
-- Raw payment-card data is out of scope for the initial release.
+## Capabilities and constraints
 
-## Brand Commitments
+- Rust services ingest versioned Protobuf events over gRPC. They use durable event processing.
+- Mutable control state, analytical trace storage, and immutable archive storage are separate. They use portable provider contracts.
+- Scope model: installation → workspace → namespace → AgentGroup → agent → run. Scope is mandatory for production events.
+- One installation owner exists. Built-in and custom roles use atomic permissions. Roles are bounded by scope and delegation.
+- The GUI must be accessible, keyboard-operable, high-contrast capable, and safe when it shows untrusted content.
+- Deep error reports are append-only and correlated. They are redacted by default. They can form a user-approved safe diagnostic bundle for AI-assisted troubleshooting.
+- Cost Lens separates actual, reconciled, estimated, allocated, and forecast cost. It covers model, tool, evaluation, infrastructure, and data-lifecycle cost.
+- Deployment must stay cloud-agnostic and economical for self-hosting. A mandatory managed SaaS dependency is not acceptable.
+- Archive providers must prove retention, legal hold, retrieval, and verification before strict records profiles are enabled.
+- Raw payment-card data is out of scope for the first release.
+
+## Brand commitments
 
 - Product name: **Apex Agent Control Plane**.
-- Voice: clear, calm, precise, and operational; no hype or invented compliance claims.
-- The interface must make advanced controls approachable for ordinary company users without weakening security.
+- Voice: clear, calm, precise, and operational. No hype. No invented compliance claims.
+- The interface must make advanced controls usable for ordinary company users without weaker security.
 
-## Evidence on Hand
+## Evidence on hand
 
-- Confirmed product requirements are captured in this repository's `README.md`.
-- No customer logos, testimonials, benchmarks, pricing claims, or visual identity assets have been provided. Do not fabricate any of them.
+- Confirmed product requirements are in this repository `README.md`.
+- No customer logos, testimonials, benchmarks, pricing claims, or visual identity assets are provided. Do not invent them.
 - No frontend implementation or incumbent visual system exists yet.
 
-## Product Principles
+## Product principles
 
-1. Secure defaults, with enough guidance that least-privilege operation remains practical.
-2. Every important action is scoped, traceable, and explainable.
-3. Local and self-hosted deployments are first-class; scale is an operational configuration, not a rewrite.
-4. Visual workflows should clarify complex systems and lead directly to safe action.
-5. Cost information must be useful and truthful, never a hidden allocation or unsupported prediction.
+1. Use secure defaults. Give enough guidance that least-privilege operation stays practical.
+2. Keep every important action scoped, traceable, and explainable.
+3. Treat local and self-hosted deployments as first-class. Scale is configuration, not a rewrite.
+4. Use visual workflows to clarify complex systems and lead to safe action.
+5. Keep cost information useful and truthful. Do not hide allocation. Do not invent unsupported predictions.
 
-## Accessibility & Inclusion
+## Accessibility and inclusion
 
-The operator console must support keyboard navigation, text/table alternatives for charts and topology, clear focus states, semantic labels, configurable density, high-contrast operation, and server-side redaction based on the viewer's scope and permissions.
+The operator console must support:
+
+- Keyboard navigation
+- Text and table alternatives for charts and topology
+- Clear focus states
+- Semantic labels
+- Configurable density
+- High-contrast operation
+- Server-side redaction based on viewer scope and permissions
+
+## Documentation style
+
+Write product documentation in [ASD-STE100 Simplified Technical English](docs/writing-style-ste100.md).

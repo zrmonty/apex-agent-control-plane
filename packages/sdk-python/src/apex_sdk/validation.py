@@ -23,6 +23,32 @@ CONTROL_ACTIONS = frozenset({"stop", "pause", "resume", "inject", "set_budget"})
 MAX_CONTROL_BUDGET_LIMIT = 1_000_000_000_000_000.0
 MAX_UNTRUSTED_CONTROL_CONTENT_BYTES = 32 * 1024
 
+_SECRET_KEY_NAMES = frozenset(
+    {
+        "authorization",
+        "apikey",
+        "password",
+        "secret",
+        "privatekey",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "secretkey",
+        "credential",
+        "credentials",
+        "bearertoken",
+    }
+)
+_PEM_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
+_BEARER_VALUE = re.compile(r"\bbearer\s+([A-Za-z0-9._~+/=-]{20,})\b", re.IGNORECASE)
+_JWT_VALUE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+_AWS_VALUE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+_GOOGLE_VALUE = re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b")
+_GITHUB_VALUE = re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b")
+_SLACK_VALUE = re.compile(r"\bxoxb-[A-Za-z0-9-]{12,}\b")
+_OPENAI_VALUE = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")
+
 
 class EventValidationError(ApexError):
     code = "EVENT_VALIDATION_FAILED"
@@ -79,6 +105,83 @@ def _validate_control_data(data: Mapping[str, Any]) -> None:
         raise EventValidationError("set_budget requires a positive limit that is finite and no greater than 1e15")
 
 
+def _normalized_key(key: str) -> str:
+    return "".join(character for character in key if character.isascii() and character.isalnum()).lower()
+
+
+def _sensitive_key(key: str) -> bool:
+    normalized = _normalized_key(key)
+    if normalized.endswith(("hash", "digest", "id")):
+        return False
+    return normalized in _SECRET_KEY_NAMES or any(
+        normalized.endswith(name) or normalized.startswith(name)
+        for name in ("apikey", "password", "secret", "privatekey", "credential")
+    )
+
+
+def _high_confidence_secret(text: str) -> bool:
+    return bool(
+        _PEM_PRIVATE_KEY.search(text)
+        or _BEARER_VALUE.search(text)
+        or _JWT_VALUE.search(text)
+        or _AWS_VALUE.search(text)
+        or _GOOGLE_VALUE.search(text)
+        or _GITHUB_VALUE.search(text)
+        or _SLACK_VALUE.search(text)
+        or _OPENAI_VALUE.search(text)
+    )
+
+
+def _encoded_secret(text: str) -> bool:
+    compact = text.strip()
+    if not 32 <= len(compact) <= 512:
+        return False
+    if not all(character.isascii() and (character.isalnum() or character in "+/=_-") for character in compact):
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in compact) or len(compact) >= 48
+
+
+def _hash_reference(text: str) -> bool:
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
+
+
+def _contains_secret_like(value: Any, *, control_text: bool = False, hash_like_field: bool = False) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            (_sensitive_key(str(key)) and _has_sensitive_value(item))
+            or _contains_secret_like(
+                item,
+                control_text=control_text,
+                hash_like_field=_normalized_key(str(key)).endswith(("hash", "digest", "ref", "id")),
+            )
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(
+            _contains_secret_like(item, control_text=control_text, hash_like_field=hash_like_field)
+            for item in value
+        )
+    if isinstance(value, str):
+        return _high_confidence_secret(value) or (
+            not control_text
+            and (not hash_like_field or not _hash_reference(value))
+            and _encoded_secret(value)
+        )
+    return False
+
+
+def _has_sensitive_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return any(_has_sensitive_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_sensitive_value(item) for item in value)
+    return True
+
+
 def validate_event(event: Mapping[str, Any]) -> None:
     if not isinstance(event, Mapping):
         raise EventValidationError("event must be an object")
@@ -131,6 +234,12 @@ def validate_event(event: Mapping[str, Any]) -> None:
         raise EventValidationError("data must be an object")
     if event["type"] == "control":
         _validate_control_data(event["data"])
+    if event["type"] == "llm" and "execution" in event["data"]:
+        from .execution import validate_execution
+
+        validate_execution(event["data"]["execution"])
+    if _contains_secret_like(event["data"], control_text=event["type"] == "control"):
+        raise EventValidationError("event data contains secret-like material")
     if integrity.get("prev_hash") is not None and not HASH.fullmatch(str(integrity["prev_hash"])):
         raise EventValidationError("integrity.prev_hash must be lowercase SHA-256 hex or null")
     if not HASH.fullmatch(str(integrity.get("event_hash", ""))):

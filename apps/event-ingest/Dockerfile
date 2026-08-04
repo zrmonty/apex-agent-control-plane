@@ -1,11 +1,18 @@
 # Build with immutable, approved base-image digests, for example:
 # docker build --build-arg BUILD_IMAGE=rust:<approved>@sha256:<digest> \
 #   --build-arg RUNTIME_IMAGE=debian:<approved>@sha256:<digest> .
+# Optional Valkey acceleration:
+#   --build-arg CARGO_FEATURES=valkey
 ARG BUILD_IMAGE
 FROM ${BUILD_IMAGE} AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --bin apex-event-ingest
+ARG CARGO_FEATURES=
+RUN if [ -n "$CARGO_FEATURES" ]; then \
+      cargo build --release --bin apex-event-ingest --features "$CARGO_FEATURES"; \
+    else \
+      cargo build --release --bin apex-event-ingest; \
+    fi
 
 ARG RUNTIME_IMAGE
 FROM ${RUNTIME_IMAGE}

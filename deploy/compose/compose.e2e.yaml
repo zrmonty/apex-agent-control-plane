@@ -1,0 +1,156 @@
+# Phase 0 durable-path E2E overlay (local / CI with Docker).
+#
+# Starts NATS JetStream, reference ClickHouse/archive providers, optional Postgres,
+# and reuses live-mTLS secrets generation.
+#
+# Usage (from deploy/compose/live-mtls after PKI generation):
+#   docker compose -f ../compose.e2e.yaml --project-directory . up -d
+#
+# Prefer: deploy/compose/e2e/run.ps1
+
+name: apex-e2e
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: apex
+      POSTGRES_PASSWORD: apex_e2e_local_only
+      POSTGRES_DB: apex
+    ports:
+      - "127.0.0.1:15432:5432"
+    networks: [e2e]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apex -d apex"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  jetstream:
+    image: nats:2.10
+    command: ["--config", "/run/secrets/nats_config"]
+    ports:
+      - "127.0.0.1:15222:4222"
+    networks: [e2e]
+    secrets:
+      - source: nats_config
+        target: nats_config
+      - source: nats_server_cert
+        target: nats_server_cert
+      - source: nats_server_key
+        target: nats_server_key
+      - source: ca
+        target: nats_client_ca
+    tmpfs: [/tmp, /data]
+
+  clickhouse-projection:
+    image: python:3.12-slim
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "clickhouse_projection",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--cert",
+        "/run/secrets/server_cert",
+        "--key",
+        "/run/secrets/server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+      ]
+    ports:
+      - "127.0.0.1:19443:8443"
+    volumes:
+      - ../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    networks: [e2e]
+    secrets:
+      - source: clickhouse_server_cert
+        target: server_cert
+      - source: clickhouse_server_key
+        target: server_key
+      - source: ca
+        target: ca
+
+  archive-provider:
+    image: python:3.12-slim
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "archive_provider",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8444",
+        "--cert",
+        "/run/secrets/server_cert",
+        "--key",
+        "/run/secrets/server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+      ]
+    ports:
+      - "127.0.0.1:19444:8444"
+    volumes:
+      - ../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    networks: [e2e]
+    secrets:
+      - source: archive_server_cert
+        target: server_cert
+      - source: archive_server_key
+        target: server_key
+      - source: ca
+        target: ca
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: apexminio
+      MINIO_ROOT_PASSWORD: apexminio_e2e_local_only
+    ports:
+      - "127.0.0.1:19000:9000"
+    networks: [e2e]
+    volumes:
+      - minio-data:/data
+
+networks:
+  e2e:
+
+volumes:
+  minio-data:
+
+secrets:
+  ca:
+    file: ./live-mtls/secrets/ca.pem
+  nats_config:
+    file: ./live-mtls/secrets/nats.conf
+  nats_server_cert:
+    file: ./live-mtls/secrets/nats-server.pem
+  nats_server_key:
+    file: ./live-mtls/secrets/nats-server.key
+  clickhouse_server_cert:
+    file: ./live-mtls/secrets/clickhouse-projection-server.pem
+  clickhouse_server_key:
+    file: ./live-mtls/secrets/clickhouse-projection-server.key
+  archive_server_cert:
+    file: ./live-mtls/secrets/archive-provider-server.pem
+  archive_server_key:
+    file: ./live-mtls/secrets/archive-provider-server.key

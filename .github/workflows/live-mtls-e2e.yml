@@ -1,0 +1,107 @@
+name: Live mTLS + E2E
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  live-mtls-and-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python tools
+        run: python -m pip install -U pip cryptography boto3
+
+      # Mirrors deploy/compose/e2e/run.ps1 (Linux path for GitHub-hosted runners).
+      - name: Generate live-mTLS PKI and configs
+        working-directory: deploy/compose/live-mtls
+        run: |
+          python generate_pki.py --out secrets
+          python render_configs.py
+          # Bearer token for gateway-ref / e2e parity with run.ps1
+          if [ ! -f secrets/ingest-bearer-token ]; then
+            printf 'gateway-ref-token' > secrets/ingest-bearer-token
+          fi
+
+      - name: Start live-mTLS stack (Valkey, NATS, reference providers)
+        working-directory: deploy/compose/live-mtls
+        run: docker compose -f compose.yaml up -d
+
+      - name: Start E2E compose (Postgres, MinIO, reference providers)
+        working-directory: deploy/compose
+        run: docker compose -f compose.e2e.yaml up -d
+
+      - name: Wait for services
+        run: sleep 12
+
+      - name: Live mTLS client tests
+        working-directory: apps/event-ingest
+        env:
+          APEX_LIVE_MTLS: "1"
+          APEX_LIVE_MTLS_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets
+          APEX_ALLOW_LOOPBACK_SINKS: "1"
+        run: cargo test --test live_mtls --features "test-support,valkey" -- --nocapture
+
+      - name: PostgreSQL durability tests
+        working-directory: apps/event-ingest
+        env:
+          APEX_POSTGRES_URL: postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex
+        run: cargo test --lib --features "postgres,test-support" postgres_ -- --nocapture
+
+      - name: Object-Lock acceptance (MinIO)
+        working-directory: deploy/compose
+        env:
+          MINIO_ENDPOINT: http://127.0.0.1:19000
+          MINIO_ACCESS_KEY: apexminio
+          MINIO_SECRET_KEY: apexminio_e2e_local_only
+          MINIO_BUCKET: apex-events
+        run: python object_lock_acceptance.py
+
+      - name: Azure/GCS acceptance (optional without credentials)
+        working-directory: deploy/compose
+        env:
+          APEX_CLOUD_ACCEPTANCE_OPTIONAL: "1"
+        run: |
+          python object_lock_acceptance_azure.py
+          python object_lock_acceptance_gcs.py
+
+      - name: Validate compose overlays (config only)
+        working-directory: deploy/compose
+        run: |
+          # Secret path placeholders so compose config validation can resolve files
+          mkdir -p /tmp/apex-overlay-secrets
+          : > /tmp/apex-overlay-secrets/azure-connection-string
+          : > /tmp/apex-overlay-secrets/azure-account-key
+          : > /tmp/apex-overlay-secrets/gcs-sa.json
+          docker compose -f compose.gateway-ref.yaml config >/dev/null
+          AZURE_CONNECTION_STRING_FILE=/tmp/apex-overlay-secrets/azure-connection-string \
+          AZURE_ACCOUNT_KEY_FILE=/tmp/apex-overlay-secrets/azure-account-key \
+            docker compose -f compose.gateway-ref.yaml -f compose.azure.yaml config >/dev/null
+          GCS_CREDENTIALS_FILE=/tmp/apex-overlay-secrets/gcs-sa.json \
+          APEX_ARCHIVE_GCS_BUCKET=apex-ci-bucket \
+            docker compose -f compose.gateway-ref.yaml -f compose.gcs.yaml config >/dev/null
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: deploy/compose/live-mtls
+        run: |
+          docker compose -f compose.yaml ps -a || true
+          docker compose -f compose.yaml logs --tail 80 || true
+          docker compose -f ../compose.e2e.yaml logs --tail 40 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f deploy/compose/live-mtls/compose.yaml down --remove-orphans || true
+          docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
+          docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true

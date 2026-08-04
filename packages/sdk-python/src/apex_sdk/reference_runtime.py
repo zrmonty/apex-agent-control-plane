@@ -61,9 +61,30 @@ class ReferenceReasonActLoop:
         def emit(event_type: str, data: dict[str, Any]) -> None:
             emit_from(builder, event_type, data)
 
+        from .execution import build_execution
+
         prompt_ref = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         emit("turn_start", {"prompt_ref": prompt_ref})
-        emit("llm", {"provider": "reference", "model": self._version["model"], "input_tokens": 0, "output_tokens": 0})
+        model_name = self._version["model"]
+        emit(
+            "llm",
+            {
+                "provider": "reference",
+                "model": model_name,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "execution": build_execution(
+                    requested_provider="reference",
+                    requested_model=model_name,
+                    effective_provider="reference",
+                    effective_model=model_name,
+                    routing_reason="configured",
+                    input_tokens=0,
+                    output_tokens=0,
+                    evidence_source="sdk_observed",
+                ),
+            },
+        )
         if child_agent_id is not None:
             if _SAFE_IDENTIFIER.fullmatch(child_agent_id) is None:
                 emit(

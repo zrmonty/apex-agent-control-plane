@@ -1,7 +1,26 @@
 """Small, framework-neutral instrumentation primitives for Apex."""
 
+from .bundle import (
+    BUNDLE_VERSION,
+    SIGNATURE_ALG,
+    BundleError,
+    BundleSignatureError,
+    fingerprint_public_key,
+    generate_bundle_signing_key,
+    load_bundle,
+    load_trust_pins,
+    load_trust_public_keys,
+    local_development_bundle,
+    sign_bundle,
+    signing_transcript,
+    validate_bundle,
+    verify_bundle_signature,
+    write_signed_bundle,
+)
+from .connect import Apex, PreflightError, PreflightResult, assert_tool_policy
 from .control import ControlAction, ControlCommand, ControlValidationError
 from .errors import ConfigurationError, EventIntegrityError, TelemetryMappingError
+from .execution import build_execution, validate_execution
 from .exporter import BoundedGrpcExporter, ExportDeliveryError
 from .event import EventBuilder, canonical_event_bytes, event_hash
 from .observer import BoundedObserver, JsonlSink, ObserverStats
@@ -9,12 +28,76 @@ from .telemetry import to_otel_attributes
 from .reference_runtime import ReferenceReasonActLoop
 from .validation import EventValidationError, validate_event
 from .template import (
+    CONTROL_CATALOG,
     CONTROL_FRAMEWORK_MAP,
     GOLD_STANDARD_CONTROLS,
+    HIGH_IMPACT_CONTROLS,
     TEMPLATE_VERSION,
     AgentTemplateError,
+    ControlCategory,
+    ControlSpec,
     TemplateAssessment,
     assess_agent_template,
+    control_catalog,
+    control_spec,
+    gold_standard_controls,
+    gold_standard_manifest,
+    require_compliant_template,
 )
 
-__all__ = ["AgentTemplateError", "BoundedGrpcExporter", "BoundedObserver", "ConfigurationError", "ControlAction", "ControlCommand", "ControlValidationError", "EventBuilder", "EventIntegrityError", "EventValidationError", "ExportDeliveryError", "JsonlSink", "ObserverStats", "ReferenceReasonActLoop", "TemplateAssessment", "TelemetryMappingError", "CONTROL_FRAMEWORK_MAP", "GOLD_STANDARD_CONTROLS", "TEMPLATE_VERSION", "assess_agent_template", "canonical_event_bytes", "event_hash", "to_otel_attributes", "validate_event"]
+__all__ = [
+    "Apex",
+    "AgentTemplateError",
+    "BUNDLE_VERSION",
+    "SIGNATURE_ALG",
+    "BoundedGrpcExporter",
+    "BoundedObserver",
+    "BundleError",
+    "BundleSignatureError",
+    "CONTROL_CATALOG",
+    "CONTROL_FRAMEWORK_MAP",
+    "ConfigurationError",
+    "ControlAction",
+    "ControlCategory",
+    "ControlCommand",
+    "ControlSpec",
+    "ControlValidationError",
+    "EventBuilder",
+    "EventIntegrityError",
+    "EventValidationError",
+    "ExportDeliveryError",
+    "GOLD_STANDARD_CONTROLS",
+    "HIGH_IMPACT_CONTROLS",
+    "JsonlSink",
+    "ObserverStats",
+    "PreflightError",
+    "PreflightResult",
+    "ReferenceReasonActLoop",
+    "TEMPLATE_VERSION",
+    "TelemetryMappingError",
+    "TemplateAssessment",
+    "assert_tool_policy",
+    "assess_agent_template",
+    "build_execution",
+    "canonical_event_bytes",
+    "control_catalog",
+    "control_spec",
+    "event_hash",
+    "gold_standard_controls",
+    "gold_standard_manifest",
+    "fingerprint_public_key",
+    "generate_bundle_signing_key",
+    "load_bundle",
+    "load_trust_pins",
+    "load_trust_public_keys",
+    "local_development_bundle",
+    "require_compliant_template",
+    "sign_bundle",
+    "signing_transcript",
+    "to_otel_attributes",
+    "validate_bundle",
+    "validate_event",
+    "validate_execution",
+    "verify_bundle_signature",
+    "write_signed_bundle",
+]

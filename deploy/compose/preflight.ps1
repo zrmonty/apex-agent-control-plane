@@ -50,6 +50,15 @@ foreach ($key in $secretKeys) {
     }
 }
 
+$agentId = $values['APEX_BEARER_AGENT_ID']
+if ([string]::IsNullOrWhiteSpace($agentId) -or $agentId -notmatch '^[A-Za-z0-9._:-]{1,256}$' -or $agentId.Contains('..')) {
+    throw 'Compose preflight: APEX_BEARER_AGENT_ID must be a safe 1-256 character workload identifier.'
+}
+$bearerCertSha256 = $values['APEX_BEARER_CERT_SHA256']
+if ([string]::IsNullOrWhiteSpace($bearerCertSha256) -or $bearerCertSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+    throw 'Compose preflight: APEX_BEARER_CERT_SHA256 must be exactly 64 hexadecimal characters.'
+}
+
 if ($values['APEX_ARCHIVE_REQUIRE_OBJECT_LOCK'] -notin @('true', 'false')) {
     throw 'Compose preflight: APEX_ARCHIVE_REQUIRE_OBJECT_LOCK must be explicitly true or false.'
 }

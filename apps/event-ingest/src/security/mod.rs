@@ -11,11 +11,12 @@ mod validate;
 #[cfg(test)]
 mod tests;
 
-pub use detect::{detect_and_record, detection_finding, new_finding};
+pub use detect::detect_and_record;
+pub(crate) use detect::detection_finding;
 pub use error::{FindingError, FindingErrorCode};
 pub use store::FindingStore;
 pub use types::{
-    ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingInput,
-    FindingSeverity, FindingStatus, FindingStatusUpdate, FindingType, PolicyDecision,
-    SecurityFinding, SecuritySignal,
+    ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingSeverity,
+    FindingStatus, FindingStatusUpdate, FindingType, PolicyDecision, SecurityFinding,
+    SecuritySignal,
 };

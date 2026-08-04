@@ -22,13 +22,18 @@ services:
       APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/ingest_archive_client_cert
       APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/ingest_archive_client_key
       APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
+      APEX_BEARER_AGENT_ID: ${APEX_BEARER_AGENT_ID:?set APEX_BEARER_AGENT_ID to the workload agent identifier}
+      APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set APEX_BEARER_CERT_SHA256 to the authorized client certificate SHA-256 fingerprint}
       APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:?set APEX_ALLOWED_SCOPES to comma-separated workspace/namespace scopes}
+      APEX_OUTBOX_FILE: /var/lib/apex/outbox.jsonl
+      APEX_OUTBOX_BASE: /var/lib/apex
+      APEX_IDEMPOTENCY_FILE: /var/lib/apex/idempotency.jsonl
+      APEX_IDEMPOTENCY_BASE: /var/lib/apex
       APEX_GATEWAY_SERVER_CERT_FILE: /run/secrets/gateway_server_cert
       APEX_GATEWAY_SERVER_KEY_FILE: /run/secrets/gateway_server_key
       APEX_GATEWAY_CLIENT_CA_FILE: /run/secrets/gateway_client_ca
       APEX_RETRY_ATTEMPTS: ${APEX_RETRY_ATTEMPTS:-3}
       APEX_IDEMPOTENCY_CAPACITY: ${APEX_IDEMPOTENCY_CAPACITY:-50000}
-      APEX_ALLOW_IN_MEMORY_IDEMPOTENCY: ${APEX_ALLOW_IN_MEMORY_IDEMPOTENCY:?set APEX_ALLOW_IN_MEMORY_IDEMPOTENCY=true only for the Phase 0 staging gateway}
     depends_on:
       jetstream:
         condition: service_started
@@ -77,6 +82,8 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - ingest-outbox:/var/lib/apex
 
   jetstream:
     image: ${NATS_IMAGE:?set NATS_IMAGE to an approved, digest-pinned image}
@@ -272,6 +279,7 @@ networks:
     internal: true
 
 volumes:
+  ingest-outbox:
   jetstream-data:
   clickhouse-data:
   archive-data:

@@ -9,6 +9,8 @@ pub enum FindingErrorCode {
     NotFound,
     ScopeDenied,
     InvalidTransition,
+    EntropyUnavailable,
+    ClockUnavailable,
 }
 
 impl FindingErrorCode {
@@ -21,6 +23,8 @@ impl FindingErrorCode {
             Self::NotFound => "SECURITY_FINDING_NOT_FOUND",
             Self::ScopeDenied => "SECURITY_FINDING_SCOPE_DENIED",
             Self::InvalidTransition => "SECURITY_FINDING_INVALID_TRANSITION",
+            Self::EntropyUnavailable => "SECURITY_FINDING_ENTROPY_UNAVAILABLE",
+            Self::ClockUnavailable => "SECURITY_FINDING_CLOCK_UNAVAILABLE",
         }
     }
 }
@@ -35,7 +39,7 @@ pub struct FindingError {
 }
 
 impl FindingError {
-    pub(crate) fn invalid_field() -> Self {
+    pub fn invalid_field() -> Self {
         Self {
             code: FindingErrorCode::InvalidField,
             summary: "The security finding contains an invalid field.",
@@ -50,11 +54,11 @@ impl FindingError {
     pub(crate) fn capacity() -> Self {
         Self {
             code: FindingErrorCode::Capacity,
-            summary: "The security finding store is at capacity.",
-            cause: "The append-only finding boundary refuses new records rather than evicting security evidence.",
+            summary: "The security finding or status-history quota is exhausted for this scope or the global hard cap.",
+            cause: "The append-only boundary refuses new records or status updates rather than evicting security evidence; another tenant cannot consume this scope's quota.",
             retryable: true,
             next_steps: &[
-                "Increase durable finding capacity or archive findings through the approved retention workflow.",
+                "Archive findings through the approved retention workflow or increase the affected scope quota/global hard cap.",
             ],
         }
     }
@@ -116,17 +120,44 @@ impl FindingError {
             ],
         }
     }
+
+    pub(crate) fn entropy_unavailable() -> Self {
+        Self {
+            code: FindingErrorCode::EntropyUnavailable,
+            summary: "The security finding ID could not be generated securely.",
+            cause: "The operating-system cryptographic random source was unavailable; a predictable fallback is never used.",
+            retryable: true,
+            next_steps: &["Restore the host random source and retry finding creation."],
+        }
+    }
+
+    pub(crate) fn clock_unavailable() -> Self {
+        Self {
+            code: FindingErrorCode::ClockUnavailable,
+            summary: "The security finding timestamp could not be established.",
+            cause: "The system clock is earlier than the Unix epoch; epoch-zero timestamps are not accepted as security evidence.",
+            retryable: true,
+            next_steps: &[
+                "Restore a valid system clock and retry finding creation or status changes.",
+            ],
+        }
+    }
 }
 
 impl fmt::Display for FindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let next = self
+            .next_steps
+            .first()
+            .copied()
+            .unwrap_or("No remediation guidance is available.");
         write!(
             f,
             "{}: {} Cause: {} Next: {}",
             self.code.as_str(),
             self.summary,
             self.cause,
-            self.next_steps[0]
+            next
         )
     }
 }

@@ -12,6 +12,8 @@ pub enum FindingType {
     UntrustedControlBoundary,
     SecretExposure,
     ToolPolicyDenied,
+    AuthAbuse,
+    AdmissionAbuse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -64,6 +66,8 @@ pub enum SecuritySignal {
     SecretExposure,
     ToolPolicyDenied,
     AgentTemplateNoncompliant,
+    AuthAbuse,
+    AdmissionAbuse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,18 +118,8 @@ pub struct SecurityFinding {
     pub created_at_ms: u64,
 }
 
-impl SecurityFinding {
-    pub(crate) fn evidence_key(&self) -> String {
-        self.evidence_refs
-            .iter()
-            .map(|e| format!("{}:{}:{}", e.event_id, e.field_path, e.value_hash))
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FindingInput {
+pub(crate) struct FindingInput {
     pub finding_type: FindingType,
     pub severity: FindingSeverity,
     pub confidence: FindingConfidence,
@@ -143,5 +137,7 @@ pub struct FindingStatusUpdate {
     pub to: FindingStatus,
     pub action: Option<ContainmentAction>,
     pub actor_scope: String,
+    #[serde(default)]
+    pub actor_subject: String,
     pub at_ms: u64,
 }

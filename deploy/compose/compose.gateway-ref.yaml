@@ -1,0 +1,208 @@
+# Overlay: run ingest-gateway against reference providers + NATS from live-mTLS PKI.
+#
+# Usage (from deploy/compose after generating live-mtls secrets):
+#
+#   cd live-mtls && python generate_pki.py && python render_configs.py && cd ..
+#   docker compose -f compose.gateway-ref.yaml --project-directory live-mtls up -d --build
+#
+# Or: deploy/compose/gateway-ref/run.ps1
+#
+# This is a local/CI reference path — not a substitute for digest-pinned production images.
+
+name: apex-gateway-ref
+
+services:
+  jetstream:
+    image: nats:2.10
+    command: ["--config", "/run/secrets/nats_config"]
+    networks: [gateway-ref]
+    secrets:
+      - source: nats_config
+        target: nats_config
+      - source: nats_server_cert
+        target: nats_server_cert
+      - source: nats_server_key
+        target: nats_server_key
+      - source: ca
+        target: nats_client_ca
+    tmpfs: [/tmp, /data]
+
+  clickhouse-projection:
+    image: python:3.12-slim
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "clickhouse_projection",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--cert",
+        "/run/secrets/server_cert",
+        "--key",
+        "/run/secrets/server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+      ]
+    volumes:
+      - ../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    networks: [gateway-ref]
+    secrets:
+      - source: clickhouse_server_cert
+        target: server_cert
+      - source: clickhouse_server_key
+        target: server_key
+      - source: ca
+        target: ca
+
+  archive-provider:
+    image: python:3.12-slim
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+      APEX_ARCHIVE_BACKEND: local
+    command:
+      [
+        "python",
+        "-m",
+        "apex_reference_providers",
+        "archive_provider",
+        "--bind",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--cert",
+        "/run/secrets/server_cert",
+        "--key",
+        "/run/secrets/server_key",
+        "--client-ca",
+        "/run/secrets/ca",
+        "--data-dir",
+        "/var/lib/apex",
+        "--backend",
+        "local",
+      ]
+    volumes:
+      - ../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+    tmpfs: [/var/lib/apex]
+    networks: [gateway-ref]
+    secrets:
+      - source: archive_server_cert
+        target: server_cert
+      - source: archive_server_key
+        target: server_key
+      - source: ca
+        target: ca
+
+  ingest-gateway:
+    build:
+      context: ../../apps/event-ingest
+      dockerfile: Dockerfile
+      args:
+        BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust:1-bookworm}
+        RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian:bookworm-slim}
+        CARGO_FEATURES: ${GATEWAY_CARGO_FEATURES:-}
+    environment:
+      APEX_TRUSTED_SECRET_BASE: /run/secrets
+      APEX_LISTEN_ADDR: 0.0.0.0:8443
+      APEX_NATS_URL: tls://jetstream:4222
+      APEX_NATS_CA_FILE: /run/secrets/ca
+      APEX_NATS_CLIENT_CERT_FILE: /run/secrets/ingest_nats_client_cert
+      APEX_NATS_CLIENT_KEY_FILE: /run/secrets/ingest_nats_client_key
+      APEX_NATS_USERNAME_FILE: /run/secrets/nats_username
+      APEX_NATS_PASSWORD_FILE: /run/secrets/nats_password
+      APEX_CLICKHOUSE_ENDPOINT: https://clickhouse-projection:8443/v1/events
+      APEX_CLICKHOUSE_CA_FILE: /run/secrets/ca
+      APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/ingest_http_client_cert
+      APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/ingest_http_client_key
+      APEX_ARCHIVE_ENDPOINT: https://archive-provider:8443/v1/events
+      APEX_ARCHIVE_CA_FILE: /run/secrets/ca
+      APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/ingest_http_client_cert
+      APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/ingest_http_client_key
+      APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
+      APEX_BEARER_AGENT_ID: ${APEX_BEARER_AGENT_ID:-reference-agent}
+      APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set APEX_BEARER_CERT_SHA256 to the authorized client certificate SHA-256 fingerprint}
+      APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:-acme/prod}
+      APEX_OUTBOX_FILE: /var/lib/apex/outbox.jsonl
+      APEX_OUTBOX_BASE: /var/lib/apex
+      APEX_IDEMPOTENCY_FILE: /var/lib/apex/idempotency.jsonl
+      APEX_IDEMPOTENCY_BASE: /var/lib/apex
+      APEX_GATEWAY_SERVER_CERT_FILE: /run/secrets/gateway_server_cert
+      APEX_GATEWAY_SERVER_KEY_FILE: /run/secrets/gateway_server_key
+      APEX_GATEWAY_CLIENT_CA_FILE: /run/secrets/ca
+      APEX_RETRY_ATTEMPTS: "3"
+      APEX_IDEMPOTENCY_CAPACITY: "50000"
+    depends_on:
+      - jetstream
+      - clickhouse-projection
+      - archive-provider
+    networks: [gateway-ref]
+    ports:
+      - "${APEX_INGEST_BIND:-127.0.0.1}:${APEX_INGEST_PORT:-18445}:8443"
+    volumes:
+      - gateway-data:/var/lib/apex
+    secrets:
+      - ca
+      - ingest_nats_client_cert
+      - source: ingest_nats_client_key
+        target: ingest_nats_client_key
+      - nats_username
+      - nats_password
+      - ingest_http_client_cert
+      - source: ingest_http_client_key
+        target: ingest_http_client_key
+      - ingest_bearer_token
+      - gateway_server_cert
+      - source: gateway_server_key
+        target: gateway_server_key
+
+networks:
+  gateway-ref:
+
+volumes:
+  gateway-data:
+
+secrets:
+  ca:
+    file: ./live-mtls/secrets/ca.pem
+  nats_config:
+    file: ./live-mtls/secrets/nats.conf
+  nats_server_cert:
+    file: ./live-mtls/secrets/nats-server.pem
+  nats_server_key:
+    file: ./live-mtls/secrets/nats-server.key
+  nats_username:
+    file: ./live-mtls/secrets/nats-username
+  nats_password:
+    file: ./live-mtls/secrets/nats-password
+  clickhouse_server_cert:
+    file: ./live-mtls/secrets/clickhouse-projection-server.pem
+  clickhouse_server_key:
+    file: ./live-mtls/secrets/clickhouse-projection-server.key
+  archive_server_cert:
+    file: ./live-mtls/secrets/archive-provider-server.pem
+  archive_server_key:
+    file: ./live-mtls/secrets/archive-provider-server.key
+  ingest_nats_client_cert:
+    file: ./live-mtls/secrets/ingest-nats-client.pem
+  ingest_nats_client_key:
+    file: ./live-mtls/secrets/ingest-nats-client.key
+  ingest_http_client_cert:
+    file: ./live-mtls/secrets/ingest-http-client.pem
+  ingest_http_client_key:
+    file: ./live-mtls/secrets/ingest-http-client.key
+  # Reuse CA as gateway server material for local reference only.
+  gateway_server_cert:
+    file: ./live-mtls/secrets/nats-server.pem
+  gateway_server_key:
+    file: ./live-mtls/secrets/nats-server.key
+  ingest_bearer_token:
+    file: ./live-mtls/secrets/ingest-bearer-token

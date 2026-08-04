@@ -1,0 +1,164 @@
+use std::collections::HashSet;
+
+use prost::Message;
+
+use super::canonical::canonical_event_hash;
+use super::control::validate_control_data;
+use super::identifiers::{
+    is_lowercase_sha256, is_lowercase_uuidv7, is_rfc3339_utc, is_scope_identifier,
+};
+use super::secrets::{contains_secret_like_control_data, contains_secret_like_data};
+use crate::{GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES, proto};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestRequest {
+    pub(crate) event_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) namespace_id: String,
+    pub(crate) scope_key: String,
+    pub(crate) envelope: Vec<u8>,
+}
+
+impl IngestRequest {
+    #[cfg(feature = "test-support")]
+    pub fn new(
+        event_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        namespace_id: impl Into<String>,
+        envelope: Vec<u8>,
+    ) -> Self {
+        let event_id = event_id.into();
+        let workspace_id = workspace_id.into();
+        let namespace_id = namespace_id.into();
+        Self {
+            event_id,
+            workspace_id: workspace_id.clone(),
+            namespace_id: namespace_id.clone(),
+            scope_key: format!("{workspace_id}/{namespace_id}"),
+            envelope,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn envelope(&self) -> &[u8] {
+        &self.envelope
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn canonical_hash_for_test(
+        envelope: &proto::EventEnvelope,
+    ) -> Result<String, GatewayError> {
+        canonical_event_hash(envelope)
+    }
+
+    pub(crate) fn scope_key(&self) -> &str {
+        &self.scope_key
+    }
+
+    pub(crate) fn from_validated_transport(
+        envelope: proto::EventEnvelope,
+    ) -> Result<Self, GatewayError> {
+        if envelope.encoded_len() > MAX_ENVELOPE_BYTES {
+            return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
+        }
+        if !is_lowercase_uuidv7(&envelope.event_id) {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidEventId));
+        }
+        if !is_rfc3339_utc(&envelope.timestamp) {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidTimestamp));
+        }
+        let integrity = envelope
+            .integrity
+            .as_ref()
+            .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidIntegrity))?;
+        if !is_lowercase_sha256(&integrity.event_hash)
+            || integrity
+                .prev_hash
+                .as_deref()
+                .is_some_and(|hash| !is_lowercase_sha256(hash))
+        {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
+        }
+        let scope = envelope
+            .scope
+            .as_ref()
+            .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
+        let unique_agent_groups = scope.agent_group_ids.iter().collect::<HashSet<_>>();
+        if envelope.schema_version != 1
+            || !matches!(envelope.r#type, 1..=12)
+            || !matches!(
+                envelope.actor.as_ref().map(|actor| actor.r#type),
+                Some(1..=4)
+            )
+            || envelope.data.is_none()
+            || !is_scope_identifier(&envelope.agent_id)
+            || !is_scope_identifier(&envelope.run_id)
+            || !is_scope_identifier(&envelope.trace_id)
+            || envelope
+                .parent_run_id
+                .as_deref()
+                .is_some_and(|id| !is_scope_identifier(id))
+            || !is_scope_identifier(&scope.workspace_id)
+            || !is_scope_identifier(&scope.namespace_id)
+            || scope.agent_group_ids.len() > 128
+            || unique_agent_groups.len() != scope.agent_group_ids.len()
+            || scope
+                .agent_group_ids
+                .iter()
+                .any(|id| !is_scope_identifier(id))
+            || envelope
+                .actor
+                .as_ref()
+                .is_none_or(|actor| !is_scope_identifier(&actor.id))
+            || envelope.version.as_ref().is_none_or(|version| {
+                !is_scope_identifier(&version.agent_code)
+                    || !is_scope_identifier(&version.prompt)
+                    || !is_scope_identifier(&version.model)
+            })
+        {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
+        }
+        let contains_secret = envelope
+            .data
+            .as_ref()
+            .map(|data| {
+                if envelope.r#type == 9 {
+                    contains_secret_like_control_data(data)
+                } else {
+                    contains_secret_like_data(data)
+                }
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if contains_secret {
+            return Err(GatewayError::new(GatewayErrorCode::SecretExposure));
+        }
+        if envelope.r#type == 9 {
+            validate_control_data(
+                envelope
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?,
+            )?;
+        }
+        if canonical_event_hash(&envelope)? != integrity.event_hash {
+            return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
+        }
+        let serialized = envelope.encode_to_vec();
+        if serialized.len() > MAX_ENVELOPE_BYTES {
+            return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
+        }
+        Ok(Self {
+            event_id: envelope.event_id,
+            workspace_id: scope.workspace_id.clone(),
+            namespace_id: scope.namespace_id.clone(),
+            scope_key: format!("{}/{}", scope.workspace_id, scope.namespace_id),
+            envelope: serialized,
+        })
+    }
+}

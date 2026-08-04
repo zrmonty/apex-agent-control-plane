@@ -1,0 +1,5 @@
+# Optional cloud SDKs for archive-provider backends (install only what you need).
+# The gateway never depends on these packages.
+azure-storage-blob>=12.19.0
+google-cloud-storage>=2.14.0
+boto3>=1.34.0

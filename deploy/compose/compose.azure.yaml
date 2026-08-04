@@ -1,0 +1,35 @@
+# Overlay: point archive-provider at Azure Blob (immutable storage).
+#
+# Usage (with main compose or gateway-ref + reference archive-provider service):
+#   docker compose -f compose.yaml -f compose.azure.yaml up -d
+#
+# Prerequisites:
+#   - archive-provider image/process that supports APEX_ARCHIVE_BACKEND=azure
+#   - Connection string or account URL+key mounted as secrets (never in env values for production)
+#   - Container provisioned for immutability per Azure docs
+#
+# Gateway still uses HTTPS to archive-provider; Azure SDK stays out of event-ingest.
+
+services:
+  archive-provider:
+    environment:
+      APEX_ARCHIVE_BACKEND: azure
+      APEX_ARCHIVE_AZURE_CONTAINER: ${APEX_ARCHIVE_AZURE_CONTAINER:-apex-events}
+      # Prefer file-mounted connection string:
+      APEX_ARCHIVE_AZURE_CONNECTION_STRING_FILE: /run/secrets/azure_connection_string
+      # Or account URL + key (key from secret file):
+      APEX_ARCHIVE_AZURE_ACCOUNT_URL: ${APEX_ARCHIVE_AZURE_ACCOUNT_URL:-}
+      APEX_ARCHIVE_AZURE_ACCOUNT_KEY_FILE: /run/secrets/azure_account_key
+    secrets:
+      - source: azure_connection_string
+        target: /run/secrets/azure_connection_string
+        mode: "0400"
+      - source: azure_account_key
+        target: /run/secrets/azure_account_key
+        mode: "0400"
+
+secrets:
+  azure_connection_string:
+    file: ${AZURE_CONNECTION_STRING_FILE:?set AZURE_CONNECTION_STRING_FILE to a secret file (or empty placeholder for URL+key mode)}
+  azure_account_key:
+    file: ${AZURE_ACCOUNT_KEY_FILE:-./secrets/azure-account-key}

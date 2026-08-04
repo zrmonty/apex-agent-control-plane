@@ -1,97 +1,211 @@
 # Phase 0 local durable services
 
-For a zero-setup home demonstration, use the [reference-agent quickstart](../../README.md#home-test-in-five-minutes) first. This Compose profile is the hardened durable-dependency path and intentionally requires explicit images, certificates, and local secret files.
+For a zero-setup home demonstration, use the [reference-agent quickstart](../../docs/getting-started.md#a--local-first-trace) first.
 
-This profile starts the Phase 0 ingest gateway and its durable dependencies: NATS JetStream, ClickHouse, and an S3-compatible **archive staging store**. It deliberately exposes no broker, database, object-storage API, console, or NATS monitoring ports to the host; only the gateway port is optionally bound (localhost by default). MinIO's browser interface is disabled. JetStream requires mutually authenticated TLS for every client connection.
+This Compose profile is the hardened durable-dependency path. It needs explicit images, certificates, and local secret files.
 
-There are no public Apex provider images in this repository yet. The
-`CLICKHOUSE_API_IMAGE` and `ARCHIVE_API_IMAGE` values are deployment-owned
-images that implement the frozen provider contracts. “Approved, digest-pinned”
-means an operator builds or obtains an image, scans/tests/signs it, and records
-the immutable `@sha256:...` digest in `.env`; do not replace the placeholders
-with a floating tag. If you only want to try the SDK locally, use the JSONL
-quickstart and skip this Compose profile entirely.
+Day-one guide: [Getting started](../../docs/getting-started.md).  
+Lab install: [deploy/lab/README.md](../lab/README.md).
 
-Before starting it, copy `deploy/compose/.env.example` to `deploy/compose/.env`, replace every image placeholder with an approved immutable digest, and generate the referenced secret files. Do not commit `.env` or the `secrets/` directory. Start from `deploy/compose/templates/nats.conf.template`, `deploy/compose/templates/clickhouse-users.xml.template`, and `deploy/compose/templates/clickhouse-tls.xml.template`; the user template removes ClickHouse's default user and does not grant access-management privileges. The TLS template disables ClickHouse plaintext ports and requires a client certificate issued by the configured CA. The NATS template is an ingest-publisher credential restricted to `apex.events.>`; provision separate least-privilege credentials for consumers and control services. Supply a JetStream server certificate, private key, and client-CA certificate. Supply MinIO's server certificate and private key; the profile starts MinIO only with TLS enabled. The NATS and ClickHouse containers refuse to start while `REPLACE_WITH` placeholders remain. MinIO reads root credentials from files.
+## Optional overlays (Valkey, Azure, GCS, gateway-ref)
 
-Run the non-secret preflight before starting Docker services:
+Overlays use the same rules as production Compose. Secrets are files. The gateway process does not hold cloud credentials.
+
+### Valkey acceleration
+
+Valkey is **not** required for a functional install.
+
+When you want cross-process rate limits and abuse fingerprint counters:
+
+1. Build the gateway with `cargo build --features valkey` (or bake the feature into `APEX_INGEST_IMAGE`).
+2. Render `templates/valkey.conf.template` and `templates/valkey.acl.template` into `secrets/`.
+3. Create Valkey server and client mTLS material and the ingest ACL password file.
+4. Set `VALKEY_IMAGE` to an approved digest-pinned Valkey image.
+5. Start with both Compose files:
+
+```powershell
+docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml -f deploy/compose/compose.valkey.yaml up -d
+```
+
+Valkey is internal only (no host port). It uses TLS with client certificates. It must never hold authoritative auth, audit, cost, or durable event data. If Valkey is unavailable, the gateway falls back to process-local limits and continues durable fanout.
+
+### Azure Blob archive
+
+Use `compose.azure.yaml`. Set `APEX_ARCHIVE_BACKEND=azure`. Set `AZURE_CONNECTION_STRING_FILE` (preferred) and/or `AZURE_ACCOUNT_KEY_FILE` with `APEX_ARCHIVE_AZURE_ACCOUNT_URL`. See `.env.example`.
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f compose.azure.yaml up -d
+```
+
+### GCS archive
+
+Use `compose.gcs.yaml`. Set `APEX_ARCHIVE_GCS_BUCKET` and `GCS_CREDENTIALS_FILE`.
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f compose.gcs.yaml up -d
+```
+
+### Gateway and reference providers
+
+Use `compose.gateway-ref.yaml`. This local/CI stack builds ingest-gateway. It runs reference ClickHouse projection and local archive against live-mTLS PKI. Proprietary provider images are not required.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/gateway-ref/run.ps1
+```
+
+### Live mTLS and E2E
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/e2e/run.ps1
+```
+
+## What this profile starts
+
+This profile starts the Phase 0 ingest gateway and durable dependencies: NATS JetStream, ClickHouse, and an S3-compatible archive staging store.
+
+It does not expose broker, database, object-storage API, console, or NATS monitoring ports to the host. Only the gateway port is optionally bound (localhost by default). MinIO browser is disabled. JetStream requires mutual TLS for every client connection.
+
+## Provider images
+
+This repository does not ship public Apex provider images yet.
+
+Set `CLICKHOUSE_API_IMAGE` and `ARCHIVE_API_IMAGE` to deployment-owned images that implement the frozen provider contracts.
+
+**Approved, digest-pinned** means:
+
+1. An operator builds or obtains an image.
+2. The operator scans, tests, and signs it.
+3. The operator records the immutable `@sha256:...` digest in `.env`.
+
+Do not replace placeholders with a floating tag.
+
+If you only want the SDK locally, use the JSONL quickstart. Skip this Compose profile.
+
+## Before you start
+
+1. Copy `deploy/compose/.env.example` to `deploy/compose/.env`.
+2. Replace every image placeholder with an approved immutable digest.
+3. Generate the referenced secret files.
+4. Do not commit `.env` or the `secrets/` directory.
+5. Start from the templates under `deploy/compose/templates/`.
+
+Notes on templates:
+
+- ClickHouse user template removes the default user. It does not grant access-management privileges.
+- ClickHouse TLS template disables plaintext ports. It requires a client certificate from the configured CA.
+- NATS template is an ingest-publisher credential restricted to `apex.events.>`. Create separate least-privilege credentials for consumers and control services.
+- Supply JetStream server certificate, private key, and client-CA certificate.
+- Supply MinIO server certificate and private key. The profile starts MinIO only with TLS enabled.
+- NATS and ClickHouse containers refuse to start while `REPLACE_WITH` placeholders remain.
+- MinIO reads root credentials from files.
+
+## Preflight
+
+Run non-secret preflight before Docker services:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/preflight.ps1
 ```
 
-Linux and macOS use the equivalent Bash preflight:
+Linux and macOS:
 
 ```bash
 ./deploy/compose/preflight.sh
 ```
 
-On macOS, `./deploy/compose/preflight-macos.sh` is also available and refuses
-to run on a non-Darwin host. Make the scripts executable after checkout with
-`chmod 700 deploy/compose/preflight.sh deploy/compose/preflight-macos.sh`.
+On macOS, `./deploy/compose/preflight-macos.sh` is also available. It refuses a non-Darwin host.
 
-It verifies digest pinning, every certificate/key/credential path, explicit
-Object-Lock mode, bucket naming, the Docker daemon, and rendered Compose
-configuration without printing secret values. It also rejects a non-loopback
-`APEX_INGEST_BIND` unless `APEX_ALLOW_NONLOCAL_INGEST_BIND=true` is explicitly
-set; binding `0.0.0.0` requires an approved firewall and mTLS network policy.
+Make scripts executable after checkout:
+
+```bash
+chmod 700 deploy/compose/preflight.sh deploy/compose/preflight-macos.sh
+```
+
+Preflight checks:
+
+- Digest pinning
+- Certificate, key, and credential paths
+- Explicit Object-Lock mode
+- Bucket naming
+- Docker daemon
+- Rendered Compose configuration
+
+Preflight does not print secret values. It rejects a non-loopback `APEX_INGEST_BIND` unless `APEX_ALLOW_NONLOCAL_INGEST_BIND=true` is set. Binding `0.0.0.0` needs an approved firewall and mTLS network policy.
+
+## Start services
 
 ```powershell
 docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml up -d
 ```
 
-The `ingest-gateway` service now runs the authenticated gRPC boundary and the
-JetStream → ClickHouse → archive durable fanout. Build and publish it from
-`apps/event-ingest/Dockerfile` using approved immutable build/runtime image
-digests, then set `APEX_INGEST_IMAGE` to that digest. The gateway fails closed
-when endpoint, certificate, bearer-token, scope, or NATS credential settings are
-missing. It binds to localhost by default; expose it to an agent network only
-after issuing client certificates and applying an explicit network policy.
+## Ingest gateway behavior
 
-The current gateway idempotency index is bounded in memory. Compose requires
-the explicit `APEX_ALLOW_IN_MEMORY_IDEMPOTENCY=true` staging acknowledgment and
-the gateway refuses to start without it. Do not use this mode for production or
-regulated retention: a restart can lose the in-memory index. Replace it with a
-durable idempotency store before onboarding production agents.
+`ingest-gateway` runs the authenticated gRPC boundary and the JetStream → ClickHouse → archive durable fanout.
 
-Compose now includes internal-only `clickhouse-projection` and
-`archive-provider` service slots. Set `CLICKHOUSE_API_IMAGE` and
-`ARCHIVE_API_IMAGE` to approved digest-pinned images implementing the frozen
-contracts in [`contracts/clickhouse/v1.md`](../../contracts/clickhouse/v1.md)
-and [`contracts/archive-provider/v1.md`](../../contracts/archive-provider/v1.md).
-The slots terminate mTLS for the gateway and use separate writer credentials
-to reach native ClickHouse and the archive backend. Native ClickHouse and
-MinIO do not implement `/v1/events`; never point the gateway at those native
-URLs. Provider images must fail closed when certificates, client CAs, backend,
-size limits, or strict Object-Lock settings are invalid.
+1. Build and publish from `apps/event-ingest/Dockerfile` with approved immutable digests.
+2. Set `APEX_INGEST_IMAGE` to that digest.
+3. The gateway fails closed when endpoint, certificate, bearer-token, scope, or NATS credential settings are missing.
+4. It binds to localhost by default. Expose it to an agent network only after you issue client certificates and apply network policy.
+5. File-bearer credential binds to `APEX_BEARER_AGENT_ID`. The gateway rejects missing bindings and non-matching agent or AGENT-actor identities.
+6. Set `APEX_BEARER_CERT_SHA256` to the SHA-256 fingerprint of the one client certificate authorized for that bearer. For PEM material, compute it over DER bytes with `openssl x509 -in client.pem -outform DER | sha256sum` and use the first 64 hexadecimal characters.
+7. The token file is revalidated on a short interval. Replace or revoke the mounted token without process restart.
+8. This is a single-agent staging resolver. Multi-agent deployments should use SPIFFE/JWT workload identity, not one shared file token.
 
-`APEX_ARCHIVE_REQUIRE_OBJECT_LOCK` is intentionally mandatory in the deployment
-environment. `false` is an explicit staging acknowledgement; `true` requires
-the provider image to verify immutable retention, legal holds, version IDs,
-read-after-write, and content verification before accepting writes. Provider
-images must also fail closed when backend credentials are missing or when their
-backend readiness check cannot be established; Compose startup ordering is not
-a readiness guarantee.
+## Outbox and idempotency
 
-The archive-provider receives separate file-mounted backend access and secret
-keys. These must belong to a least-privilege MinIO user restricted to the
-configured bucket; never reuse the MinIO root credentials used by the
-one-shot bucket bootstrap.
+The gateway needs a persistent append-only outbox at `/var/lib/apex`.
 
-The defaults are `https://clickhouse-projection:8443/v1/events` and
-`https://archive-provider:8443/v1/events`. Override them only with an HTTPS
-endpoint preserving the same authentication, bounded-body, idempotency,
-conflict, hash-echo, and redacted-error semantics.
+- It fsyncs the canonical event before fanout.
+- It marks the row complete only after JetStream, ClickHouse, and archive acknowledge.
+- It replays pending rows before it accepts traffic after restart.
+- Idempotency uses a bounded fsync-backed journal at `/var/lib/apex/idempotency.jsonl` with per-scope quotas.
+- Use PostgreSQL adapters for multi-process or regulated production workloads.
 
-The archive store is not an Object-Lock/WORM archive yet. A future archive forwarder must create an Object-Lock-enabled bucket, apply retention/legal-hold policy, and verify those capabilities before any strict retention profile is enabled.
+## Provider slots
 
-The `archive-store-init` one-shot service now performs that staging bootstrap:
-it connects to MinIO over TLS using the mounted CA, creates
-`APEX_ARCHIVE_BUCKET` with `--with-lock`, and runs `mc retention info` before
-the archive-provider is allowed to start. Its credential-format check rejects
-ambiguous shell/JSON characters rather than exposing credentials in command-line
-arguments. This proves bucket lock capability only; strict production retention
-still requires the archive-provider acceptance suite and an independently
-verified Object-Lock policy.
+Compose includes internal-only `clickhouse-projection` and `archive-provider` slots.
 
-The ClickHouse projection definition is [../clickhouse/schema.sql](../clickhouse/schema.sql). Apply it only through an authenticated local ClickHouse client after the service is healthy; the Compose profile intentionally publishes no ClickHouse port to the host. The archive-provider API and its staging HTTP mapping are defined in [../../contracts/archive-provider/v1.md](../../contracts/archive-provider/v1.md).
+Set `CLICKHOUSE_API_IMAGE` and `ARCHIVE_API_IMAGE` to approved digest-pinned images for:
+
+- [`contracts/clickhouse/v1.md`](../../contracts/clickhouse/v1.md)
+- [`contracts/archive-provider/v1.md`](../../contracts/archive-provider/v1.md)
+
+Slots terminate mTLS for the gateway. They use separate writer credentials to reach native ClickHouse and the archive backend.
+
+Native ClickHouse and MinIO do not implement `/v1/events`. Never point the gateway at those native URLs.
+
+Provider images must fail closed when certificates, client CAs, backend, size limits, or strict Object-Lock settings are invalid.
+
+## Object-Lock setting
+
+`APEX_ARCHIVE_REQUIRE_OBJECT_LOCK` is mandatory in the deployment environment.
+
+- `false` is an explicit staging acknowledgement.
+- `true` requires the provider image to verify immutable retention, legal holds, version IDs, read-after-write, and content verification before writes.
+
+Provider images must fail closed when backend credentials are missing or when backend readiness fails. Compose start order is not a readiness guarantee.
+
+Archive-provider receives separate file-mounted backend access and secret keys. These must belong to a least-privilege MinIO user for the configured bucket. Never reuse MinIO root credentials used by one-shot bucket bootstrap.
+
+Defaults:
+
+- `https://clickhouse-projection:8443/v1/events`
+- `https://archive-provider:8443/v1/events`
+
+Override only with an HTTPS endpoint that keeps the same authentication, body limits, idempotency, conflict, hash-echo, and redacted-error rules.
+
+## Archive store init
+
+`archive-store-init` connects to MinIO over TLS with the mounted CA. It creates `APEX_ARCHIVE_BUCKET` with `--with-lock`. It runs `mc retention info` before archive-provider starts.
+
+This proves bucket lock capability only. Strict production retention still needs the archive-provider acceptance suite and an independently verified Object-Lock policy.
+
+## Schema and contracts
+
+ClickHouse projection definition: [../clickhouse/schema.sql](../clickhouse/schema.sql).
+
+Apply schema only through an authenticated local ClickHouse client after the service is healthy. The Compose profile publishes no ClickHouse port to the host.
+
+Archive-provider API: [../../contracts/archive-provider/v1.md](../../contracts/archive-provider/v1.md).
+
+Writing style: [ASD-STE100](../../docs/writing-style-ste100.md).

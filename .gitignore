@@ -48,4 +48,7 @@ tmp/
 *.log
 deploy/compose/.env
 deploy/compose/secrets/
+# Live mTLS handshake fixtures (PKI, ACL, passwords, rendered server configs).
+# Scripts and stubs under live-mtls/ remain tracked; only generated secrets are ignored.
+deploy/compose/live-mtls/secrets/
 .local/

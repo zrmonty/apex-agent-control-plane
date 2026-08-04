@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Generate a local-dev-only PKI for live mTLS handshake tests.
+
+NEVER use these materials in production. They exist solely so developers and CI
+can exercise Valkey, NATS, and provider mTLS without external CAs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import ipaddress
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+
+def _key() -> rsa.RSAPrivateKey:
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _name(common_name: str) -> x509.Name:
+    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+
+
+def _prepare_write(path: Path) -> None:
+    if path.exists():
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _write_key(path: Path, key: rsa.RSAPrivateKey) -> None:
+    _prepare_write(path)
+    path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _write_cert(path: Path, cert: x509.Certificate) -> None:
+    _prepare_write(path)
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def _ca(out: Path) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
+    key = _key()
+    subject = _name("Apex Live mTLS Test CA")
+    now = dt.datetime.now(dt.UTC)
+    ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=1))
+        .not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    _write_key(out / "ca.key", key)
+    _write_cert(out / "ca.pem", cert)
+    return key, cert
+
+
+def _issue(
+    *,
+    out: Path,
+    basename: str,
+    common_name: str,
+    san_dns: list[str],
+    san_ips: list[str],
+    ca_key: rsa.RSAPrivateKey,
+    ca_cert: x509.Certificate,
+    server: bool,
+) -> None:
+    key = _key()
+    now = dt.datetime.now(dt.UTC)
+    san: list[x509.GeneralName] = [x509.DNSName(name) for name in san_dns]
+    san.extend(x509.IPAddress(ipaddress.ip_address(ip)) for ip in san_ips)
+    eku = (
+        [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
+        if server
+        else [ExtendedKeyUsageOID.CLIENT_AUTH]
+    )
+    leaf_ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
+    ca_ski = ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(_name(common_name))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=1))
+        .not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.SubjectAlternativeName(san), critical=False)
+        .add_extension(leaf_ski, critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
+            critical=False,
+        )
+        .add_extension(x509.ExtendedKeyUsage(eku), critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    _write_key(out / f"{basename}.key", key)
+    _write_cert(out / f"{basename}.pem", cert)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path(__file__).resolve().parent / "secrets",
+        help="Output directory for certificates and keys",
+    )
+    args = parser.parse_args()
+    out: Path = args.out
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "README.txt").write_text(
+        "LOCAL DEVELOPMENT / LIVE mTLS FIXTURES ONLY.\n"
+        "Do not use in production. Regenerated by generate_pki.py.\n",
+        encoding="utf-8",
+    )
+    ca_key, ca_cert = _ca(out)
+    # Valkey server + ingest client
+    _issue(
+        out=out,
+        basename="valkey-server",
+        common_name="valkey",
+        san_dns=["valkey", "localhost"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
+    _issue(
+        out=out,
+        basename="ingest-valkey-client",
+        common_name="apex-ingest-valkey",
+        san_dns=["apex-ingest"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
+    # NATS server + ingest client
+    _issue(
+        out=out,
+        basename="nats-server",
+        common_name="jetstream",
+        san_dns=["jetstream", "nats", "localhost"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
+    _issue(
+        out=out,
+        basename="ingest-nats-client",
+        common_name="apex-ingest-nats",
+        san_dns=["apex-ingest"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
+    # Provider API servers + gateway clients
+    for name in ("clickhouse-projection", "archive-provider"):
+        _issue(
+            out=out,
+            basename=f"{name}-server",
+            common_name=name,
+            san_dns=[name, "localhost"],
+            san_ips=["127.0.0.1"],
+            ca_key=ca_key,
+            ca_cert=ca_cert,
+            server=True,
+        )
+    _issue(
+        out=out,
+        basename="ingest-http-client",
+        common_name="apex-ingest-http",
+        san_dns=["apex-ingest"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
+    # Shared secrets used by configs
+    (out / "nats-username").write_text("ingest-publisher\n", encoding="utf-8")
+    (out / "nats-password").write_text("local-live-mtls-nats-secret-change-me\n", encoding="utf-8")
+    (out / "valkey-ingest-password").write_text(
+        "local-live-mtls-valkey-secret-change-me\n", encoding="utf-8"
+    )
+    print(f"Wrote local-dev PKI under {out}")
+
+
+if __name__ == "__main__":
+    main()
