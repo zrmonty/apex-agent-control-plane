@@ -164,12 +164,29 @@ def main() -> None:
     print("get_object_retention ok")
 
     try:
-        s3.put_object_legal_hold(
-            Bucket=args.bucket,
-            Key=key,
-            LegalHold={"Status": "ON"},
-            ChecksumAlgorithm="CRC32",
-        )
+        # MinIO rejects some boto3 default checksum modes on LegalHold with
+        # MissingContentMD5. Prefer a bare PutObjectLegalHold; only fall back
+        # to ContentMD5 if the provider still requires it.
+        try:
+            s3.put_object_legal_hold(
+                Bucket=args.bucket,
+                Key=key,
+                LegalHold={"Status": "ON"},
+            )
+        except ClientError as first:
+            code = first.response.get("Error", {}).get("Code", "")
+            if code != "MissingContentMD5":
+                raise
+            import base64
+            import hashlib as _hashlib
+
+            empty_md5 = base64.b64encode(_hashlib.md5(b"").digest()).decode("ascii")
+            s3.put_object_legal_hold(
+                Bucket=args.bucket,
+                Key=key,
+                LegalHold={"Status": "ON"},
+                ContentMD5=empty_md5,
+            )
         hold = s3.get_object_legal_hold(Bucket=args.bucket, Key=key)
         if hold.get("LegalHold", {}).get("Status") != "ON":
             raise SystemExit("legal hold not ON")
