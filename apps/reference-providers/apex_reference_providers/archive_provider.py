@@ -13,6 +13,7 @@ The ingest gateway never imports cloud SDKs; only this adapter process does.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from http.server import ThreadingHTTPServer
@@ -35,6 +36,8 @@ class Handler(DiagnosticHandler):
     backend = None  # type: ignore[assignment]
 
     def do_PUT(self) -> None:  # noqa: N802
+        if not self.require_authorized_client():
+            return
         path = unquote(self.path.split("?", 1)[0])
         prefix = "/v1/events/"
         if not path.startswith(prefix) or not path.endswith(".pb"):
@@ -57,6 +60,9 @@ class Handler(DiagnosticHandler):
             return
         if not body:
             self.send_diagnostic(400, "ARCHIVE_CONFIGURATION", "Missing event body.")
+            return
+        if hashlib.sha256(body).hexdigest() != event_hash:
+            self.send_diagnostic(400, "ARCHIVE_INTEGRITY", "The event hash header does not match the submitted body.")
             return
         try:
             result = self.backend.put(header_id, event_hash, body)

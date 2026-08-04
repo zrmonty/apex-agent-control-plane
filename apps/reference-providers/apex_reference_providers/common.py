@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import os
 import re
 import ssl
 from http.server import BaseHTTPRequestHandler
@@ -65,6 +68,16 @@ class DiagnosticHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def require_authorized_client(self) -> bool:
+        """Bind the reference write APIs to one expected mTLS client leaf."""
+        expected = os.environ.get("APEX_PROVIDER_CLIENT_CERT_SHA256", "").lower()
+        certificate = self.connection.getpeercert(binary_form=True)
+        actual = hashlib.sha256(certificate).hexdigest() if certificate else ""
+        if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected) and hmac.compare_digest(expected, actual):
+            return True
+        self.send_diagnostic(403, "CLIENT_IDENTITY_DENIED", "The mTLS client certificate is not authorized for provider writes.")
+        return False
 
     def read_body(self, max_bytes: int = MAX_EVENT_BYTES) -> bytes | None:
         length = int(self.headers.get("Content-Length", "0"))

@@ -345,6 +345,9 @@ def test_connect_signed_production_requires_trust_bundle_path(tmp_path: Path) ->
     trust_dir = tmp_path / "trust"
     trust_dir.mkdir()
     (trust_dir / "ops-1.pem").write_text(keys["public_pem"], encoding="ascii")
+    (trust_dir / "trust.pins").write_text(
+        f"ops-1={keys['fingerprint']}\n", encoding="ascii"
+    )
     doc = {
         **_staging_doc(),
         "profile": "production",
@@ -469,4 +472,3 @@ def test_pin_mismatch_on_explicit_keys() -> None:
             {"ops-1": a["public_pem"]},
             trust_pins={"ops-1": b["fingerprint"]},
         )
-

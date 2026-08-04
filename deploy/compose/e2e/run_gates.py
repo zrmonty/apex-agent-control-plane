@@ -133,6 +133,7 @@ def main() -> int:
             "--remove-orphans",
         ],
         cwd=COMPOSE,
+        env={"APEX_BEARER_CERT_SHA256": client_fp or "0" * 64},
         timeout=300,
     )
     gate("compose_e2e_up", code == 0, out, required=True)
@@ -149,6 +150,7 @@ def main() -> int:
             "--remove-orphans",
         ],
         cwd=LIVE,
+        env={"APEX_PROVIDER_CLIENT_CERT_SHA256": client_fp or "0" * 64},
         timeout=300,
     )
     gate("live_mtls_compose_up", code == 0, out, required=True)

@@ -55,19 +55,24 @@ impl ValkeyConfig {
             .trusted_base
             .canonicalize()
             .map_err(|_| EphemeralError::invalid_key())?;
-        for path in [
-            &self.password_file,
-            &self.ca_file,
-            &self.client_cert_file,
-            &self.client_key_file,
+        for (path, private) in [
+            (&self.password_file, true),
+            (&self.ca_file, false),
+            (&self.client_cert_file, false),
+            (&self.client_key_file, true),
         ] {
-            ensure_under_base(path, &base)?;
+            ensure_under_base(path, &base, private)?;
         }
         Ok(())
     }
 }
 
-fn ensure_under_base(path: &Path, base: &Path) -> Result<(), EphemeralError> {
+fn ensure_under_base(path: &Path, base: &Path, private: bool) -> Result<(), EphemeralError> {
+    #[cfg(not(unix))]
+    let _ = private;
+    if path.is_symlink() {
+        return Err(EphemeralError::invalid_key());
+    }
     let parent = path
         .parent()
         .ok_or_else(EphemeralError::invalid_key)?
@@ -76,9 +81,14 @@ fn ensure_under_base(path: &Path, base: &Path) -> Result<(), EphemeralError> {
     if !parent.starts_with(base) || path.file_name().is_none() {
         return Err(EphemeralError::invalid_key());
     }
-    if path.exists() {
-        let meta = fs::metadata(path).map_err(|_| EphemeralError::unavailable())?;
-        if !meta.is_file() {
+    let meta = fs::metadata(path).map_err(|_| EphemeralError::unavailable())?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > 1024 * 1024 {
+        return Err(EphemeralError::invalid_key());
+    }
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
             return Err(EphemeralError::invalid_key());
         }
     }
@@ -86,6 +96,9 @@ fn ensure_under_base(path: &Path, base: &Path) -> Result<(), EphemeralError> {
 }
 
 fn read_password(path: &Path) -> Result<String, EphemeralError> {
+    if path.is_symlink() {
+        return Err(EphemeralError::invalid_key());
+    }
     let raw = fs::read_to_string(path).map_err(|_| EphemeralError::unavailable())?;
     let password = raw.trim();
     if password.is_empty() || password.len() > 512 || !password.is_ascii() {

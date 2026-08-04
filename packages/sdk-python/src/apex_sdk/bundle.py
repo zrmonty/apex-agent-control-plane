@@ -771,7 +771,22 @@ def load_bundle(
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise BundleError("bundle file must be valid JSON") from exc
+    profile = document.get("profile") if isinstance(document, Mapping) else None
+    if profile in {"staging", "production"} and base_dir is None:
+        raise BundleError(
+            "staging and production bundle loading requires an explicit trusted base_dir"
+        )
     pins = load_trust_pins(trust_pins)
+    configured_trust_dir = trust_keys_dir or os.environ.get("APEX_BUNDLE_TRUST_KEYS_DIR", "").strip()
+    if configured_trust_dir:
+        default_pins = Path(configured_trust_dir) / "trust.pins"
+        if default_pins.is_file() and not default_pins.is_symlink():
+            pins = {**load_trust_pins(pins_file=default_pins), **pins}
+    if profile in {"staging", "production"} and configured_trust_dir and not pins:
+        raise BundleSignatureError(
+            "staging and production trust directories require fingerprint pins",
+            cause="A dropped PEM must not expand the bundle trust set.",
+        )
     keys = resolve_trust_public_keys(
         trust_public_keys, trust_keys_dir=trust_keys_dir, trust_pins=pins or None
     )

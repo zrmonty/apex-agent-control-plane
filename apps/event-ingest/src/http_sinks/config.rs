@@ -152,7 +152,7 @@ fn private_sink_destinations_explicitly_allowed(host: &str) -> bool {
                 })
             });
     }
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     if std::env::var("APEX_ALLOW_LOOPBACK_SINKS").ok().as_deref() == Some("1") {
         return host == "127.0.0.1" || host == "::1" || host == "localhost";
     }

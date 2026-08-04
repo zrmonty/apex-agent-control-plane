@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import threading
@@ -53,6 +54,8 @@ class Handler(DiagnosticHandler):
     store: Store
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self.require_authorized_client():
+            return
         if self.path.rstrip("/") != "/v1/events":
             self.send_error(404)
             return
@@ -66,6 +69,9 @@ class Handler(DiagnosticHandler):
             return
         if not body:
             self.send_diagnostic(400, "INVALID_ENVELOPE", "Missing event body.")
+            return
+        if hashlib.sha256(body).hexdigest() != event_hash:
+            self.send_diagnostic(400, "EVENT_INTEGRITY", "The event hash header does not match the submitted body.")
             return
         result = self.store.put(event_id, event_hash, body)
         if result == "conflict":

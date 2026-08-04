@@ -85,6 +85,7 @@ services:
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
     networks: [live-mtls]
     secrets:
       - source: clickhouse_server_cert
@@ -137,6 +138,7 @@ services:
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
     networks: [live-mtls]
     secrets:
       - source: archive_server_cert
