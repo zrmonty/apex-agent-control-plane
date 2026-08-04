@@ -66,34 +66,34 @@ jobs:
                   print(f"port {port} not open yet: {exc}")
           PY
 
-      - name: Start E2E compose (Postgres, MinIO, reference providers)
-        working-directory: deploy/compose
-        run: |
-          set -euo pipefail
-          export APEX_BEARER_CERT_SHA256="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
-          docker compose -f compose.e2e.yaml down --remove-orphans || true
-          docker compose -f compose.e2e.yaml up -d --force-recreate --remove-orphans
-          docker compose -f compose.e2e.yaml ps -a
-
       - name: Wait for live-mTLS services
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          # TCP-only readiness first (ports published). HTTPS is validated by cargo tests.
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256 || true)"
+          # Wait immediately after start (before e2e compose) so ports stay free of cross-project noise.
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
             --attempts 90 \
             --sleep 2 \
             --tcp-only
-          # Best-effort HTTPS probe (non-fatal): surfaces cert issues without blocking.
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
-            --attempts 15 \
+            --attempts 20 \
             --sleep 2 \
             || echo "HTTPS /health probe did not pass; cargo tests will verify mTLS."
           docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 30
+          docker compose -f compose.yaml logs --tail 40
+
+      - name: Start E2E compose (Postgres, MinIO)
+        working-directory: deploy/compose
+        run: |
+          set -eu
+          docker compose -f compose.e2e.yaml down --remove-orphans || true
+          # Only Postgres + MinIO for durability / Object-Lock (avoid competing ref providers).
+          docker compose -f compose.e2e.yaml up -d --force-recreate postgres minio
+          docker compose -f compose.e2e.yaml ps -a
 
       - name: Wait for E2E Postgres and MinIO
         run: |
