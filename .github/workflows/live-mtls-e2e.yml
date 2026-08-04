@@ -54,8 +54,12 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
-          export APEX_PROVIDER_CLIENT_CERT_SHA256="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256 || true)"
+          # Same fingerprint for provider write binding and gateway bearer cert binding.
+          FP="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256)"
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
+          export APEX_BEARER_CERT_SHA256="$FP"
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
+          echo "Using client cert fingerprint: $FP"
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml build clickhouse-projection archive-provider
           # Prefer --wait when available; fall back to plain up + TCP waiter.
@@ -82,6 +86,10 @@ jobs:
         working-directory: deploy/compose
         run: |
           set -eu
+          # Compose still interpolates unused services in compose.e2e.yaml.
+          FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
+          export APEX_BEARER_CERT_SHA256="$FP"
           docker compose -f compose.e2e.yaml down --remove-orphans || true
           # Only Postgres + MinIO for durability / Object-Lock (avoid competing ref providers).
           docker compose -f compose.e2e.yaml up -d --force-recreate postgres minio
@@ -140,6 +148,7 @@ jobs:
           set -euo pipefail
           FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
           export APEX_BEARER_CERT_SHA256="$FP"
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
           mkdir -p /tmp/apex-overlay-secrets
           : > /tmp/apex-overlay-secrets/azure-connection-string
           : > /tmp/apex-overlay-secrets/azure-account-key

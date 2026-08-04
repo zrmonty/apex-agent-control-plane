@@ -32,7 +32,7 @@ services:
     working_dir: /app
     environment:
       PYTHONPATH: /app
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     command:
       [
         "python",
@@ -70,7 +70,7 @@ services:
     environment:
       PYTHONPATH: /app
       APEX_ARCHIVE_BACKEND: local
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     command:
       [
         "python",
@@ -134,7 +134,7 @@ services:
       APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
       APEX_FILE_BEARER_MODE: single-agent-staging
       APEX_BEARER_AGENT_ID: ${APEX_BEARER_AGENT_ID:-reference-agent}
-      APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set APEX_BEARER_CERT_SHA256 to the authorized client certificate SHA-256 fingerprint}
+      APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:-}
       APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:-acme/prod}
       APEX_OUTBOX_FILE: /var/lib/apex/outbox.jsonl
       APEX_OUTBOX_BASE: /var/lib/apex

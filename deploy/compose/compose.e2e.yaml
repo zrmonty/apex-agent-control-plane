@@ -48,7 +48,8 @@ services:
     working_dir: /app
     environment:
       PYTHONPATH: /app
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      # Lab/CI: optional. Empty accepts any CA-trusted client in reference providers.
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     command:
       [
         "python",
@@ -87,7 +88,8 @@ services:
     working_dir: /app
     environment:
       PYTHONPATH: /app
-      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set to the authorized provider-client certificate SHA-256 fingerprint}
+      # Lab/CI: optional. Empty accepts any CA-trusted client in reference providers.
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
     command:
       [
         "python",
