@@ -40,16 +40,7 @@ jobs:
           CARGO_HTTP_MULTIPLEXING: "false"
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
-        run: |
-          set -o pipefail
-          cargo test --locked --lib --features test-support -- --nocapture 2>&1 | tee rust-test.log
-      - name: Upload Rust test log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-test-log
-          path: ${{ github.workspace }}/apps/event-ingest/rust-test.log
-          if-no-files-found: error
+        run: cargo test --locked --lib --features test-support -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"

@@ -11,13 +11,14 @@ async-nats = { version = "0.50.0", default-features = false, features = ["jetstr
 prost = "0.13"
 prost-types = "0.13"
 getrandom = "0.4.3"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 zeroize = "1.8"
 redis = { version = "0.27", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
@@ -27,9 +28,6 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 prost-build = "0.13"
 protoc-bin-vendored = "3"
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
-
-[dev-dependencies]
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [features]
 default = []

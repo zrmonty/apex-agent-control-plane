@@ -22,6 +22,7 @@ impl AuthenticatedHttpConfig {
         &self,
         trusted_base: &Path,
     ) -> Result<(reqwest::blocking::Client, Option<Zeroizing<String>>), GatewayError> {
+        crate::install_rustls_provider();
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|_| GatewayError::invalid_sink_configuration())?;
         if endpoint.scheme() != "https"

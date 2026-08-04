@@ -28,6 +28,7 @@ pub struct AsyncNatsJetStreamClient {
 
 impl AsyncNatsJetStreamClient {
     pub fn connect(config: &NatsTlsConfig, trusted_base: &Path) -> Result<Self, GatewayError> {
+        crate::install_rustls_provider();
         let config = config.validated(trusted_base)?;
         validate_pem_material(&config)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()

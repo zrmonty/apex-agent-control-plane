@@ -64,6 +64,14 @@ pub use sinks::{
 pub use validation::{Caller, IngestRequest};
 pub(crate) use validation::{is_lowercase_uuidv7, is_scope_identifier};
 
+/// Install the explicitly selected ring provider before any TLS client or
+/// server is constructed. This keeps reqwest/async-nats on the same provider
+/// and avoids pulling a platform-specific native crypto backend into CI or
+/// minimal deployment images.
+pub fn install_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Maximum admitted serialized event-envelope size: 256 KiB.
 pub const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_JETSTREAM_SUBJECT_BYTES: usize = 256;
