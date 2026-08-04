@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import ipaddress
+import secrets as secure_secrets
 from pathlib import Path
 
 from cryptography import x509
@@ -52,6 +53,16 @@ def _write_key(path: Path, key: rsa.RSAPrivateKey) -> None:
 def _write_cert(path: Path, cert: x509.Certificate) -> None:
     _prepare_write(path)
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def _write_runtime_secret(path: Path) -> None:
+    """Write a fresh high-entropy local-fixture credential with private mode."""
+    _prepare_write(path)
+    path.write_text(secure_secrets.token_urlsafe(32) + "\n", encoding="ascii")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _ca(out: Path) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
@@ -236,10 +247,8 @@ def main() -> None:
     )
     # Shared secrets used by configs
     (out / "nats-username").write_text("ingest-publisher\n", encoding="utf-8")
-    (out / "nats-password").write_text("local-live-mtls-nats-secret-change-me\n", encoding="utf-8")
-    (out / "valkey-ingest-password").write_text(
-        "local-live-mtls-valkey-secret-change-me\n", encoding="utf-8"
-    )
+    _write_runtime_secret(out / "nats-password")
+    _write_runtime_secret(out / "valkey-ingest-password")
     print(f"Wrote local-dev PKI under {out}")
 
 

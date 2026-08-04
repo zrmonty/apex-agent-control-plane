@@ -14,6 +14,8 @@ services:
       APEX_NATS_USERNAME_FILE: /run/secrets/nats_username
       APEX_NATS_PASSWORD_FILE: /run/secrets/nats_password
       APEX_CLICKHOUSE_ENDPOINT: ${APEX_CLICKHOUSE_ENDPOINT:-https://clickhouse-projection:8443/v1/events}
+      APEX_ALLOW_PRIVATE_SINK_DESTINATIONS: ${APEX_ALLOW_PRIVATE_SINK_DESTINATIONS:-1}
+      APEX_PRIVATE_SINK_HOSTS: ${APEX_PRIVATE_SINK_HOSTS:-clickhouse-projection,archive-provider}
       APEX_CLICKHOUSE_CA_FILE: /run/secrets/clickhouse_client_ca
       APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/ingest_clickhouse_client_cert
       APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/ingest_clickhouse_client_key
@@ -22,6 +24,7 @@ services:
       APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/ingest_archive_client_cert
       APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/ingest_archive_client_key
       APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
+      APEX_FILE_BEARER_MODE: ${APEX_FILE_BEARER_MODE:?set to single-agent-staging only for a single-agent staging deployment}
       APEX_BEARER_AGENT_ID: ${APEX_BEARER_AGENT_ID:?set APEX_BEARER_AGENT_ID to the workload agent identifier}
       APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set APEX_BEARER_CERT_SHA256 to the authorized client certificate SHA-256 fingerprint}
       APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:?set APEX_ALLOWED_SCOPES to comma-separated workspace/namespace scopes}

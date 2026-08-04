@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import platform
+import secrets as secure_secrets
 import stat
 import subprocess
 import sys
@@ -408,7 +409,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         # Ensure bearer token for gateway-ref parity
         bearer = secrets / "ingest-bearer-token"
         if not bearer.is_file():
-            _write_text(bearer, "lab-gateway-ref-token", private=True)
+            _write_text(bearer, secure_secrets.token_urlsafe(32), private=True)
 
     ingest = args.ingest_endpoint
     pack = write_agent_trust_pack(out, keys, ca_pem_src=ca_src, ingest_endpoint=ingest)

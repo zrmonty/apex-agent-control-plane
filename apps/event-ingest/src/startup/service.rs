@@ -15,6 +15,7 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::auth::{
     FileBearerResolver, bearer_agent_id, bearer_peer_certificate_sha256, bearer_subject,
+    require_single_agent_file_bearer_ack,
 };
 use super::env::{allowed_scopes, attempts, optional_path, path, required};
 use super::error::startup_gateway_error;
@@ -127,6 +128,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "APEX_BEARER_TOKEN_FILE",
     )?;
     let token = Zeroizing::new(read_token(&token_path, "APEX_BEARER_TOKEN_FILE")?);
+    require_single_agent_file_bearer_ack()?;
     let agent_id = bearer_agent_id()?;
     let subject = bearer_subject(&agent_id)?;
     let bearer_peer_certificate = bearer_peer_certificate_sha256()?;
@@ -237,9 +239,9 @@ where
     P: apex_event_ingest::EventPublisher + Send + 'static,
     V: apex_event_ingest::CallerVerifier,
 {
-    use apex_event_ingest::{EphemeralStore, InMemoryEphemeralStore};
     #[cfg(feature = "valkey")]
     use apex_event_ingest::FallbackEphemeralStore;
+    use apex_event_ingest::{EphemeralStore, InMemoryEphemeralStore};
     use std::sync::Mutex;
 
     // Always install a process-local store. When Valkey is configured and the

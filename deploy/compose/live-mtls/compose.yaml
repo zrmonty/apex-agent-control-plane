@@ -10,7 +10,7 @@ name: apex-live-mtls
 
 services:
   valkey:
-    image: valkey/valkey:8.0
+    image: valkey/valkey@sha256:70956f1339ef77d8dae58459c1ff282a74a88ca68d281f4d816dfc74a6ba916b
     # Official entrypoint drops privileges; keep a minimal capability set for local live tests.
     user: "0:0"
     entrypoint: ["valkey-server"]
@@ -35,7 +35,7 @@ services:
     tmpfs: [/tmp, /data]
 
   jetstream:
-    image: nats:2.10
+    image: nats@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
     command: ["--config", "/run/secrets/nats_config"]
     ports:
       - "127.0.0.1:14222:4222"
@@ -56,7 +56,7 @@ services:
     tmpfs: [/tmp, /data]
 
   clickhouse-projection:
-    image: python:3.12-slim
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app
     command:
       [
@@ -109,7 +109,7 @@ services:
       start_period: 5s
 
   archive-provider:
-    image: python:3.12-slim
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app
     command:
       [

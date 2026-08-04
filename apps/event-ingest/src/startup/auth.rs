@@ -82,7 +82,13 @@ impl BearerTokenResolver for FileBearerResolver {
             )
             .and_then(|path| read_token(&path, "APEX_BEARER_TOKEN_FILE"));
             if let Ok(mut cache) = self.token_cache.lock() {
-                cache.token = Zeroizing::new(refreshed.unwrap_or_default());
+                // Retain the last known-good credential if a projected-secret
+                // refresh is briefly unreadable. Replacing it with an empty
+                // value converts a recoverable mount race into a total auth
+                // outage. A successful read remains the only rotation path.
+                if let Ok(token) = refreshed {
+                    cache.token = Zeroizing::new(token);
+                }
                 cache.loaded_at = Instant::now();
             }
         }
@@ -143,6 +149,19 @@ pub(crate) fn bearer_agent_id() -> Result<String, io::Error> {
         ));
     }
     Ok(agent_id)
+}
+
+/// The file bearer is deliberately a single-agent staging credential, not a
+/// fleet identity provider. Requiring an explicit acknowledgement prevents it
+/// from being enabled accidentally in a multi-tenant deployment.
+pub(crate) fn require_single_agent_file_bearer_ack() -> Result<(), io::Error> {
+    if env::var("APEX_FILE_BEARER_MODE").ok().as_deref() == Some("single-agent-staging") {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "APEX_FILE_BEARER_MODE=single-agent-staging is required; file bearer auth is not approved for multi-agent or multi-tenant production use",
+    ))
 }
 
 pub(crate) fn bearer_peer_certificate_sha256() -> Result<[u8; 32], io::Error> {

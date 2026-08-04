@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -45,6 +45,11 @@ impl AuthenticatedHttpConfig {
         if !safe_endpoint_host(&endpoint) {
             return Err(GatewayError::invalid_sink_configuration());
         }
+        // Resolve once during trusted startup, reject any unsafe destination,
+        // and pin the client to the accepted addresses. This prevents a DNS
+        // answer from changing between configuration validation and request
+        // dispatch (including DNS-rebinding to internal services).
+        let resolved_addrs = resolve_endpoint_addrs(&endpoint)?;
         if trusted_base.is_symlink() {
             return Err(GatewayError::invalid_sink_configuration());
         }
@@ -90,6 +95,12 @@ impl AuthenticatedHttpConfig {
             .identity(
                 reqwest::Identity::from_pem(&[cert.as_slice(), key.as_slice()].concat())
                     .map_err(|_| GatewayError::invalid_sink_configuration())?,
+            )
+            .resolve_to_addrs(
+                endpoint
+                    .host_str()
+                    .ok_or_else(GatewayError::invalid_sink_configuration)?,
+                &resolved_addrs,
             );
         let token = self
             .bearer_token_file
@@ -99,6 +110,53 @@ impl AuthenticatedHttpConfig {
         let client = builder.build().map_err(|_| GatewayError::internal())?;
         Ok((client, token))
     }
+}
+
+fn resolve_endpoint_addrs(endpoint: &reqwest::Url) -> Result<Vec<SocketAddr>, GatewayError> {
+    let host = endpoint
+        .host_str()
+        .ok_or_else(GatewayError::invalid_sink_configuration)?;
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or_else(GatewayError::invalid_sink_configuration)?;
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| GatewayError::invalid_sink_configuration())?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || (!private_sink_destinations_explicitly_allowed(host)
+            && addresses
+                .iter()
+                .any(|address| !safe_endpoint_address(address.ip())))
+    {
+        return Err(GatewayError::invalid_sink_configuration());
+    }
+    Ok(addresses)
+}
+
+fn private_sink_destinations_explicitly_allowed(host: &str) -> bool {
+    // This is a deployment-only escape hatch for a private, service-mesh or
+    // Docker network. It must never be set by event data or an API request.
+    if std::env::var("APEX_ALLOW_PRIVATE_SINK_DESTINATIONS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return std::env::var("APEX_PRIVATE_SINK_HOSTS")
+            .ok()
+            .is_some_and(|hosts| {
+                hosts.split(',').any(|allowed| {
+                    let allowed = allowed.trim().to_ascii_lowercase();
+                    !allowed.is_empty()
+                        && allowed == host.trim_end_matches('.').to_ascii_lowercase()
+                })
+            });
+    }
+    #[cfg(feature = "test-support")]
+    if std::env::var("APEX_ALLOW_LOOPBACK_SINKS").ok().as_deref() == Some("1") {
+        return host == "127.0.0.1" || host == "::1" || host == "localhost";
+    }
+    false
 }
 
 fn safe_endpoint_host(endpoint: &reqwest::Url) -> bool {
@@ -133,6 +191,10 @@ fn safe_endpoint_host(endpoint: &reqwest::Url) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
     };
+    safe_endpoint_address(address)
+}
+
+fn safe_endpoint_address(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(value) => {
             !value.is_loopback()

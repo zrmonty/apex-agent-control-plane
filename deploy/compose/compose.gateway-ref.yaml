@@ -13,7 +13,7 @@ name: apex-gateway-ref
 
 services:
   jetstream:
-    image: nats:2.10
+    image: nats@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
     command: ["--config", "/run/secrets/nats_config"]
     networks: [gateway-ref]
     secrets:
@@ -28,7 +28,7 @@ services:
     tmpfs: [/tmp, /data]
 
   clickhouse-projection:
-    image: python:3.12-slim
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app
     environment:
       PYTHONPATH: /app
@@ -64,7 +64,7 @@ services:
         target: ca
 
   archive-provider:
-    image: python:3.12-slim
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app
     environment:
       PYTHONPATH: /app
@@ -107,8 +107,8 @@ services:
       context: ../../apps/event-ingest
       dockerfile: Dockerfile
       args:
-        BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust:1-bookworm}
-        RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian:bookworm-slim}
+        BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
+        RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
         CARGO_FEATURES: ${GATEWAY_CARGO_FEATURES:-}
     environment:
       APEX_TRUSTED_SECRET_BASE: /run/secrets
@@ -120,6 +120,8 @@ services:
       APEX_NATS_USERNAME_FILE: /run/secrets/nats_username
       APEX_NATS_PASSWORD_FILE: /run/secrets/nats_password
       APEX_CLICKHOUSE_ENDPOINT: https://clickhouse-projection:8443/v1/events
+      APEX_ALLOW_PRIVATE_SINK_DESTINATIONS: "1"
+      APEX_PRIVATE_SINK_HOSTS: clickhouse-projection,archive-provider
       APEX_CLICKHOUSE_CA_FILE: /run/secrets/ca
       APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/ingest_http_client_cert
       APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/ingest_http_client_key
@@ -128,6 +130,7 @@ services:
       APEX_ARCHIVE_CLIENT_CERT_FILE: /run/secrets/ingest_http_client_cert
       APEX_ARCHIVE_CLIENT_KEY_FILE: /run/secrets/ingest_http_client_key
       APEX_BEARER_TOKEN_FILE: /run/secrets/ingest_bearer_token
+      APEX_FILE_BEARER_MODE: single-agent-staging
       APEX_BEARER_AGENT_ID: ${APEX_BEARER_AGENT_ID:-reference-agent}
       APEX_BEARER_CERT_SHA256: ${APEX_BEARER_CERT_SHA256:?set APEX_BEARER_CERT_SHA256 to the authorized client certificate SHA-256 fingerprint}
       APEX_ALLOWED_SCOPES: ${APEX_ALLOWED_SCOPES:-acme/prod}

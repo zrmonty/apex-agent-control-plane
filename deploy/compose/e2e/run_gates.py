@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import secrets as secure_secrets
 import subprocess
 import sys
 import time
@@ -107,7 +108,7 @@ def main() -> int:
 
     bearer = LIVE / "secrets" / "ingest-bearer-token"
     if not bearer.is_file():
-        bearer.write_text("lab-e2e-token", encoding="utf-8")
+        bearer.write_text(secure_secrets.token_urlsafe(32), encoding="utf-8")
 
     client_fp = _client_cert_fingerprint(LIVE / "secrets" / "ingest-http-client.pem")
     if client_fp:

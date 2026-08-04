@@ -13,10 +13,10 @@ mod http_sinks;
 mod idempotency;
 mod nats;
 mod outbox;
-#[cfg(feature = "postgres")]
-mod postgres_transport;
 pub mod permissions;
 mod persistence;
+#[cfg(feature = "postgres")]
+mod postgres_transport;
 mod publisher;
 mod security;
 mod sinks;
