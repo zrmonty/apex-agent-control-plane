@@ -15,6 +15,13 @@ dist/
 .next/
 coverage/
 *.tsbuildinfo
+.vite/
+.turbo/
+.parcel-cache/
+storybook-static/
+playwright-report/
+test-results/
+.nyc_output/
 
 # Python
 __pycache__/
@@ -24,8 +31,16 @@ venv/
 *.egg-info/
 .pytest_cache/
 .coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 # LLVM/Rust coverage output (cargo llvm-cov and profraw instrumentation).
 *.profraw
+*.profdata
 
 # Rust
 target/
@@ -34,6 +49,11 @@ target/
 **/target/
 **/test-secrets/
 **/test-secrets-*/
+# Cargo may use a repository-local config.toml, so ignore only local
+# credentials and caches rather than the entire .cargo directory.
+**/.cargo/credentials.toml
+**/.cargo/registry/
+**/.cargo/git/
 
 # Local configuration and secrets
 .env
@@ -54,3 +74,8 @@ deploy/compose/secrets/
 # Scripts and stubs under live-mtls/ remain tracked; only generated secrets are ignored.
 deploy/compose/live-mtls/secrets/
 .local/
+
+# Generated design previews and local patch/recovery files
+.impeccable/sketches/
+*.orig
+*.rej
