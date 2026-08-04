@@ -16,7 +16,8 @@ services:
     entrypoint: ["valkey-server"]
     command: ["/run/secrets/valkey_config"]
     ports:
-      - "127.0.0.1:16379:6379"
+      # Bind all interfaces so GitHub Actions runners can reach published ports reliably.
+      - "16379:6379"
     networks: [live-mtls]
     secrets:
       - source: valkey_config
@@ -38,7 +39,7 @@ services:
     image: nats:2.10
     command: ["--config", "/run/secrets/nats_config"]
     ports:
-      - "127.0.0.1:14222:4222"
+      - "14222:4222"
     networks: [live-mtls]
     secrets:
       - source: nats_config
@@ -78,7 +79,7 @@ services:
         "/var/lib/apex",
       ]
     ports:
-      - "127.0.0.1:18443:8443"
+      - "18443:8443"
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app
@@ -119,7 +120,7 @@ services:
         "/var/lib/apex",
       ]
     ports:
-      - "127.0.0.1:18444:8444"
+      - "18444:8444"
     tmpfs: [/var/lib/apex]
     environment:
       PYTHONPATH: /app

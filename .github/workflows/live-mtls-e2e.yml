@@ -52,32 +52,18 @@ jobs:
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml build clickhouse-projection archive-provider
           docker compose -f compose.yaml up -d --force-recreate --remove-orphans
-          sleep 5
+          sleep 8
           docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 80
-          # Fail if any service is not running.
-          running="$(docker compose -f compose.yaml ps --status running --services | wc -l | tr -d ' ')"
-          echo "Running services count: $running"
-          if [ "$running" -lt 4 ]; then
-            echo "Expected 4 running services (valkey jetstream clickhouse archive)." >&2
-            docker compose -f compose.yaml ps -a
-            docker compose -f compose.yaml logs --tail 120
-            exit 1
-          fi
-          # Confirm host ports accept TCP (no ss dependency).
+          docker compose -f compose.yaml logs --tail 100
+          # Soft diagnostics only — wait step enforces readiness.
           python - <<'PY'
           import socket
-          import sys
-          failed = []
           for port in (14222, 16379, 18443, 18444):
               try:
                   with socket.create_connection(("127.0.0.1", port), timeout=3):
                       print(f"port {port} open")
               except OSError as exc:
-                  failed.append(f"{port}: {exc}")
-          if failed:
-              print("ports not open:", "; ".join(failed), file=sys.stderr)
-              sys.exit(1)
+                  print(f"port {port} not open yet: {exc}")
           PY
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
