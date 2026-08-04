@@ -28,7 +28,16 @@ That guide covers:
 2. Lab install (signed bundles and trust pack).
 3. Live mTLS.
 4. Gateway with reference providers.
-5. Hardened Compose.
+5. Environment gates (`deploy/compose/e2e/run_gates.py`).
+6. Hardened Compose.
+
+Prove deploy-time gates on a machine with Docker:
+
+```bash
+python3 deploy/compose/e2e/run_gates.py
+```
+
+See [docs/environment-gates.md](docs/environment-gates.md).
 
 Also see [Phase 0 progress](docs/phase-0-progress.md).
 

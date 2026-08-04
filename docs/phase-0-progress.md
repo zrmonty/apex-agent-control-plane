@@ -4,7 +4,7 @@
 
 Phase 0 sets the secure local foundation and the admission core for Apex.
 
-Provider image acceptance with live Object-Lock proof is an environment gate. It is not an open SDK backlog item. Complete that gate before regulated production profiles.
+Deploy-time environment gates are **runnable** via `deploy/compose/e2e/run_gates.py` (Docker, live mTLS, Postgres, MinIO Object-Lock, optional Azure/GCS, Compose overlays). See [environment-gates.md](environment-gates.md). Production digest-pinned images and real cloud credentials remain operator-owned.
 
 ## Track outcomes
 
@@ -101,13 +101,17 @@ These items are product or deployment work. They are not open Phase 0 foundation
 5. Operator UI (Phase 1 starts with Agent Story).
 6. ~~PostgreSQL multi-process outbox/idempotency~~ — Delivered (`PostgresOutbox` / `PostgresIdempotencyStore`, feature `postgres`). Pool sizing and HA topology remain ops work.
 
-### E2E orchestration
+### E2E and environment gates
 
 ```powershell
+# Cross-platform gate suite (writes .local/apex-lab/gate-report.json)
+python deploy/compose/e2e/run_gates.py
+
+# Windows-oriented e2e script
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/e2e/run.ps1
 ```
 
-This script runs live mTLS client tests, optional Postgres smoke tests, and Object-Lock acceptance.
+These scripts run live mTLS client tests, Postgres smoke tests, MinIO Object-Lock acceptance, optional Azure/GCS acceptance, and Compose overlay validation.
 
 ## Phase 1 entry
 

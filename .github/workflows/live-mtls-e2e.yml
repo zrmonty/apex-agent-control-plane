@@ -22,66 +22,65 @@ jobs:
       - name: Install Python tools
         run: python -m pip install -U pip cryptography boto3
 
-      # Mirrors deploy/compose/e2e/run.ps1 (Linux path for GitHub-hosted runners).
+      # Mirrors deploy/compose/e2e/run_gates.py (Linux path for GitHub-hosted runners).
       - name: Generate live-mTLS PKI and configs
         working-directory: deploy/compose/live-mtls
         run: |
+          set -euo pipefail
           python generate_pki.py --out secrets
           python render_configs.py
-          # Bearer token for gateway-ref / e2e parity with run.ps1
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
           fi
+          # Fingerprint of authorized gRPC client cert (for gateway-ref compose config).
+          python - <<'PY'
+          from pathlib import Path
+          from cryptography import x509
+          from cryptography.hazmat.primitives import hashes
+          pem = Path("secrets/ingest-http-client.pem").read_bytes()
+          cert = x509.load_pem_x509_certificate(pem)
+          fp = cert.fingerprint(hashes.SHA256()).hex()
+          Path("secrets/ingest-http-client.sha256").write_text(fp + "\n", encoding="ascii")
+          print("APEX_BEARER_CERT_SHA256=" + fp)
+          PY
 
-      - name: Start live-mTLS stack (Valkey, NATS, reference providers)
+      - name: Start live-mTLS stack (force recreate so mounts match new PKI)
         working-directory: deploy/compose/live-mtls
-        run: docker compose -f compose.yaml up -d
+        run: |
+          set -euo pipefail
+          docker compose -f compose.yaml down --remove-orphans || true
+          docker compose -f compose.yaml up -d --force-recreate --remove-orphans
+          docker compose -f compose.yaml ps -a
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
         working-directory: deploy/compose
-        run: docker compose -f compose.e2e.yaml up -d
+        run: |
+          set -euo pipefail
+          docker compose -f compose.e2e.yaml down --remove-orphans || true
+          docker compose -f compose.e2e.yaml up -d --force-recreate --remove-orphans
+          docker compose -f compose.e2e.yaml ps -a
 
-      - name: Wait for services
+      - name: Wait for live-mTLS services
         working-directory: deploy/compose/live-mtls
         run: |
-          set -eu
+          set -euo pipefail
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          for attempt in $(seq 1 60); do
-            if python - <<'PY'
-          import os
-          import socket
-          import ssl
-          import urllib.request
+          python ../../compose/e2e/wait_live_mtls.py --secrets "$APEX_LIVE_MTLS_SECRETS" --attempts 90 --sleep 2
 
-          root = os.environ["APEX_LIVE_MTLS_SECRETS"]
-          context = ssl.create_default_context(cafile=os.path.join(root, "ca.pem"))
-          context.load_cert_chain(
-              os.path.join(root, "ingest-http-client.pem"),
-              os.path.join(root, "ingest-http-client.key"),
-          )
-          opener = urllib.request.build_opener(
-              urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context)
-          )
-          for url in ("https://127.0.0.1:18443/health", "https://127.0.0.1:18444/health"):
-              request = urllib.request.Request(url, headers={"Connection": "close"})
-              with opener.open(request, timeout=2) as response:
-                  if response.status != 200:
-                      raise RuntimeError(f"{url} returned HTTP {response.status}")
-          for port in (14222, 16379):
-              with socket.create_connection(("127.0.0.1", port), timeout=2):
-                  pass
-          PY
-            then
-              echo "Live mTLS services are ready (attempt $attempt)."
+      - name: Wait for E2E Postgres and MinIO
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/15432) >/dev/null 2>&1 \
+              && (echo > /dev/tcp/127.0.0.1/19000) >/dev/null 2>&1; then
+              echo "Postgres and MinIO ports are open (attempt $attempt)."
               exit 0
             fi
             sleep 2
           done
-          docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 80
-          docker compose -f ../compose.e2e.yaml ps -a
-          docker compose -f ../compose.e2e.yaml logs --tail 40
-          echo "Timed out waiting for live mTLS services." >&2
+          docker compose -f deploy/compose/compose.e2e.yaml ps -a || true
+          docker compose -f deploy/compose/compose.e2e.yaml logs --tail 40 || true
+          echo "Timed out waiting for Postgres/MinIO." >&2
           exit 1
 
       - name: Live mTLS client tests
@@ -118,7 +117,9 @@ jobs:
       - name: Validate compose overlays (config only)
         working-directory: deploy/compose
         run: |
-          # Secret path placeholders so compose config validation can resolve files
+          set -euo pipefail
+          FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
+          export APEX_BEARER_CERT_SHA256="$FP"
           mkdir -p /tmp/apex-overlay-secrets
           : > /tmp/apex-overlay-secrets/azure-connection-string
           : > /tmp/apex-overlay-secrets/azure-account-key
@@ -136,8 +137,9 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           docker compose -f compose.yaml ps -a || true
-          docker compose -f compose.yaml logs --tail 80 || true
-          docker compose -f ../compose.e2e.yaml logs --tail 40 || true
+          docker compose -f compose.yaml logs --tail 120 || true
+          docker compose -f ../compose.e2e.yaml ps -a || true
+          docker compose -f ../compose.e2e.yaml logs --tail 60 || true
 
       - name: Tear down
         if: always()

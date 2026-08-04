@@ -50,6 +50,19 @@ fn valid_event() -> IngestRequest {
     )
 }
 
+fn ensure_rustls_provider() {
+    // reqwest is built with `rustls-no-provider`; install ring before any Client::build.
+    crate::install_rustls_provider();
+}
+
+fn http_client() -> reqwest::blocking::Client {
+    ensure_rustls_provider();
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test HTTP client")
+}
+
 fn local_http_server(status: u16, response_headers: &str) -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -236,29 +249,58 @@ fn token_reader_trims_only_safe_ascii_tokens() {
 
 #[test]
 fn secret_reader_enforces_trusted_base_and_size() {
+    // Canonicalize the trusted base so Path::starts_with matches on Linux and
+    // Windows (Windows canonicalize may add a \\?\ prefix).
     let root = std::env::current_dir()
         .unwrap()
         .join("target")
-        .join(format!("apex-http-secret-{}", std::process::id()));
+        .join(format!(
+            "apex-http-secret-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
     std::fs::create_dir_all(&root).unwrap();
+    let base = root.canonicalize().unwrap();
     let path = root.join("secret");
     std::fs::write(&path, b"secret").unwrap();
-    let base = root.parent().unwrap();
-    assert!(canonical_secret_path(&path, base, false).is_err());
-    assert!(read_secret(&path, base, false).is_err());
-    assert!(canonical_secret_path(&root.join("missing"), base, false).is_err());
+
+    // Outside the trusted base must fail.
+    let outside_root = root.parent().unwrap().join(format!(
+        "apex-http-secret-outside-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&outside_root).unwrap();
+    let outside = outside_root.join("secret");
+    std::fs::write(&outside, b"secret").unwrap();
+    assert!(canonical_secret_path(&outside, &base, false).is_err());
+    assert!(read_secret(&outside, &base, false).is_err());
+
+    // Inside the base with a small file must succeed.
+    assert!(canonical_secret_path(&path, &base, false).is_ok());
+    assert_eq!(read_secret(&path, &base, false).unwrap(), b"secret");
+
+    // Missing path fails.
+    assert!(canonical_secret_path(&root.join("missing"), &base, false).is_err());
+
+    // Oversize content fails.
     std::fs::write(&path, vec![0; 1024 * 1024 + 1]).unwrap();
-    assert!(read_secret(&path, base, false).is_err());
+    assert!(read_secret(&path, &base, false).is_err());
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside_root);
 }
 
 #[test]
 fn publishers_use_local_http_server_for_success_and_failure_paths() {
-    crate::install_rustls_provider();
     let event = valid_event();
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap();
+    let client = http_client();
     let (endpoint, handle) = local_http_server(200, "");
     let mut clickhouse = ClickHouseHttpPublisher {
         client: client.clone(),
@@ -307,14 +349,10 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
 
 #[test]
 fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
-    crate::install_rustls_provider();
     let event = valid_event();
     let (endpoint, handle) = local_http_server(412, "X-Apex-Event-Hash: wrong\r\n");
     let mut archive = ArchiveHttpPublisher {
-        client: reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
+        client: http_client(),
         endpoint,
         bearer_token: None,
     };
@@ -328,10 +366,7 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
 
     let (endpoint, handle) = local_http_server(200, "");
     let mut archive = ArchiveHttpPublisher {
-        client: reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
+        client: http_client(),
         endpoint,
         bearer_token: None,
     };
@@ -344,10 +379,7 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
     let _ = handle.join().unwrap();
 
     let mut clickhouse = ClickHouseHttpPublisher {
-        client: reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
+        client: http_client(),
         endpoint: "http://127.0.0.1:1".to_owned(),
         bearer_token: None,
     };

@@ -261,6 +261,18 @@ First build can take several minutes. Ingest often binds to `https://127.0.0.1:1
 
 ---
 
+## Prove environment gates (recommended after C)
+
+After Docker works, prove deploy-time gates on this machine:
+
+```bash
+python3 deploy/compose/e2e/run_gates.py
+```
+
+Success prints `OVERALL PASS` and writes `.local/apex-lab/gate-report.json`.
+
+See [environment-gates.md](environment-gates.md).
+
 ## E — Hardened Compose
 
 **Use this track** when you prepare a production-like environment.
