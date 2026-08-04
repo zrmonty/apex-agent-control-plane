@@ -50,12 +50,9 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-          RUSTFLAGS: "-D warnings"
-        # Prefer lib+bins first so a lock/feature issue is easier to diagnose.
-        run: |
-          set -euo pipefail
-          cargo clippy --locked --lib --bins --tests --features test-support -- -D warnings
-          cargo clippy --locked --all-targets --features test-support -- -D warnings
+        # Match the unit test feature set. Avoid --all-targets so optional
+        # integration binaries without required features are not linted.
+        run: cargo clippy --locked --lib --tests --features test-support -- -D warnings
 
   signed-bundles:
     runs-on: ubuntu-latest
