@@ -4,7 +4,7 @@ Apex is a self-hosted control plane for AI agents. It is cloud-agnostic.
 
 Apex helps teams observe, govern, evaluate, secure, and control agent workloads. It runs on local hosts, on-premises systems, and cloud systems. Each agent action is a scoped event. Security, compliance, and cost controls stay near the runtime.
 
-> **Status:** Phase 0 foundations are complete. The event contract, Python SDK (`Apex.connect`, gold-standard template, model execution attribution), ingest admission core, Security Alerts, durable outbox and fanout seams, and Compose provider slots are in place. Live Object-Lock acceptance in customer environments and the operator UI are deployment and Phase 1 work. See [Phase 0 progress](docs/phase-0-progress.md).
+> **Status:** Phase 0 is complete. It delivers the event contract, Python SDK (`Apex.connect`, gold-standard template, model execution attribution), hardened ingest admission, Security Alerts, durable outbox and fanout seams, storage contracts, and Compose provider slots. Phase 1 has started with the React operator UI scaffold; its live control-plane API, authenticated sessions, and server-derived data remain Phase 1 work. See [Phase 0 progress](docs/phase-0-progress.md).
 
 ## What Apex provides
 
@@ -42,6 +42,18 @@ See [docs/environment-gates.md](docs/environment-gates.md).
 Also see [Phase 0 progress](docs/phase-0-progress.md).
 
 Documentation style: [ASD-STE100 Simplified Technical English](docs/writing-style-ste100.md).
+
+## Operator UI preview
+
+The Phase 1 operator UI is a local React application. It currently uses clearly labelled illustrative data. It does not call control-plane, ingest, identity, archive, or policy APIs yet.
+
+```bash
+cd apps/operator-ui
+pnpm install
+pnpm dev
+```
+
+Open `http://127.0.0.1:4173`. The preview shows the planned system-map workflow, scoped connection starting point, finding queue, and reserved routes for agent groups, events, evidence, retention, deployment, and settings. See [apps/operator-ui/README.md](apps/operator-ui/README.md).
 
 ## Home test in five minutes
 
@@ -97,7 +109,8 @@ Phase 0 supports the paths below. **Implemented** means the client or boundary i
 | Ingest → NATS JetStream | Async NATS over `tls://`; mutual TLS; bounded timeouts | Opaque canonical event bytes; scope-safe subjects; `Nats-Msg-Id` | Client and live-mTLS Compose path implemented |
 | Ingest → ClickHouse projection | Authenticated HTTPS POST; mTLS; optional bearer | Canonical event bytes; `X-Apex-Event-Id` | Client, reference provider, live-mTLS, gateway-ref |
 | Ingest → archive staging | Authenticated HTTPS PUT; mTLS; optional bearer; create-only keys | One event per event-id key; `If-None-Match: *` | Client and reference provider; backends: local, S3/MinIO, Azure Blob, GCS |
-| Operators → control-plane API and UI | Planned session and workload connections | Configuration, policy, diagnostics, evaluations, commands | Planned (Phase 1 operator UI) |
+| Operators → operator UI | Local React 19 + Vite preview; the browser is not an authorization boundary | Clearly labelled illustrative topology, connection workflow, and reserved operating routes | Phase 1 scaffold implemented; live API/session integration pending |
+| Operators → control-plane API | Planned session and workload connections | Configuration, policy, diagnostics, evaluations, commands | Phase 1 planned |
 
 ### Compose and reference deployment state
 
