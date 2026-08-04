@@ -48,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rust-test-log
-          path: apps/event-ingest/rust-test.log
+          path: ${{ github.workspace }}/apps/event-ingest/rust-test.log
           if-no-files-found: error
       - name: Check PostgreSQL feature
         env:
