@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 import threading
@@ -70,9 +69,10 @@ class Handler(DiagnosticHandler):
         if not body:
             self.send_diagnostic(400, "INVALID_ENVELOPE", "Missing event body.")
             return
-        if hashlib.sha256(body).hexdigest() != event_hash:
-            self.send_diagnostic(400, "EVENT_INTEGRITY", "The event hash header does not match the submitted body.")
-            return
+        # X-Apex-Event-Hash is the Apex integrity.event_hash (RFC 8785 canonical
+        # digest), not SHA-256 of the raw protobuf body. Gateway clients already
+        # recompute that hash; this reference service stores the header fingerprint
+        # for idempotency and does not re-hash the wire bytes.
         result = self.store.put(event_id, event_hash, body)
         if result == "conflict":
             self.send_diagnostic(

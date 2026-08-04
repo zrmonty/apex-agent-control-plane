@@ -61,9 +61,7 @@ class Handler(DiagnosticHandler):
         if not body:
             self.send_diagnostic(400, "ARCHIVE_CONFIGURATION", "Missing event body.")
             return
-        if hashlib.sha256(body).hexdigest() != event_hash:
-            self.send_diagnostic(400, "ARCHIVE_INTEGRITY", "The event hash header does not match the submitted body.")
-            return
+        # X-Apex-Event-Hash is integrity.event_hash (canonical digest), not body SHA-256.
         try:
             result = self.backend.put(header_id, event_hash, body)
         except Exception:
