@@ -48,9 +48,19 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           set -euo pipefail
+          # Resolve bind-mount source (Compose relative paths are fragile across runners).
+          REPO_ROOT="$(cd ../../.. && pwd)"
+          test -d "$REPO_ROOT/apps/reference-providers/apex_reference_providers"
+          export APEX_REFERENCE_PROVIDERS_SRC="$REPO_ROOT/apps/reference-providers/apex_reference_providers"
           docker compose -f compose.yaml down --remove-orphans || true
           docker compose -f compose.yaml up -d --force-recreate --remove-orphans
           docker compose -f compose.yaml ps -a
+          # Fail fast if any service exited
+          if docker compose -f compose.yaml ps --status exited --services | grep -q .; then
+            docker compose -f compose.yaml logs --tail 100
+            echo "One or more live-mTLS services exited on start." >&2
+            exit 1
+          fi
 
       - name: Start E2E compose (Postgres, MinIO, reference providers)
         working-directory: deploy/compose
@@ -65,7 +75,10 @@ jobs:
         run: |
           set -euo pipefail
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
-          python ../../compose/e2e/wait_live_mtls.py --secrets "$APEX_LIVE_MTLS_SECRETS" --attempts 90 --sleep 2
+          # Path is relative to this directory: ../e2e/wait_live_mtls.py
+          python ../e2e/wait_live_mtls.py --secrets "$APEX_LIVE_MTLS_SECRETS" --attempts 90 --sleep 2
+          # Show provider logs if wait returns (success path still useful for audit)
+          docker compose -f compose.yaml ps -a
 
       - name: Wait for E2E Postgres and MinIO
         run: |

@@ -218,7 +218,8 @@ def main() -> None:
             basename=f"{name}-server",
             common_name=name,
             san_dns=[name, "localhost"],
-            san_ips=["127.0.0.1"],
+            # Include IPv6 loopback: Ubuntu CI often resolves "localhost" to ::1.
+            san_ips=["127.0.0.1", "::1"],
             ca_key=ca_key,
             ca_cert=ca_cert,
             server=True,

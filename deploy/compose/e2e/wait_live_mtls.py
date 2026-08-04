@@ -24,7 +24,11 @@ def _tcp_open(host: str, port: int, timeout: float = 2.0) -> None:
 
 
 def _mtls_health(secrets: Path, host: str, port: int, timeout: float = 3.0) -> None:
-    """GET https://host:port/health with client cert; trust local CA only."""
+    """GET https://host:port/health with client cert; trust local CA only.
+
+    Use 127.0.0.1 (not localhost) on CI: many runners resolve localhost to ::1,
+    and lab certs only include IPv4 127.0.0.1 in the SAN list.
+    """
     ca = secrets / "ca.pem"
     cert = secrets / "ingest-http-client.pem"
     key = secrets / "ingest-http-client.key"
@@ -35,13 +39,12 @@ def _mtls_health(secrets: Path, host: str, port: int, timeout: float = 3.0) -> N
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.verify_mode = ssl.CERT_REQUIRED
+    # IP SANs are present on generated lab server certs for 127.0.0.1.
     context.check_hostname = True
     context.load_verify_locations(cafile=str(ca))
     context.load_cert_chain(certfile=str(cert), keyfile=str(key))
 
-    # Prefer hostname that matches server SAN DNS (localhost) when probing loopback.
-    url_host = "localhost" if host in {"127.0.0.1", "::1", "localhost"} else host
-    url = f"https://{url_host}:{port}/health"
+    url = f"https://{host}:{port}/health"
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         urllib.request.HTTPSHandler(context=context),
@@ -69,13 +72,24 @@ def wait(
             for port in tcp_ports:
                 _tcp_open("127.0.0.1", port)
             for port in https_ports:
-                # Use localhost so cert SAN DNS "localhost" matches when IP SAN checks differ.
-                _mtls_health(secrets, "localhost", port)
+                # Force IPv4 loopback; do not use localhost (often ::1 on Ubuntu CI).
+                _mtls_health(secrets, "127.0.0.1", port)
             print(f"Live mTLS services are ready (attempt {attempt}).", flush=True)
             return 0
         except Exception as exc:  # noqa: BLE001 — surface every readiness failure
             last_error = f"{type(exc).__name__}: {exc}"
             print(f"attempt {attempt}/{attempts}: {last_error}", flush=True)
+            if attempt in {1, 5, 15, 30} or attempt == attempts:
+                # Lightweight diagnostics without dumping secrets.
+                try:
+                    import subprocess
+
+                    subprocess.run(
+                        ["docker", "compose", "-f", "compose.yaml", "ps", "-a"],
+                        check=False,
+                    )
+                except Exception:
+                    pass
             time.sleep(sleep_s)
     print(f"Timed out waiting for live mTLS services. Last error: {last_error}", file=sys.stderr)
     return 1
