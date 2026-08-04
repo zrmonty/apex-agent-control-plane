@@ -45,18 +45,29 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
-          ca="$PWD/secrets/ca.pem"
-          cert="$PWD/secrets/ingest-http-client.pem"
-          key="$PWD/secrets/ingest-http-client.key"
+          export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
           for attempt in $(seq 1 60); do
-            if curl --fail --silent --show-error --max-time 2 \
-              --cacert "$ca" --cert "$cert" --key "$key" \
-              https://127.0.0.1:18443/health >/dev/null \
-              && curl --fail --silent --show-error --max-time 2 \
-              --cacert "$ca" --cert "$cert" --key "$key" \
-              https://127.0.0.1:18444/health >/dev/null \
-              && (timeout 2 bash -c '</dev/tcp/127.0.0.1/14222') \
-              && (timeout 2 bash -c '</dev/tcp/127.0.0.1/16379'); then
+            if python - <<'PY'
+          import os
+          import socket
+          import ssl
+          import urllib.request
+
+          root = os.environ["APEX_LIVE_MTLS_SECRETS"]
+          context = ssl.create_default_context(cafile=os.path.join(root, "ca.pem"))
+          context.load_cert_chain(
+              os.path.join(root, "ingest-http-client.pem"),
+              os.path.join(root, "ingest-http-client.key"),
+          )
+          for url in ("https://127.0.0.1:18443/health", "https://127.0.0.1:18444/health"):
+              with urllib.request.urlopen(url, context=context, timeout=2) as response:
+                  if response.status != 200:
+                      raise RuntimeError(f"{url} returned HTTP {response.status}")
+          for port in (14222, 16379):
+              with socket.create_connection(("127.0.0.1", port), timeout=2):
+                  pass
+          PY
+            then
               echo "Live mTLS services are ready (attempt $attempt)."
               exit 0
             fi
@@ -64,6 +75,8 @@ jobs:
           done
           docker compose -f compose.yaml ps -a
           docker compose -f compose.yaml logs --tail 80
+          docker compose -f ../compose.e2e.yaml ps -a
+          docker compose -f ../compose.e2e.yaml logs --tail 40
           echo "Timed out waiting for live mTLS services." >&2
           exit 1
 

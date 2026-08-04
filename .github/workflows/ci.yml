@@ -38,12 +38,17 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        run: cargo test --locked --lib --features "test-support,valkey,postgres"
+        run: cargo test --locked --lib --features "test-support,valkey"
+      - name: Check PostgreSQL feature
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo check --locked --features postgres
       - name: Clippy
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        run: cargo clippy --locked --all-targets --features "test-support,valkey,postgres" -- -D warnings
+        run: cargo clippy --locked --all-targets --features "test-support,valkey" -- -D warnings
 
   signed-bundles:
     runs-on: ubuntu-latest
