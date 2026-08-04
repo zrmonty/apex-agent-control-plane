@@ -125,7 +125,18 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
             bucket.in_flight > 0 || bucket.window_started.elapsed() < AUTH_BUCKET_RETENTION
         });
         if !buckets.contains_key(&key) && buckets.len() >= MAX_AUTH_IDENTITIES {
-            return Err(GatewayError::new(GatewayErrorCode::RateLimited));
+            let eviction = buckets
+                .iter()
+                .filter(|(_, bucket)| bucket.in_flight == 0)
+                .min_by_key(|(_, bucket)| bucket.window_started)
+                .map(|(key, _)| key.clone());
+            if let Some(eviction) = eviction {
+                buckets.remove(&eviction);
+            } else {
+                // Every slot is actively resolving. Refuse bounded overload,
+                // rather than allocating an unbounded attacker-controlled map.
+                return Err(GatewayError::new(GatewayErrorCode::RateLimited));
+            }
         }
         let bucket = buckets.entry(key).or_insert(RateBucket {
             window_started: now,
@@ -172,6 +183,18 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
         buckets.retain(|_, bucket| {
             bucket.in_flight > 0 || bucket.window_started.elapsed() < AUTH_BUCKET_RETENTION
         });
+        if !buckets.contains_key(&key) && buckets.len() >= MAX_AUTH_IDENTITIES {
+            let eviction = buckets
+                .iter()
+                .filter(|(_, bucket)| bucket.in_flight == 0)
+                .min_by_key(|(_, bucket)| bucket.window_started)
+                .map(|(key, _)| key.clone());
+            if let Some(eviction) = eviction {
+                buckets.remove(&eviction);
+            } else {
+                return Err(GatewayError::new(GatewayErrorCode::RateLimited));
+            }
+        }
         let bucket = buckets.entry(key).or_insert(RateBucket {
             window_started: now,
             failures: 0,
@@ -306,6 +329,39 @@ mod tests {
                 .unwrap_err()
                 .code,
             GatewayErrorCode::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn stale_auth_identities_are_evicted_before_valid_new_identity_is_rejected() {
+        let verifier = BearerTokenVerifier::new(RejectingResolver);
+        {
+            let mut buckets = verifier.buckets.lock().expect("test bucket lock");
+            for index in 0..MAX_AUTH_IDENTITIES {
+                let mut token = [0u8; 32];
+                token[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                buckets.insert(
+                    RateKey {
+                        token,
+                        peer: [0; 32],
+                    },
+                    RateBucket {
+                        window_started: Instant::now(),
+                        failures: 1,
+                        successes: 0,
+                        in_flight: 0,
+                    },
+                );
+            }
+        }
+        let key = RateKey {
+            token: [0xff; 32],
+            peer: [1; 32],
+        };
+        assert!(verifier.admit_attempt(key).is_ok());
+        assert_eq!(
+            verifier.buckets.lock().expect("test bucket lock").len(),
+            MAX_AUTH_IDENTITIES
         );
     }
 
