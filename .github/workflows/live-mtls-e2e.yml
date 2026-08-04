@@ -164,10 +164,27 @@ jobs:
         if: failure()
         working-directory: deploy/compose/live-mtls
         run: |
-          docker compose -f compose.yaml ps -a || true
-          docker compose -f compose.yaml logs --tail 120 || true
-          docker compose -f ../compose.e2e.yaml ps -a || true
-          docker compose -f ../compose.e2e.yaml logs --tail 60 || true
+          mkdir -p /tmp/apex-ci-logs
+          docker compose -f compose.yaml ps -a > /tmp/apex-ci-logs/live-mtls-ps.txt 2>&1 || true
+          docker compose -f compose.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/live-mtls-logs.txt 2>&1 || true
+          docker compose -f ../compose.e2e.yaml ps -a > /tmp/apex-ci-logs/e2e-ps.txt 2>&1 || true
+          docker compose -f ../compose.e2e.yaml logs --no-color --tail 100 > /tmp/apex-ci-logs/e2e-logs.txt 2>&1 || true
+          docker ps -a > /tmp/apex-ci-logs/docker-ps.txt 2>&1 || true
+          # Print to job log (public) so we can diagnose without admin log API.
+          echo "===== live-mtls ps ====="
+          cat /tmp/apex-ci-logs/live-mtls-ps.txt || true
+          echo "===== live-mtls logs ====="
+          cat /tmp/apex-ci-logs/live-mtls-logs.txt || true
+          echo "===== docker ps ====="
+          cat /tmp/apex-ci-logs/docker-ps.txt || true
+
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-mtls-compose-logs
+          path: /tmp/apex-ci-logs/
+          if-no-files-found: ignore
 
       - name: Tear down
         if: always()
