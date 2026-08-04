@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use postgres::{Client, NoTls};
+use postgres::Client;
 use prost::Message;
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ impl PostgresOutbox {
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_outbox_configuration());
         }
-        let mut client = Client::connect(connection_string, NoTls)
+        let mut client = crate::postgres_transport::connect(connection_string)
             .map_err(|_| GatewayError::invalid_outbox_configuration())?;
         client
             .batch_execute(include_str!("../../../../deploy/postgres/outbox.sql"))

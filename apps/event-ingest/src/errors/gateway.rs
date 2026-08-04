@@ -308,21 +308,23 @@ impl GatewayError {
             GatewayErrorCode::InvalidOutboxConfiguration => Self {
                 code,
                 summary: "The durable event outbox configuration is invalid.",
-                cause: "The outbox path must be a regular append-only file inside the trusted persistence directory, and every existing record must be bounded and parseable.",
+                cause: "The outbox path must be a regular append-only file inside the trusted persistence directory, or the PostgreSQL URL must use an approved transport. Remote PostgreSQL sessions require TLS and certificate verification.",
                 retryable: false,
                 recommended_next_steps: &[
                     "Set APEX_OUTBOX_FILE beneath APEX_OUTBOX_BASE on a persistent writable volume.",
                     "Inspect the outbox file for truncation or corruption without editing or deleting pending records.",
+                    "For PostgreSQL, use sslmode=require and set APEX_POSTGRES_CA_FILE to the server CA bundle. Plaintext is accepted only for an explicit numeric loopback sslmode=disable development URL.",
                 ],
             },
             GatewayErrorCode::InvalidIdempotencyConfiguration => Self {
                 code,
                 summary: "The durable idempotency store configuration is invalid.",
-                cause: "The idempotency journal must be a bounded, parseable regular file inside the trusted persistence directory.",
+                cause: "The idempotency journal must be a bounded, parseable regular file inside the trusted persistence directory, or the PostgreSQL URL must use an approved transport. Remote PostgreSQL sessions require TLS and certificate verification.",
                 retryable: false,
                 recommended_next_steps: &[
                     "Set APEX_IDEMPOTENCY_FILE beneath APEX_IDEMPOTENCY_BASE on a persistent writable volume.",
                     "Inspect the idempotency journal for truncation or corruption without deleting committed records.",
+                    "For PostgreSQL, use sslmode=require and set APEX_POSTGRES_CA_FILE to the server CA bundle. Plaintext is accepted only for an explicit numeric loopback sslmode=disable development URL.",
                 ],
             },
         }

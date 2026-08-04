@@ -19,9 +19,11 @@ sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = { version = "2", optional = true }
 zeroize = "1.8"
 redis = { version = "0.27", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
+tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring", "webpki-roots"] }
 uuid = { version = "1", optional = true, features = ["v4"] }
 
 [build-dependencies]
@@ -36,7 +38,7 @@ test-support = []
 # EphemeralStore remains available without this feature.
 valkey = ["dep:redis"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
-postgres = ["dep:postgres", "dep:uuid"]
+postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pemfile", "dep:uuid"]
 
 [[test]]
 name = "gateway"

@@ -58,7 +58,7 @@ finally {
 }
 
 Write-Host '==> PostgreSQL durability smoke (feature postgres)'
-$env:APEX_POSTGRES_URL = 'postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex'
+$env:APEX_POSTGRES_URL = 'postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex?sslmode=disable'
 Push-Location $ingest
 try {
     cargo test --lib --features 'postgres,test-support' postgres_ -- --nocapture

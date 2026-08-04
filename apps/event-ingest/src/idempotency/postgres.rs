@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use postgres::{Client, NoTls};
+use postgres::Client;
 use uuid::Uuid;
 
 use super::types::{
@@ -31,7 +31,7 @@ impl PostgresIdempotencyStore {
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_idempotency_configuration());
         }
-        let mut client = Client::connect(connection_string, NoTls)
+        let mut client = crate::postgres_transport::connect(connection_string)
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
         client
             .batch_execute(include_str!("../../../../deploy/postgres/idempotency.sql"))
