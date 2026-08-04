@@ -135,6 +135,11 @@ fn transport_constructor_preserves_validated_configuration() {
     fs::write(&ca, b"ca").unwrap();
     fs::write(&cert, b"cert").unwrap();
     fs::write(&key, b"key").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let config = NatsTlsConfig {
         server_url: "tls://localhost:4222".to_owned(),
         ca_file: ca,
