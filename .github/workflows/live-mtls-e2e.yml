@@ -135,7 +135,8 @@ jobs:
       - name: PostgreSQL durability tests
         working-directory: apps/event-ingest
         env:
-          APEX_POSTGRES_URL: postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex
+          # Explicit loopback + sslmode=disable is the only approved plaintext path.
+          APEX_POSTGRES_URL: postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex?sslmode=disable
         run: cargo test --lib --features "postgres,test-support" postgres_ -- --nocapture
 
       - name: Object-Lock acceptance (MinIO)
