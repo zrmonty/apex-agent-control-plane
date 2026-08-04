@@ -38,7 +38,9 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        run: cargo test --locked --lib --features "test-support,valkey"
+          RUST_BACKTRACE: "1"
+          RUST_TEST_THREADS: "1"
+        run: cargo test --locked --lib --features "test-support,valkey" -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"
