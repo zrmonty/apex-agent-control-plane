@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+use fs2::FileExt;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,8 @@ enum FileOutboxRecord {
 #[derive(Debug)]
 pub struct FileOutbox {
     file: File,
+    // Held for the process lifetime: file journals are single-writer only.
+    _writer_lock: File,
     capacity: usize,
     pending: HashMap<OutboxKey, IngestRequest>,
     complete: HashSet<OutboxKey>,
@@ -76,8 +79,24 @@ impl FileOutbox {
             .read(true)
             .open(path)
             .map_err(|_| GatewayError::invalid_outbox_configuration())?;
+        let lock_path = path.with_extension(format!(
+            "{}.lock",
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("journal")
+        ));
+        let writer_lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| GatewayError::invalid_outbox_configuration())?;
+        writer_lock
+            .try_lock_exclusive()
+            .map_err(|_| GatewayError::invalid_outbox_configuration())?;
         let mut outbox = Self {
             file,
+            _writer_lock: writer_lock,
             capacity,
             pending: HashMap::new(),
             complete: HashSet::new(),

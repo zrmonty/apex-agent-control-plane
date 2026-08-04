@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
@@ -34,6 +35,8 @@ enum IdempotencyRecord {
 #[derive(Debug)]
 pub struct FileIdempotencyStore {
     file: File,
+    // Held for the process lifetime: file journals are single-writer only.
+    _writer_lock: File,
     capacity: usize,
     next_token: u64,
     committed: HashMap<IdempotencyKey, [u8; 32]>,
@@ -73,8 +76,24 @@ impl FileIdempotencyStore {
             .read(true)
             .open(path)
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
+        let lock_path = path.with_extension(format!(
+            "{}.lock",
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("journal")
+        ));
+        let writer_lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
+        writer_lock
+            .try_lock_exclusive()
+            .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
         let mut store = Self {
             file,
+            _writer_lock: writer_lock,
             capacity,
             next_token: 1,
             committed: HashMap::new(),

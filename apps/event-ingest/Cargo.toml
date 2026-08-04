@@ -11,6 +11,7 @@ async-nats = { version = "0.50.0", default-features = false, features = ["jetstr
 prost = "0.13"
 prost-types = "0.13"
 getrandom = "0.4.3"
+fs2 = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
