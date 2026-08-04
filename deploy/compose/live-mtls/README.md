@@ -36,7 +36,8 @@ python generate_pki.py
 python render_configs.py
 docker compose -f compose.yaml up -d
 $env:APEX_LIVE_MTLS='1'
-$env:APEX_LIVE_MTLS_SECRETS=(Resolve-Path .\secrets).Path
+# secrets/ = Docker mounts (0644 keys). secrets-host/ = host clients (0600 private material).
+$env:APEX_LIVE_MTLS_SECRETS=(Resolve-Path .\secrets-host).Path
 cd ../../../apps/event-ingest
 cargo test --test live_mtls --features "test-support,valkey" -- --nocapture
 ```
@@ -53,6 +54,7 @@ docker compose -f compose.yaml down
 - ClickHouse and archive services here are **contract stubs**. They implement frozen `/v1/events` HTTP APIs so gateway clients can complete mTLS without proprietary provider images.
 - Official `valkey/valkey` and `nats` images are used for broker and accelerator handshakes.
 - Unit CI does not set `APEX_LIVE_MTLS`. Those tests skip when the flag is absent.
+- **Two secret trees:** `generate_pki.py` writes `secrets/` for Docker (lab keys are world-readable so non-root images can open file mounts) and `secrets-host/` for host-side Rust clients (private keys and credential files are mode `0600`). Point `APEX_LIVE_MTLS_SECRETS` at `secrets-host` for `cargo test --test live_mtls`.
 
 You can also create PKI with the [lab installer](../../lab/README.md).
 

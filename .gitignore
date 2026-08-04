@@ -73,6 +73,7 @@ deploy/compose/secrets/
 # Live mTLS handshake fixtures (PKI, ACL, passwords, rendered server configs).
 # Scripts and stubs under live-mtls/ remain tracked; only generated secrets are ignored.
 deploy/compose/live-mtls/secrets/
+deploy/compose/live-mtls/secrets-host/
 .local/
 
 # Generated design previews and local patch/recovery files

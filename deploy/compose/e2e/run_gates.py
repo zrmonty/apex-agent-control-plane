@@ -174,7 +174,19 @@ def main() -> int:
     cargo_ok = run(["cargo", "--version"])[0] == 0
     gate("cargo_available", cargo_ok, required=False)
 
-    secrets = str(LIVE / "secrets")
+    # Host-restricted tree (0600 private material) for Rust secret policy on Linux.
+    # Docker services keep mounting LIVE/secrets (0644 keys for non-root images).
+    host_secrets = LIVE / "secrets-host"
+    if not host_secrets.is_dir() and (LIVE / "secrets").is_dir():
+        import importlib.util
+
+        gen_path = LIVE / "generate_pki.py"
+        spec = importlib.util.spec_from_file_location("live_mtls_generate_pki", gen_path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.write_host_secrets(LIVE / "secrets", host_secrets)
+    secrets = str(host_secrets if host_secrets.is_dir() else LIVE / "secrets")
     test_env = {
         "APEX_LIVE_MTLS": "1",
         "APEX_LIVE_MTLS_SECRETS": secrets,

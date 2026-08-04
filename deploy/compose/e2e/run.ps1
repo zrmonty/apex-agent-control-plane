@@ -44,7 +44,12 @@ if (-not (Assert-Exit 'live-mtls up')) {
 Start-Sleep -Seconds 8
 
 $env:APEX_LIVE_MTLS = '1'
-$env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path .\secrets).Path
+$hostSecrets = Join-Path $live 'secrets-host'
+if (Test-Path $hostSecrets) {
+    $env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path $hostSecrets).Path
+} else {
+    $env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path .\secrets).Path
+}
 $env:APEX_ALLOW_LOOPBACK_SINKS = '1'
 $ingest = Resolve-Path (Join-Path $composeDir '..\..\apps\event-ingest')
 Push-Location $ingest

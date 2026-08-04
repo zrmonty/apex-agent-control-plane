@@ -9,7 +9,7 @@ docker info --format '{{.ServerVersion}}' | Out-Null
 Write-Host "==> Installing cryptography for PKI generation (user scope)"
 python -m pip install --user --quiet cryptography
 
-Write-Host "==> Generating local-dev PKI"
+Write-Host "==> Generating local-dev PKI (docker secrets/ + host secrets-host/)"
 python .\generate_pki.py --out .\secrets
 
 Write-Host "==> Rendering Valkey/NATS configs"
@@ -34,7 +34,13 @@ Start-Sleep -Seconds 5
 
 Write-Host "==> Running live mTLS tests"
 $env:APEX_LIVE_MTLS = '1'
-$env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path .\secrets).Path
+# Prefer host-restricted tree when present (Linux rejects 0644 private keys).
+$hostSecrets = Join-Path $here 'secrets-host'
+if (Test-Path $hostSecrets) {
+    $env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path $hostSecrets).Path
+} else {
+    $env:APEX_LIVE_MTLS_SECRETS = (Resolve-Path .\secrets).Path
+}
 $env:APEX_ALLOW_LOOPBACK_SINKS = '1'
 $ingest = Resolve-Path ..\..\..\apps\event-ingest
 Push-Location $ingest

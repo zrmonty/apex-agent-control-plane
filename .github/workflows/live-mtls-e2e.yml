@@ -31,24 +31,36 @@ jobs:
           set -euo pipefail
           python generate_pki.py --out secrets
           python render_configs.py
-          # Ensure mounted private keys are readable inside containers (lab only).
-          # Host-generated 0600 keys + non-root image users → permission denied on CI.
+          # Docker mount tree: keys must be world-readable for non-root service images.
+          # Compose on Linux ignores secret mode/uid/gid. Lab fixtures only.
           chmod 644 secrets/*.pem secrets/*.key 2>/dev/null || true
           chmod 644 secrets/nats.conf secrets/valkey.conf secrets/valkey.acl 2>/dev/null || true
+          chmod 644 secrets/nats-username 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
+            chmod 644 secrets/ingest-bearer-token
           fi
           # Fingerprint of authorized gRPC client cert (for gateway-ref compose config).
           python - <<'PY'
           from pathlib import Path
           from cryptography import x509
           from cryptography.hazmat.primitives import hashes
+          from generate_pki import write_host_secrets
           pem = Path("secrets/ingest-http-client.pem").read_bytes()
           cert = x509.load_pem_x509_certificate(pem)
           fp = cert.fingerprint(hashes.SHA256()).hex()
           Path("secrets/ingest-http-client.sha256").write_text(fp + "\n", encoding="ascii")
+          # Host tree for cargo tests: private material must be mode 0600
+          # (event-ingest rejects group/world bits on private keys and credentials).
+          host = write_host_secrets(Path("secrets").resolve())
+          print("host_secrets=" + str(host))
           print("APEX_BEARER_CERT_SHA256=" + fp)
           PY
+          # Re-assert host private modes after any later writes into secrets/.
+          chmod 600 secrets-host/*.key secrets-host/*password* secrets-host/nats-username 2>/dev/null || true
+          if [ -f secrets-host/ingest-bearer-token ]; then chmod 600 secrets-host/ingest-bearer-token; fi
+          ls -la secrets | head -40
+          ls -la secrets-host | head -40
 
       - name: Start and wait for live-mTLS stack
         working-directory: deploy/compose/live-mtls
@@ -115,7 +127,8 @@ jobs:
         working-directory: apps/event-ingest
         env:
           APEX_LIVE_MTLS: "1"
-          APEX_LIVE_MTLS_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets
+          # Use host-restricted tree (0600 keys). Docker still mounts secrets/ (0644).
+          APEX_LIVE_MTLS_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
           APEX_ALLOW_LOOPBACK_SINKS: "1"
         run: cargo test --test live_mtls --features "test-support,valkey" -- --nocapture
 
