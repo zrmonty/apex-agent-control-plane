@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tonic::transport::server::TlsConnectInfo;
 
-use crate::{Caller, GatewayError, GatewayErrorCode};
+use crate::{
+    Caller, DenyHintKey, EphemeralStore, FingerprintCounterKey, GatewayError, GatewayErrorCode,
+};
 
 /// Stable identity derived from the authenticated TLS peer certificate.
 ///
@@ -72,6 +74,12 @@ pub struct BearerTokenVerifier<R: BearerTokenResolver> {
     resolver: Arc<R>,
     buckets: Arc<Mutex<HashMap<RateKey, RateBucket>>>,
     require_peer_identity: bool,
+    /// Optional non-authoritative accelerator (Valkey or in-memory fallback).
+    /// The process-local `buckets` above remain authoritative when this is
+    /// unset or unavailable; this only closes the gap where N replicas each
+    /// grant an identity its own full `AUTH_FAILURES_PER_SECOND` budget,
+    /// multiplying the effective credential-stuffing budget by N.
+    ephemeral: Option<Arc<Mutex<Box<dyn EphemeralStore>>>>,
 }
 
 const AUTH_FAILURES_PER_SECOND: u32 = 60;
@@ -113,12 +121,24 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
             resolver: Arc::new(resolver),
             buckets: Arc::new(Mutex::new(HashMap::new())),
             require_peer_identity,
+            ephemeral: None,
         }
+    }
+
+    /// Attach a shared ephemeral store so the failed-auth budget is enforced
+    /// cluster-wide, not per replica. Failures do not fail open: the
+    /// process-local bucket above remains the authoritative ceiling.
+    pub fn with_ephemeral_store(mut self, store: Arc<Mutex<Box<dyn EphemeralStore>>>) -> Self {
+        self.ephemeral = Some(store);
+        self
     }
 }
 
 impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
     fn admit_attempt(&self, key: RateKey) -> Result<(), GatewayError> {
+        if self.distributed_deny_hint_active(key) {
+            return Err(GatewayError::new(GatewayErrorCode::RateLimited));
+        }
         let mut buckets = self.buckets.lock().map_err(|_| GatewayError::internal())?;
         let now = Instant::now();
         buckets.retain(|_, bucket| {
@@ -129,7 +149,7 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
                 .iter()
                 .filter(|(_, bucket)| bucket.in_flight == 0)
                 .min_by_key(|(_, bucket)| bucket.window_started)
-                .map(|(key, _)| key.clone());
+                .map(|(key, _)| *key);
             if let Some(eviction) = eviction {
                 buckets.remove(&eviction);
             } else {
@@ -174,10 +194,66 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
         } else {
             bucket.failures = bucket.failures.saturating_add(1);
         }
+        drop(buckets);
+        if !succeeded {
+            self.record_distributed_failure(key);
+        }
+    }
+
+    /// Increments a cluster-wide failure counter for this identity and, once
+    /// the fleet-wide budget is exceeded, sets a short-lived shared deny hint
+    /// so every replica short-circuits the identity immediately instead of
+    /// each independently granting it a fresh local budget. Best-effort: any
+    /// ephemeral-store error is swallowed, leaving the local bucket as the
+    /// only ceiling for this attempt.
+    fn record_distributed_failure(&self, key: RateKey) {
+        let Some(store) = &self.ephemeral else {
+            return;
+        };
+        let Ok(mut guard) = store.lock() else {
+            return;
+        };
+        let namespace = "auth-failures";
+        let fingerprint_hex = identity_fingerprint_hex(key);
+        let fingerprint = FingerprintCounterKey {
+            namespace: namespace.to_owned(),
+            fingerprint_hex: fingerprint_hex.clone(),
+        };
+        let Ok(count) = guard.increment_fingerprint(&fingerprint, Duration::from_secs(1)) else {
+            return;
+        };
+        if count > u64::from(AUTH_FAILURES_PER_SECOND) {
+            let deny = DenyHintKey {
+                namespace: namespace.to_owned(),
+                identity_fingerprint_hex: fingerprint_hex,
+            };
+            let _ = guard.set_deny_hint(&deny, Duration::from_secs(1));
+        }
+    }
+
+    /// Cheap cluster-wide short-circuit checked before any local bucket or
+    /// resolver work: if another replica already tripped this identity's
+    /// distributed deny hint, reject immediately rather than each replica
+    /// re-discovering the same overload independently.
+    fn distributed_deny_hint_active(&self, key: RateKey) -> bool {
+        let Some(store) = &self.ephemeral else {
+            return false;
+        };
+        let Ok(mut guard) = store.lock() else {
+            return false;
+        };
+        let deny = DenyHintKey {
+            namespace: "auth-failures".to_owned(),
+            identity_fingerprint_hex: identity_fingerprint_hex(key),
+        };
+        guard.is_denied(&deny).unwrap_or(false)
     }
 
     fn record_malformed_attempt(&self, peer: Option<&PeerIdentity>) -> Result<(), GatewayError> {
         let key = Self::malformed_key(peer);
+        if self.distributed_deny_hint_active(key) {
+            return Err(GatewayError::new(GatewayErrorCode::RateLimited));
+        }
         let mut buckets = self.buckets.lock().map_err(|_| GatewayError::internal())?;
         let now = Instant::now();
         buckets.retain(|_, bucket| {
@@ -188,7 +264,7 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
                 .iter()
                 .filter(|(_, bucket)| bucket.in_flight == 0)
                 .min_by_key(|(_, bucket)| bucket.window_started)
-                .map(|(key, _)| key.clone());
+                .map(|(key, _)| *key);
             if let Some(eviction) = eviction {
                 buckets.remove(&eviction);
             } else {
@@ -210,6 +286,8 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
             return Err(GatewayError::new(GatewayErrorCode::RateLimited));
         }
         bucket.failures += 1;
+        drop(buckets);
+        self.record_distributed_failure(key);
         Ok(())
     }
 
@@ -223,6 +301,18 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
             peer: peer.map_or([0; 32], |value| value.certificate_sha256),
         }
     }
+}
+
+/// Collapses a token+peer rate key into a single opaque 32-byte fingerprint,
+/// hex-encoded to fit the ephemeral store's `is_scope_identifier`-validated
+/// fingerprint key shape (raw token/peer hashes concatenated are 64 bytes,
+/// over the store's 64-*hex-character* limit).
+fn identity_fingerprint_hex(key: RateKey) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.token);
+    hasher.update(key.peer);
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl<R: BearerTokenResolver> CallerVerifier for BearerTokenVerifier<R> {
@@ -307,6 +397,99 @@ mod tests {
             MetadataValue::try_from(std::str::from_utf8(value).unwrap()).unwrap(),
         );
         metadata
+    }
+
+    #[test]
+    fn distributed_deny_hint_is_shared_across_verifier_instances() {
+        use crate::{EphemeralStore, InMemoryEphemeralStore};
+
+        let store: Arc<Mutex<Box<dyn EphemeralStore>>> =
+            Arc::new(Mutex::new(Box::new(InMemoryEphemeralStore::new())));
+        let replica_a =
+            BearerTokenVerifier::new(RejectingResolver).with_ephemeral_store(store.clone());
+        let replica_b =
+            BearerTokenVerifier::new(RejectingResolver).with_ephemeral_store(store.clone());
+        let bad = metadata(b"Bearer shared-attacker");
+
+        // Replica A alone can only push the shared distributed counter to
+        // AUTH_FAILURES_PER_SECOND before its own *local* bucket starts
+        // denying first (identical per-second limit) -- a single replica can
+        // never prove the distributed path this way. Spend replica A's full
+        // local budget, then a couple of replica B's, so the two replicas'
+        // *local-independent* buckets combined push the one shared counter
+        // past the threshold.
+        for _ in 0..AUTH_FAILURES_PER_SECOND {
+            let _ = replica_a.verify(&bad);
+        }
+        for _ in 0..2 {
+            let _ = replica_b.verify(&bad);
+        }
+
+        // A brand new replica C has never seen this identity locally at all,
+        // but the shared ephemeral store's deny hint must still short-circuit
+        // it immediately -- this is the whole point of wiring auth failures
+        // through the shared store: N replicas must not each grant their own
+        // full failure budget.
+        let replica_c = BearerTokenVerifier::new(RejectingResolver).with_ephemeral_store(store);
+        assert_eq!(
+            replica_c.verify(&bad).unwrap_err().code,
+            GatewayErrorCode::RateLimited
+        );
+    }
+
+    #[test]
+    fn ephemeral_store_errors_do_not_block_authentication() {
+        use crate::{
+            DenyHintKey, EphemeralError, EphemeralStore, FingerprintCounterKey, RateLimitDecision,
+            RateLimitKey,
+        };
+
+        struct AlwaysUnavailable;
+        impl EphemeralStore for AlwaysUnavailable {
+            fn check_rate_limit(
+                &mut self,
+                _key: &RateLimitKey,
+                _limit: u32,
+                _window: Duration,
+            ) -> Result<RateLimitDecision, EphemeralError> {
+                Err(EphemeralError::unavailable())
+            }
+            fn increment_fingerprint(
+                &mut self,
+                _key: &FingerprintCounterKey,
+                _window: Duration,
+            ) -> Result<u64, EphemeralError> {
+                Err(EphemeralError::unavailable())
+            }
+            fn fingerprint_count(
+                &mut self,
+                _key: &FingerprintCounterKey,
+            ) -> Result<u64, EphemeralError> {
+                Err(EphemeralError::unavailable())
+            }
+            fn set_deny_hint(
+                &mut self,
+                _key: &DenyHintKey,
+                _ttl: Duration,
+            ) -> Result<(), EphemeralError> {
+                Err(EphemeralError::unavailable())
+            }
+            fn is_denied(&mut self, _key: &DenyHintKey) -> Result<bool, EphemeralError> {
+                Err(EphemeralError::unavailable())
+            }
+        }
+
+        let store: Arc<Mutex<Box<dyn EphemeralStore>>> =
+            Arc::new(Mutex::new(Box::new(AlwaysUnavailable)));
+        let verifier = BearerTokenVerifier::new(AcceptingResolver).with_ephemeral_store(store);
+        // A broken ephemeral store must never prevent a legitimate call from
+        // succeeding on the local-authoritative path.
+        assert!(
+            verifier
+                .verify(&metadata(b"Bearer valid-token"))
+                .unwrap()
+                .is_authenticated()
+        );
     }
 
     #[test]

@@ -71,10 +71,12 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
             .scope
             .as_ref()
             .filter(|scope| {
-                scope.workspace_id.len() <= 256
-                    && scope.namespace_id.len() <= 256
-                    && scope.workspace_id.is_ascii()
-                    && scope.namespace_id.is_ascii()
+                // Must reject the `\u{1f}` bucket delimiter (and any other
+                // control byte), not just check length/ASCII — otherwise a
+                // caller can smuggle the delimiter inside workspace_id or
+                // namespace_id to alias its bucket key with another scope's.
+                crate::is_scope_identifier(&scope.workspace_id)
+                    && crate::is_scope_identifier(&scope.namespace_id)
             })
             .map(|scope| {
                 format!(
@@ -285,4 +287,91 @@ where
         .map(tonic::Response::new)
         .map_err(|error| error.grpc_status_value())
     }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests {
+    use super::*;
+    use crate::{Caller, EphemeralStore, InMemoryEphemeralStore, InMemoryPublisher};
+
+    struct NoopVerifier;
+    impl CallerVerifier for NoopVerifier {
+        fn verify(&self, _metadata: &tonic::metadata::MetadataMap) -> Result<Caller, GatewayError> {
+            Err(GatewayError::unauthenticated())
+        }
+    }
+
+    fn service() -> AuthenticatedGrpcService<InMemoryPublisher, NoopVerifier> {
+        let gateway = crate::IngestGateway::new(InMemoryPublisher::default());
+        let adapter = crate::AuthenticatedIngestAdapter::new(gateway);
+        AuthenticatedGrpcService::new(adapter, NoopVerifier)
+    }
+
+    fn envelope_with_scope(workspace_id: &str, namespace_id: &str) -> proto::EventEnvelope {
+        proto::EventEnvelope {
+            scope: Some(proto::Scope {
+                workspace_id: workspace_id.to_owned(),
+                namespace_id: namespace_id.to_owned(),
+                agent_group_ids: vec![],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn admit_request_isolates_buckets_by_identity_and_scope() {
+        let service = service();
+        let caller = Caller::authenticated("spiffe://apex/test", ["acme/prod"]);
+        let envelope = envelope_with_scope("acme", "prod");
+        assert!(service.admit_request(&caller, &envelope).is_ok());
+        // A different scope for the same caller gets its own bucket.
+        let other_scope_envelope = envelope_with_scope("acme", "staging");
+        assert!(
+            service
+                .admit_request(&caller, &other_scope_envelope)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn admit_request_falls_back_to_a_shared_bucket_for_unsafe_scope_or_identity() {
+        let service = service();
+        let caller = Caller::authenticated("spiffe://apex/test", ["acme/prod"]);
+        // A control character in the scope must not smuggle its way into the
+        // bucket key -- it collapses to the shared "__invalid_scope__"
+        // bucket instead of being trusted verbatim.
+        let unsafe_scope = envelope_with_scope("acme\u{1f}evil", "prod");
+        assert!(service.admit_request(&caller, &unsafe_scope).is_ok());
+        let no_scope = proto::EventEnvelope::default();
+        assert!(service.admit_request(&caller, &no_scope).is_ok());
+    }
+
+    #[test]
+    fn admit_request_rate_limits_after_the_local_ceiling() {
+        let service = service();
+        let caller = Caller::authenticated("spiffe://apex/test", ["acme/prod"]);
+        let envelope = envelope_with_scope("acme", "prod");
+        for _ in 0..MAX_ADMISSION_REQUESTS_PER_SECOND {
+            service.admit_request(&caller, &envelope).unwrap();
+        }
+        assert_eq!(
+            service
+                .admit_request(&caller, &envelope)
+                .unwrap_err()
+                .code,
+            GatewayErrorCode::RateLimited
+        );
+    }
+
+    #[test]
+    fn admit_request_admits_normally_with_a_distributed_store_attached() {
+        let store: Arc<Mutex<Box<dyn EphemeralStore>>> =
+            Arc::new(Mutex::new(Box::new(InMemoryEphemeralStore::new())));
+        let service = service().with_ephemeral_store(store);
+        let caller = Caller::authenticated("spiffe://apex/test", ["acme/prod"]);
+        let envelope = envelope_with_scope("acme", "prod");
+        // The distributed path must not prevent an otherwise-valid admission.
+        assert!(service.admit_request(&caller, &envelope).is_ok());
+    }
+
 }

@@ -70,14 +70,23 @@ class DiagnosticHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def require_authorized_client(self) -> bool:
-        """Bind write APIs to one expected mTLS client leaf when configured.
+        """Bind write APIs to one expected mTLS client leaf.
 
-        If ``APEX_PROVIDER_CLIENT_CERT_SHA256`` is unset/empty, any client that
-        completed mTLS against the configured client CA is accepted (lab default).
+        Fails closed: if ``APEX_PROVIDER_CLIENT_CERT_SHA256`` is unset/empty,
+        the request is denied unless ``APEX_PROVIDER_ALLOW_UNPINNED_CLIENT=1``
+        is explicitly set, which is a lab-only escape hatch and must never be
+        set in a deployment reachable by untrusted mTLS clients.
         """
         expected = os.environ.get("APEX_PROVIDER_CLIENT_CERT_SHA256", "").strip().lower()
         if not expected:
-            return True
+            if os.environ.get("APEX_PROVIDER_ALLOW_UNPINNED_CLIENT", "").strip() == "1":
+                return True
+            self.send_diagnostic(
+                403,
+                "CLIENT_IDENTITY_DENIED",
+                "APEX_PROVIDER_CLIENT_CERT_SHA256 is not configured for this provider.",
+            )
+            return False
         certificate = self.connection.getpeercert(binary_form=True)
         actual = hashlib.sha256(certificate).hexdigest() if certificate else ""
         if len(expected) == 64 and all(c in "0123456789abcdef" for c in expected) and hmac.compare_digest(

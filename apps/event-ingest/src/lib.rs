@@ -6,6 +6,7 @@ pub mod proto {
 }
 
 mod auth;
+mod backoff;
 mod ephemeral;
 mod errors;
 mod gateway;

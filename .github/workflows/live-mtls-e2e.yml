@@ -8,6 +8,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   live-mtls-and-e2e:
     runs-on: ubuntu-latest
@@ -135,8 +138,11 @@ jobs:
       - name: PostgreSQL durability tests
         working-directory: apps/event-ingest
         env:
-          # Explicit loopback + sslmode=disable is the only approved plaintext path.
+          # Explicit loopback + sslmode=disable is the only approved plaintext path,
+          # and now also requires this separate, loudly-named opt-in so plaintext can
+          # never be reached by a bare connection string alone.
           APEX_POSTGRES_URL: postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex?sslmode=disable
+          APEX_ALLOW_POSTGRES_PLAINTEXT: "1"
         run: cargo test --lib --features "postgres,test-support" postgres_ -- --nocapture
 
       - name: Object-Lock acceptance (MinIO)

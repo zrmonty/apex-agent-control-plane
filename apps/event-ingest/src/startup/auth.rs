@@ -12,10 +12,26 @@ use super::env::valid_identifier;
 use super::secrets::{read_token, trusted_secret_path};
 
 const TOKEN_RELOAD_INTERVAL: Duration = Duration::from_secs(5);
+/// After this many consecutive reload failures (roughly 1 minute at the
+/// interval above), stop trusting the increasingly-stale cached token and
+/// fail closed instead of authenticating against it indefinitely.
+const MAX_CONSECUTIVE_RELOAD_FAILURES: u32 = 12;
+/// Independent of the failure count, never authenticate against a token that
+/// hasn't been confirmed fresh in this long -- a slow drip of isolated,
+/// non-consecutive failures (each one resetting nothing because it's
+/// followed by a lone success) could otherwise stay under the consecutive
+/// threshold forever while the credential silently ages past any rotation
+/// policy.
+const MAX_TOKEN_STALENESS: Duration = Duration::from_secs(15 * 60);
 
 struct TokenCache {
     token: Zeroizing<String>,
+    /// Last reload *attempt* (successful or not); paces retry cadence.
     loaded_at: Instant,
+    /// Last reload that actually produced a fresh token; used for the
+    /// staleness fail-closed check below.
+    last_success: Instant,
+    consecutive_failures: u32,
 }
 
 pub(crate) struct FileBearerResolver {
@@ -44,6 +60,8 @@ impl FileBearerResolver {
             token_cache: Arc::new(Mutex::new(TokenCache {
                 token,
                 loaded_at: Instant::now(),
+                last_success: Instant::now(),
+                consecutive_failures: 0,
             })),
             subject,
             agent_id,
@@ -86,17 +104,46 @@ impl BearerTokenResolver for FileBearerResolver {
                 // refresh is briefly unreadable. Replacing it with an empty
                 // value converts a recoverable mount race into a total auth
                 // outage. A successful read remains the only rotation path.
-                if let Ok(token) = refreshed {
-                    cache.token = Zeroizing::new(token);
+                match refreshed {
+                    Ok(token) => {
+                        cache.token = Zeroizing::new(token);
+                        cache.last_success = Instant::now();
+                        cache.consecutive_failures = 0;
+                    }
+                    Err(error) => {
+                        cache.consecutive_failures = cache.consecutive_failures.saturating_add(1);
+                        // A single mount race is expected and recoverable, but a
+                        // failure that persists past the reload interval means
+                        // the bearer token is silently going stale with no
+                        // other operator-visible signal. Surface it every
+                        // reload attempt, not just once, so it shows up in
+                        // routine log scraping rather than only at startup.
+                        eprintln!(
+                            "event-ingest bearer token reload failed ({} consecutive), retaining prior credential: {error}",
+                            cache.consecutive_failures
+                        );
+                    }
                 }
                 cache.loaded_at = Instant::now();
             }
         }
-        let matches = self
-            .token_cache
-            .lock()
-            .map(|cache| constant_time_token_eq(token, &cache.token))
-            .unwrap_or(false);
+        let decision = self.token_cache.lock().map(|cache| {
+            let stale = cache.consecutive_failures >= MAX_CONSECUTIVE_RELOAD_FAILURES
+                || cache.last_success.elapsed() >= MAX_TOKEN_STALENESS;
+            (constant_time_token_eq(token, &cache.token), stale)
+        });
+        let (matches, stale) = decision.unwrap_or((false, true));
+        if stale {
+            // The credential has gone unconfirmed for too long to keep
+            // trusting silently -- a deleted/corrupted secret file must
+            // eventually deny traffic rather than authenticate against an
+            // indefinitely-aging cached token with no operator escalation
+            // beyond a log line.
+            eprintln!(
+                "event-ingest bearer token is stale (reload has not succeeded recently); failing closed"
+            );
+            return Err(apex_event_ingest::GatewayError::unauthenticated());
+        }
         if !matches {
             return Err(apex_event_ingest::GatewayError::unauthenticated());
         }

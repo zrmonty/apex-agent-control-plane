@@ -192,6 +192,7 @@ def main() -> int:
         "APEX_LIVE_MTLS_SECRETS": secrets,
         "APEX_ALLOW_LOOPBACK_SINKS": "1",
         "APEX_POSTGRES_URL": "postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex?sslmode=disable",
+        "APEX_ALLOW_POSTGRES_PLAINTEXT": "1",
     }
 
     if cargo_ok:

@@ -19,6 +19,8 @@ An authorized operator creates a scoped AgentGroup. The operator selects the dep
 
 Do not add a static `APEX_API_KEY` path. See [Frictionless Secure Agent Integration](docs/architecture/Frictionless%20Secure%20Agent%20Integration.md).
 
+The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-staging`) is a distinct, narrower fallback from the paths above: it binds one shared token to exactly one workload identity, scope set, and pinned client certificate for a single-agent staging deployment. It is not a multi-agent or multi-tenant credential store, and must never be used to onboard more than one agent identity against the same gateway. Multi-agent and multi-tenant fleets use the SPIRE or mTLS enrollment paths above instead.
+
 ## Required identity and scope
 
 Configure immutable runtime identity and the write scope.

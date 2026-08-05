@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -202,12 +202,132 @@ fn safe_endpoint_address(address: IpAddr) -> bool {
                 && !value.is_link_local()
                 && !value.is_unspecified()
                 && !value.is_broadcast()
+                && !is_carrier_grade_nat(value)
         }
         IpAddr::V6(value) => {
             !value.is_loopback()
                 && !value.is_unique_local()
                 && !value.is_unicast_link_local()
                 && !value.is_unspecified()
+        }
+    }
+}
+
+/// RFC 6598 shared address space (100.64.0.0/10), used for carrier-grade NAT
+/// and, by several cloud providers, for internal/shared infrastructure. Not
+/// covered by `is_private`/`is_link_local`, but a sink destination resolving
+/// there is just as much an SSRF-class risk as RFC 1918 space.
+fn is_carrier_grade_nat(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_endpoint_address_rejects_private_link_local_and_unspecified_ranges() {
+        // Deliberately excludes 127.0.0.1/::1: those are conditionally
+        // exempted by APEX_ALLOW_LOOPBACK_SINKS, which may be set
+        // process-wide by other tests sharing this test binary.
+        for unsafe_ip in [
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "fc00::1",
+            "fe80::1",
+            "::",
+        ] {
+            let address: IpAddr = unsafe_ip.parse().unwrap();
+            assert!(
+                !safe_endpoint_address(address),
+                "{unsafe_ip} must be rejected as an unsafe sink destination"
+            );
+        }
+        for safe_ip in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            let address: IpAddr = safe_ip.parse().unwrap();
+            assert!(
+                safe_endpoint_address(address),
+                "{safe_ip} is a public address and must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn build_client_rejects_unsafe_endpoint_shapes_before_any_network_access() {
+        let base = std::env::temp_dir();
+        let cases = [
+            "http://example.invalid/v1/events",
+            "https://user:pass@example.invalid/v1/events",
+            "https://example.invalid/v1/events?x=1",
+            "https://example.invalid/v1/events#frag",
+            "https://example.invalid/v1/ev\u{0}ents",
+            "https://example.invalid/v1/%2e%2e/events",
+            "https://example.invalid/v1/%2fevents",
+        ];
+        for endpoint in cases {
+            let config = AuthenticatedHttpConfig {
+                endpoint: endpoint.to_owned(),
+                ca_file: base.join("ca.pem"),
+                client_cert_file: base.join("cert.pem"),
+                client_key_file: base.join("key.pem"),
+                bearer_token_file: None,
+            };
+            assert!(
+                config.build_client(&base).is_err(),
+                "{endpoint} must be rejected before touching the filesystem or network"
+            );
+        }
+        let oversized = AuthenticatedHttpConfig {
+            endpoint: format!("https://example.invalid/{}", "a".repeat(600)),
+            ca_file: base.join("ca.pem"),
+            client_cert_file: base.join("cert.pem"),
+            client_key_file: base.join("key.pem"),
+            bearer_token_file: None,
+        };
+        assert!(oversized.build_client(&base).is_err());
+    }
+
+    #[test]
+    fn build_client_rejects_private_and_cgnat_destinations_by_default() {
+        let base = std::env::temp_dir();
+        for endpoint in [
+            "https://10.0.0.5/v1/events",
+            "https://100.64.0.5/v1/events",
+        ] {
+            let config = AuthenticatedHttpConfig {
+                endpoint: endpoint.to_owned(),
+                ca_file: base.join("ca.pem"),
+                client_cert_file: base.join("cert.pem"),
+                client_key_file: base.join("key.pem"),
+                bearer_token_file: None,
+            };
+            assert!(
+                config.build_client(&base).is_err(),
+                "{endpoint} must be rejected without the private-sink escape hatch"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_cgnat_range_but_allows_its_boundaries() {
+        for unsafe_address in ["100.64.0.0", "100.64.0.1", "100.100.1.2", "100.127.255.255"] {
+            let address: Ipv4Addr = unsafe_address.parse().unwrap();
+            assert!(
+                !safe_endpoint_address(IpAddr::V4(address)),
+                "{unsafe_address} is CGNAT space and must be rejected"
+            );
+        }
+        for safe_address in ["100.63.255.255", "100.128.0.0", "1.1.1.1"] {
+            let address: Ipv4Addr = safe_address.parse().unwrap();
+            assert!(
+                safe_endpoint_address(IpAddr::V4(address)),
+                "{safe_address} is outside CGNAT space and should not be rejected by this check"
+            );
         }
     }
 }

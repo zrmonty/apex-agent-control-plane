@@ -8,7 +8,25 @@ use crate::{DurableEventSink, IngestRequest, proto};
 use prost::Message;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::thread;
+
+/// These tests construct publishers directly against a local plaintext test
+/// server, bypassing `new()`/`build_client()`'s mTLS and DNS-safety
+/// validation entirely. This placeholder config is never used to actually
+/// build a client here — it only exists to satisfy the struct shape needed
+/// for a same-instance rebuild attempt after a transport failure, which is
+/// expected to fail closed (leaving the explicitly-constructed test client
+/// untouched) against this bogus config.
+fn placeholder_config(endpoint: &str) -> AuthenticatedHttpConfig {
+    AuthenticatedHttpConfig {
+        endpoint: endpoint.to_owned(),
+        ca_file: PathBuf::new(),
+        client_cert_file: PathBuf::new(),
+        client_key_file: PathBuf::new(),
+        bearer_token_file: None,
+    }
+}
 
 fn valid_event() -> IngestRequest {
     let mut envelope = proto::EventEnvelope {
@@ -298,14 +316,51 @@ fn secret_reader_enforces_trusted_base_and_size() {
 }
 
 #[test]
+fn secret_reader_private_key_gate_matches_the_permissions_primitive() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!(
+            "apex-http-secret-private-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&root).unwrap();
+    let base = root.canonicalize().unwrap();
+    let key_path = root.join("key.pem");
+    std::fs::write(&key_path, b"private-key-material").unwrap();
+    let canonical = key_path.canonicalize().unwrap();
+
+    // Whatever this platform's default permissions/ACL happen to be, the
+    // private-key branch must agree exactly with the underlying permissions
+    // primitive -- not silently ignore it either way.
+    let restricted = crate::permissions::private_key_permissions_restricted(&canonical);
+    assert_eq!(
+        canonical_secret_path(&key_path, &base, true).is_ok(),
+        restricted
+    );
+    assert_eq!(read_secret(&key_path, &base, true).is_ok(), restricted);
+    // The same file is always fine when it isn't being treated as a private key.
+    assert!(canonical_secret_path(&key_path, &base, false).is_ok());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn publishers_use_local_http_server_for_success_and_failure_paths() {
     let event = valid_event();
     let client = http_client();
     let (endpoint, handle) = local_http_server(200, "");
     let mut clickhouse = ClickHouseHttpPublisher {
         client: client.clone(),
+        config: placeholder_config(&endpoint),
         endpoint,
         bearer_token: Some("test-token".to_owned().into()),
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     let result = DurableEventSink::write_event(&mut clickhouse, &event);
     assert!(result.is_ok(), "{result:?}");
@@ -318,8 +373,11 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
     let (endpoint, handle) = local_http_server(503, "");
     let mut clickhouse = ClickHouseHttpPublisher {
         client: client.clone(),
+        config: placeholder_config(&endpoint),
         endpoint,
         bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     assert_eq!(
         DurableEventSink::write_event(&mut clickhouse, &event)
@@ -338,8 +396,11 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
     let (endpoint, handle) = local_http_server(412, &headers);
     let mut archive = ArchiveHttpPublisher {
         client,
+        config: placeholder_config(&endpoint),
         endpoint,
         bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     assert!(DurableEventSink::write_event(&mut archive, &event).is_ok());
     let request = handle.join().unwrap();
@@ -353,8 +414,11 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
     let (endpoint, handle) = local_http_server(412, "X-Apex-Event-Hash: wrong\r\n");
     let mut archive = ArchiveHttpPublisher {
         client: http_client(),
+        config: placeholder_config(&endpoint),
         endpoint,
         bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     assert_eq!(
         DurableEventSink::write_event(&mut archive, &event)
@@ -367,8 +431,11 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
     let (endpoint, handle) = local_http_server(200, "");
     let mut archive = ArchiveHttpPublisher {
         client: http_client(),
+        config: placeholder_config(&endpoint),
         endpoint,
         bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     assert_eq!(
         DurableEventSink::write_event(&mut archive, &event)
@@ -380,8 +447,11 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
 
     let mut clickhouse = ClickHouseHttpPublisher {
         client: http_client(),
+        config: placeholder_config("http://127.0.0.1:1"),
         endpoint: "http://127.0.0.1:1".to_owned(),
         bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
     };
     assert_eq!(
         DurableEventSink::write_event(&mut clickhouse, &event)
@@ -389,4 +459,38 @@ fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
             .code,
         crate::GatewayErrorCode::PublishFailed
     );
+}
+
+#[test]
+fn transport_failure_triggers_a_rate_limited_client_rebuild_attempt() {
+    let event = valid_event();
+    let mut clickhouse = ClickHouseHttpPublisher {
+        client: http_client(),
+        config: placeholder_config("http://127.0.0.1:1"),
+        endpoint: "http://127.0.0.1:1".to_owned(),
+        bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
+    };
+    assert!(clickhouse.last_rebuild_attempt.is_none());
+    let _ = DurableEventSink::write_event(&mut clickhouse, &event);
+    let first_attempt = clickhouse
+        .last_rebuild_attempt
+        .expect("a transport failure must record a rebuild attempt");
+    // A second failure immediately after must be rate-limited: the cooldown
+    // window means the timestamp does not advance to a fresh `Instant::now()`.
+    let _ = DurableEventSink::write_event(&mut clickhouse, &event);
+    assert_eq!(clickhouse.last_rebuild_attempt, Some(first_attempt));
+
+    let mut archive = ArchiveHttpPublisher {
+        client: http_client(),
+        config: placeholder_config("http://127.0.0.1:1"),
+        endpoint: "http://127.0.0.1:1".to_owned(),
+        bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
+    };
+    assert!(archive.last_rebuild_attempt.is_none());
+    let _ = DurableEventSink::write_event(&mut archive, &event);
+    assert!(archive.last_rebuild_attempt.is_some());
 }

@@ -93,15 +93,5 @@ pub(crate) fn trusted_secret_path(
             format!("{label} permissions are too broad"),
         ));
     }
-    #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{label} permissions are too broad"),
-            ));
-        }
-    }
     Ok(canonical)
 }

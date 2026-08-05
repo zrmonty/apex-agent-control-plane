@@ -2,14 +2,18 @@
 name = "apex-event-ingest"
 version = "0.1.0"
 edition = "2024"
+# Internal service binary, not a crates.io library -- see deny.toml's
+# `[licenses.private]`, which relies on this to skip the license check for
+# this crate itself (dependency licenses are still checked normally).
+publish = false
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
-prost = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-types = "0.14"
 getrandom = "0.4.3"
 fs2 = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
@@ -18,19 +22,27 @@ serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
-tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "transport", "tls"] }
+# tonic 0.14 split its Prost codec/codegen out into tonic-prost/tonic-prost-build
+# (see build.rs and src/lib.rs's `tonic::include_proto!`); "tls-ring" replaces the
+# old "tls" feature, matching this crate's rustls "ring" crypto provider.
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "transport", "tls-ring"] }
+tonic-prost = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = { version = "2", optional = true }
+# PEM parsing only (RootCertStore population in postgres_transport.rs). Not
+# rustls-pemfile: that crate is unmaintained (RUSTSEC-2025-0134) and its own
+# advisory says to depend directly on the PEM support it wrapped, which has
+# lived in rustls-pki-types since 1.9.0.
+rustls-pki-types = { version = "1", optional = true }
 zeroize = "1.8"
-redis = { version = "0.27", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
+redis = { version = "1.5", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
 tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring", "webpki-roots"] }
 uuid = { version = "1", optional = true, features = ["v4"] }
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14"
 protoc-bin-vendored = "3"
-tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 
 [features]
 default = []
@@ -39,7 +51,7 @@ test-support = []
 # EphemeralStore remains available without this feature.
 valkey = ["dep:redis"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
-postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pemfile", "dep:uuid"]
+postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pki-types", "dep:uuid"]
 
 [[test]]
 name = "gateway"

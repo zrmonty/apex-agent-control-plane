@@ -12,7 +12,9 @@ name: apex-live-mtls
 
 services:
   valkey:
-    image: valkey/valkey:8.0
+    # 8.0.9, not the floating "8.0" tag: any 8.0.x below 8.0.7 carries several
+    # CVEs (DoS, info disclosure), one at CVSS 8.8.
+    image: valkey/valkey:8.0.9
     user: "0:0"
     entrypoint: ["valkey-server"]
     command: ["/run/secrets/valkey_config"]
@@ -35,7 +37,10 @@ services:
     tmpfs: [/tmp, /data]
 
   jetstream:
-    image: nats:2.10
+    # 2.12, not 2.10: 2.10.29 is affected by CVE-2026-27889 (pre-auth crash via
+    # a malformed WebSocket frame; not enabled by this config, but no reason
+    # to run the vulnerable code path at rest) and CVE-2026-33247.
+    image: nats:2.12
     # nats image defaults to non-root; force root so mounted lab keys are readable.
     user: "0:0"
     command: ["--config", "/run/secrets/nats_config"]

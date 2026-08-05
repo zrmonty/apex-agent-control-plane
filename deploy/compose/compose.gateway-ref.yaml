@@ -13,7 +13,7 @@ name: apex-gateway-ref
 
 services:
   jetstream:
-    image: nats@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+    image: nats@sha256:dd5152d5de4ce2a22b970cc553dd5b45ac9533bdddc440a79f970ac489ce2fa5
     command: ["--config", "/run/secrets/nats_config"]
     networks: [gateway-ref]
     secrets:
@@ -33,6 +33,7 @@ services:
     environment:
       PYTHONPATH: /app
       APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
+      APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
         "python",
@@ -71,6 +72,7 @@ services:
       PYTHONPATH: /app
       APEX_ARCHIVE_BACKEND: local
       APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
+      APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
         "python",

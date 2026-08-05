@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -85,6 +85,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let (outbox, idempotency) = open_durability_stores(capacity)?;
+    let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
     let mut publisher = OutboxedPublisher::new(fanout, outbox);
     if let Err(error) = publisher.replay_pending() {
         if !error.retryable {
@@ -133,6 +134,7 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let subject = bearer_subject(&agent_id)?;
     let bearer_peer_certificate = bearer_peer_certificate_sha256()?;
     let scopes = allowed_scopes()?;
+    let ephemeral_store = build_ephemeral_store(&trusted_base)?;
     let verifier = BearerTokenVerifier::new_strict(FileBearerResolver::new(
         token,
         token_path,
@@ -141,10 +143,11 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         agent_id,
         Arc::new(scopes),
         bearer_peer_certificate,
-    ));
+    ))
+    .with_ephemeral_store(ephemeral_store.clone());
     let mut service =
         AuthenticatedGrpcService::new(AuthenticatedIngestAdapter::new(gateway), verifier);
-    service = attach_ephemeral_store(service, &trusted_base)?;
+    service = service.with_ephemeral_store(ephemeral_store);
     let _replay_worker = service.spawn_replay_worker(Duration::from_secs(5));
     let server_cert_path = trusted_secret_path(
         &path("APEX_GATEWAY_SERVER_CERT_FILE")?,
@@ -193,6 +196,100 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Periodically reclaims Postgres idempotency reservations stuck `pending`
+/// past any realistic fanout window (a crash between `reserve()` committing
+/// and `commit()`/`abort()` running leaves a row nothing else can release,
+/// since the reservation's in-process handle dies with the process). A no-op
+/// when the file/memory idempotency backends are in use, since those never
+/// persist a `pending` state that could outlive their own process. Uses a
+/// dedicated connection so the reaper cannot starve or race the main store's
+/// connection.
+#[cfg(feature = "postgres")]
+fn spawn_idempotency_reaper(
+    capacity: usize,
+) -> Result<Option<tokio::task::JoinHandle<()>>, Box<dyn std::error::Error>> {
+    let Ok(url) = std::env::var("APEX_POSTGRES_URL") else {
+        return Ok(None);
+    };
+    if url.trim().is_empty() {
+        return Ok(None);
+    }
+    let interval_secs: u64 = std::env::var("APEX_IDEMPOTENCY_REAP_INTERVAL_SECS")
+        .unwrap_or_else(|_| "60".to_owned())
+        .parse()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_IDEMPOTENCY_REAP_INTERVAL_SECS must be a positive integer",
+            )
+        })?;
+    let max_age_secs: u64 = std::env::var("APEX_IDEMPOTENCY_REAP_MAX_AGE_SECS")
+        .unwrap_or_else(|_| "600".to_owned())
+        .parse()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_IDEMPOTENCY_REAP_MAX_AGE_SECS must be a positive integer",
+            )
+        })?;
+    if interval_secs == 0 || max_age_secs == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_IDEMPOTENCY_REAP_INTERVAL_SECS and APEX_IDEMPOTENCY_REAP_MAX_AGE_SECS must be positive",
+        )
+        .into());
+    }
+    // The reaper's connection is established lazily inside the loop, not
+    // here, so a transient Postgres hiccup at startup (or any time later)
+    // can never fail or block the whole gateway coming up -- this is a
+    // best-effort maintenance task, not core request-serving functionality.
+    Ok(Some(tokio::task::spawn_blocking(move || {
+        let mut store: Option<apex_event_ingest::PostgresIdempotencyStore> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(interval_secs));
+            let active_store = match &mut store {
+                Some(store) => store,
+                None => match apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
+                {
+                    Ok(connected) => store.insert(connected),
+                    Err(error) => {
+                        eprintln!(
+                            "event-ingest idempotency reaper: connect deferred: {}: {}",
+                            error.code.public_code(),
+                            error.summary
+                        );
+                        continue;
+                    }
+                },
+            };
+            match active_store.reap_expired(Duration::from_secs(max_age_secs)) {
+                Ok(0) => {}
+                Ok(count) => eprintln!(
+                    "event-ingest idempotency reaper: reclaimed {count} stuck pending reservation(s)"
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "event-ingest idempotency reaper: reap attempt failed: {}: {}",
+                        error.code.public_code(),
+                        error.summary
+                    );
+                    // The connection may be poisoned; drop it and reconnect
+                    // fresh next cycle rather than retrying indefinitely
+                    // against a connection that can never recover on its own.
+                    store = None;
+                }
+            }
+        }
+    })))
+}
+
+#[cfg(not(feature = "postgres"))]
+fn spawn_idempotency_reaper(
+    _capacity: usize,
+) -> Result<Option<tokio::task::JoinHandle<()>>, Box<dyn std::error::Error>> {
+    Ok(None)
+}
+
 fn open_durability_stores(capacity: usize) -> DurabilityResult {
     #[cfg(feature = "postgres")]
     {
@@ -231,18 +328,12 @@ fn open_durability_stores(capacity: usize) -> DurabilityResult {
     Ok((Box::new(outbox), Box::new(idempotency)))
 }
 
-fn attach_ephemeral_store<P, V>(
-    service: AuthenticatedGrpcService<P, V>,
+fn build_ephemeral_store(
     trusted_base: &std::path::Path,
-) -> Result<AuthenticatedGrpcService<P, V>, Box<dyn std::error::Error>>
-where
-    P: apex_event_ingest::EventPublisher + Send + 'static,
-    V: apex_event_ingest::CallerVerifier,
-{
+) -> Result<Arc<Mutex<Box<dyn apex_event_ingest::EphemeralStore>>>, Box<dyn std::error::Error>> {
     #[cfg(feature = "valkey")]
     use apex_event_ingest::FallbackEphemeralStore;
     use apex_event_ingest::{EphemeralStore, InMemoryEphemeralStore};
-    use std::sync::Mutex;
 
     // Always install a process-local store. When Valkey is configured and the
     // binary is built with `--features valkey`, prefer the remote accelerator
@@ -279,7 +370,7 @@ where
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
             let store: Box<dyn EphemeralStore> =
                 Box::new(FallbackEphemeralStore::new(valkey, memory));
-            return Ok(service.with_ephemeral_store(Arc::new(Mutex::new(store))));
+            return Ok(Arc::new(Mutex::new(store)));
         }
     }
 
@@ -300,5 +391,5 @@ where
     }
 
     let store: Box<dyn EphemeralStore> = Box::new(memory);
-    Ok(service.with_ephemeral_store(Arc::new(Mutex::new(store))))
+    Ok(Arc::new(Mutex::new(store)))
 }

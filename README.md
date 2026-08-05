@@ -112,6 +112,8 @@ Phase 0 supports the paths below. **Implemented** means the client or boundary i
 | Operators → operator UI | Local React 19 + Vite preview; the browser is not an authorization boundary | Clearly labelled illustrative topology, connection workflow, and reserved operating routes | Phase 1 scaffold implemented; live API/session integration pending |
 | Operators → control-plane API | Planned session and workload connections | Configuration, policy, diagnostics, evaluations, commands | Phase 1 planned |
 
+The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-staging`, required and explicit — there is no default-on path) binds one shared token to exactly one workload identity, scope set, and pinned client certificate. It is a single-agent staging fallback, not a multi-tenant credential store: do not point more than one agent identity at the same gateway through this path. Real multi-agent and multi-tenant fleets use SPIFFE/SPIRE workload identity instead (see [Frictionless Secure Agent Integration](docs/architecture/Frictionless%20Secure%20Agent%20Integration.md)).
+
 ### Compose and reference deployment state
 
 - **Live mTLS harness** (`deploy/compose/live-mtls/`): creates PKI; runs Valkey, NATS, and reference HTTPS providers; Rust `live_mtls` tests use real TLS clients. CI: `.github/workflows/live-mtls-e2e.yml`.
@@ -235,6 +237,7 @@ tools/                     Internal development tooling
 - SPIFFE workload identities and mutual TLS for service-to-service access.
 - Namespace isolation, classification-aware policy, transport encryption, and externalized runtime secrets.
 - Non-root and read-only containers. Signed and pinned images. SBOMs. Vulnerability gates. Supply-chain verification.
+- CI runs static analysis and dependency-vulnerability scanning on every push: `cargo audit` and `cargo deny` (advisories, license policy, banned/duplicate crates) for the Rust gateway, `bandit` and `pip-audit` for the Python SDK.
 - Strict ingest limits and schema validation. Safe text-only display of untrusted content.
 - Isolated tool execution: deny-by-default egress, per-tool identity, resource limits, no host or Docker socket access.
 - Append-only audit and cost ledgers. Corrections are linked adjustments, not overwrites.

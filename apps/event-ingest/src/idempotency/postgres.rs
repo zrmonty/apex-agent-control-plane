@@ -155,3 +155,28 @@ impl IdempotencyStore for PostgresIdempotencyStore {
         }
     }
 }
+
+impl PostgresIdempotencyStore {
+    /// Deletes `pending` reservations older than `max_age` (never touches
+    /// `committed` rows, per the schema's reaper contract in
+    /// `deploy/postgres/idempotency.sql`). A pending row can only survive
+    /// past its writer's fanout window if that process crashed between
+    /// `reserve()` committing the row and `commit()`/`abort()` ever running —
+    /// the `reservation_id -> token` mapping that would release it lives only
+    /// in that process's memory, so nothing else can free the key without
+    /// this reaper. `max_age` should comfortably exceed the slowest realistic
+    /// fanout (retries + timeouts), not just typical latency, so a live,
+    /// still-in-flight reservation is never reclaimed out from under it.
+    pub fn reap_expired(&mut self, max_age: std::time::Duration) -> Result<u64, GatewayError> {
+        let deleted = self
+            .client
+            .execute(
+                "DELETE FROM apex_ingest_idempotency
+                 WHERE state = 'pending'
+                   AND created_at < now() - make_interval(secs => $1)",
+                &[&max_age.as_secs_f64()],
+            )
+            .map_err(|_| GatewayError::internal())?;
+        Ok(deleted)
+    }
+}

@@ -27,7 +27,7 @@ services:
       retries: 20
 
   jetstream:
-    image: nats@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+    image: nats@sha256:dd5152d5de4ce2a22b970cc553dd5b45ac9533bdddc440a79f970ac489ce2fa5
     command: ["--config", "/run/secrets/nats_config"]
     ports:
       - "127.0.0.1:15222:4222"
@@ -50,6 +50,7 @@ services:
       PYTHONPATH: /app
       # Lab/CI: optional. Empty accepts any CA-trusted client in reference providers.
       APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
+      APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
         "python",
@@ -90,6 +91,7 @@ services:
       PYTHONPATH: /app
       # Lab/CI: optional. Empty accepts any CA-trusted client in reference providers.
       APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:-}
+      APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
         "python",
@@ -123,12 +125,34 @@ services:
       - source: ca
         target: ca
 
+  # Chainguard's minio image runs as non-root (uid 65532) with no shell/chown
+  # available inside it, and a fresh named volume is created root-owned --
+  # so /data must be handed to that uid before minio's own entrypoint starts.
+  minio-data-init:
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    user: "0:0"
+    entrypoint: ["chown", "-R", "65532:65532", "/data"]
+    networks: [e2e]
+    volumes:
+      - minio-data:/data
+
   minio:
-    image: minio/minio@sha256:1dce27c494a16bae114774f1cec295493f3613142713130c2d22dd5696be6ad3
+    # Chainguard's build, not upstream minio/minio: MinIO stopped publishing
+    # free community-edition Docker images in October 2025 (source-only
+    # distribution now), so the last free upstream image is permanently
+    # stuck without security patches -- it's missing the fix for
+    # CVE-2025-62506 (privilege escalation) and everything disclosed since.
+    # Chainguard rebuilds this same MinIO source daily with current patches.
+    # Same entrypoint/command/env shape as upstream; only the base image and
+    # non-root default user differ.
+    image: chainguard/minio@sha256:5f2b82fe2edccafed7902f423f171ae5e6b8b363fae72441c0e0e4289dc45555
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: apexminio
       MINIO_ROOT_PASSWORD: apexminio_e2e_local_only
+    depends_on:
+      minio-data-init:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:19000:9000"
     networks: [e2e]

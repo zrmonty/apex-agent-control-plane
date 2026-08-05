@@ -13,6 +13,8 @@ use std::str::FromStr;
 
 use postgres::config::{Host, SslMode};
 use postgres::{Client, Config, NoTls};
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 const MAX_CONNECTION_STRING_BYTES: usize = 2048;
@@ -28,7 +30,7 @@ enum TransportMode {
 /// session. The connection string is never included in an error because it
 /// can contain database credentials.
 pub(crate) fn connect(connection_string: &str) -> Result<Client, ()> {
-    let config = parse_and_classify(connection_string)?;
+    let config = parse_and_classify(connection_string, plaintext_explicitly_allowed())?;
     match config.1 {
         TransportMode::LoopbackPlaintext => config.0.connect(NoTls).map_err(|_| ()),
         TransportMode::VerifiedTls => {
@@ -43,7 +45,10 @@ pub(crate) fn connect(connection_string: &str) -> Result<Client, ()> {
     }
 }
 
-fn parse_and_classify(connection_string: &str) -> Result<(Config, TransportMode), ()> {
+fn parse_and_classify(
+    connection_string: &str,
+    plaintext_allowed: bool,
+) -> Result<(Config, TransportMode), ()> {
     if connection_string.is_empty()
         || connection_string.len() > MAX_CONNECTION_STRING_BYTES
         || connection_string.chars().any(char::is_control)
@@ -52,7 +57,7 @@ fn parse_and_classify(connection_string: &str) -> Result<(Config, TransportMode)
     }
     let config = Config::from_str(connection_string).map_err(|_| ())?;
     match config.get_ssl_mode() {
-        SslMode::Disable if loopback_hosts_only(&config) => {
+        SslMode::Disable if plaintext_allowed && loopback_hosts_only(&config) => {
             Ok((config, TransportMode::LoopbackPlaintext))
         }
         SslMode::Require => Ok((config, TransportMode::VerifiedTls)),
@@ -60,6 +65,16 @@ fn parse_and_classify(connection_string: &str) -> Result<(Config, TransportMode)
         // never be accepted for a remotely reachable database.
         _ => Err(()),
     }
+}
+
+/// Loopback + `sslmode=disable` alone is still a sharp edge: a mis-bound
+/// "dev" connection string reused on a shared host, or future DNS games with
+/// what resolves to loopback, would otherwise downgrade to plaintext with no
+/// separate signal that this was intentional. Require this explicit,
+/// loudly-named opt-in in addition to the loopback check, so plaintext can
+/// never be reached by accident.
+fn plaintext_explicitly_allowed() -> bool {
+    env::var("APEX_ALLOW_POSTGRES_PLAINTEXT").ok().as_deref() == Some("1")
 }
 
 fn loopback_hosts_only(config: &Config) -> bool {
@@ -88,8 +103,7 @@ fn load_ca_roots() -> Result<rustls::RootCertStore, ()> {
         return Err(());
     }
     let pem = fs::read(path).map_err(|_| ())?;
-    let mut reader = pem.as_slice();
-    let certificates = rustls_pemfile::certs(&mut reader)
+    let certificates = CertificateDer::pem_slice_iter(&pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ())?;
     if certificates.is_empty() {
@@ -107,29 +121,49 @@ mod tests {
     use super::{TransportMode, parse_and_classify};
 
     #[test]
-    fn allows_only_explicit_loopback_plaintext_for_local_development() {
-        let (_, mode) =
-            parse_and_classify("postgres://apex:local@127.0.0.1:5432/apex?sslmode=disable")
-                .expect("loopback development transport");
-        assert_eq!(mode, TransportMode::LoopbackPlaintext);
+    fn loopback_plaintext_requires_the_explicit_opt_in_even_on_loopback() {
+        let url = "postgres://apex:local@127.0.0.1:5432/apex?sslmode=disable";
         assert!(
-            parse_and_classify("postgres://apex:local@localhost:5432/apex?sslmode=disable")
-                .is_err()
+            parse_and_classify(url, false).is_err(),
+            "loopback alone must not be enough to allow plaintext"
+        );
+        let (_, mode) = parse_and_classify(url, true).expect("loopback development transport");
+        assert_eq!(mode, TransportMode::LoopbackPlaintext);
+    }
+
+    #[test]
+    fn allows_only_explicit_loopback_plaintext_for_local_development() {
+        assert!(
+            parse_and_classify(
+                "postgres://apex:local@localhost:5432/apex?sslmode=disable",
+                true
+            )
+            .is_err()
         );
         assert!(
-            parse_and_classify("postgres://apex:local@10.0.0.9:5432/apex?sslmode=disable").is_err()
+            parse_and_classify(
+                "postgres://apex:local@10.0.0.9:5432/apex?sslmode=disable",
+                true
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn rejects_downgradeable_ssl_modes_and_requires_verified_tls_remotely() {
-        assert!(parse_and_classify("postgres://apex:secret@db.internal/apex").is_err());
+        assert!(parse_and_classify("postgres://apex:secret@db.internal/apex", true).is_err());
         assert!(
-            parse_and_classify("postgres://apex:secret@db.internal/apex?sslmode=prefer").is_err()
+            parse_and_classify(
+                "postgres://apex:secret@db.internal/apex?sslmode=prefer",
+                true
+            )
+            .is_err()
         );
-        let (_, mode) =
-            parse_and_classify("postgres://apex:secret@db.internal/apex?sslmode=require")
-                .expect("remote TLS transport");
+        let (_, mode) = parse_and_classify(
+            "postgres://apex:secret@db.internal/apex?sslmode=require",
+            true,
+        )
+        .expect("remote TLS transport");
         assert_eq!(mode, TransportMode::VerifiedTls);
     }
 }

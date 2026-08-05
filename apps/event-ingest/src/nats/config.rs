@@ -142,13 +142,6 @@ pub(crate) fn validate_secret_path(
     if metadata.len() == 0 || metadata.len() > MAX_TLS_MATERIAL_BYTES {
         return Err(GatewayError::invalid_nats_configuration());
     }
-    #[cfg(unix)]
-    if private_key {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(GatewayError::invalid_nats_configuration());
-        }
-    }
     if private_key && !crate::permissions::private_key_permissions_restricted(&canonical) {
         return Err(GatewayError::invalid_nats_configuration());
     }

@@ -110,6 +110,189 @@ fn fallback_uses_memory_when_primary_unavailable() {
     );
 }
 
+/// A primary whose every operation returns a fixed, injected result --
+/// `Ok(())`-shaped success is impossible to express generically here, so
+/// each test picks the operation it cares about and ignores the others'
+/// return values via the fixed error/pass-through convention below.
+struct ScriptedPrimary {
+    error: Option<EphemeralError>,
+}
+
+impl EphemeralStore for ScriptedPrimary {
+    fn check_rate_limit(
+        &mut self,
+        _key: &RateLimitKey,
+        _limit: u32,
+        _window: Duration,
+    ) -> Result<RateLimitDecision, EphemeralError> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(RateLimitDecision {
+                allowed: true,
+                remaining: 41,
+            }),
+        }
+    }
+    fn increment_fingerprint(
+        &mut self,
+        _key: &FingerprintCounterKey,
+        _window: Duration,
+    ) -> Result<u64, EphemeralError> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(41),
+        }
+    }
+    fn fingerprint_count(&mut self, _key: &FingerprintCounterKey) -> Result<u64, EphemeralError> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(41),
+        }
+    }
+    fn set_deny_hint(&mut self, _key: &DenyHintKey, _ttl: Duration) -> Result<(), EphemeralError> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+    fn is_denied(&mut self, _key: &DenyHintKey) -> Result<bool, EphemeralError> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(true),
+        }
+    }
+}
+
+#[test]
+fn fallback_falls_back_for_every_operation_when_primary_is_unavailable() {
+    let mut store = FallbackEphemeralStore::new(
+        ScriptedPrimary {
+            error: Some(EphemeralError::unavailable()),
+        },
+        InMemoryEphemeralStore::new(),
+    );
+    let rate_key = RateLimitKey {
+        namespace: "acme".into(),
+        bucket: "ingest".into(),
+    };
+    let fp_key = FingerprintCounterKey {
+        namespace: "acme".into(),
+        fingerprint_hex: "ab".into(),
+    };
+    let deny_key = DenyHintKey {
+        namespace: "acme".into(),
+        identity_fingerprint_hex: "cd".into(),
+    };
+    // The in-memory fallback starts empty, so a successful, non-41 result
+    // proves the primary's Unavailable error was routed around rather than
+    // propagated.
+    let decision = store
+        .check_rate_limit(&rate_key, 5, Duration::from_secs(60))
+        .unwrap();
+    assert_ne!(decision.remaining, 41);
+    assert_eq!(
+        store
+            .increment_fingerprint(&fp_key, Duration::from_secs(60))
+            .unwrap(),
+        1
+    );
+    assert_eq!(store.fingerprint_count(&fp_key).unwrap(), 1);
+    assert!(!store.is_denied(&deny_key).unwrap());
+    store
+        .set_deny_hint(&deny_key, Duration::from_secs(30))
+        .unwrap();
+    assert!(store.is_denied(&deny_key).unwrap());
+}
+
+#[test]
+fn fallback_does_not_mask_non_unavailable_primary_errors() {
+    let mut store = FallbackEphemeralStore::new(
+        ScriptedPrimary {
+            error: Some(EphemeralError::invalid_key()),
+        },
+        InMemoryEphemeralStore::new(),
+    );
+    let rate_key = RateLimitKey {
+        namespace: "acme".into(),
+        bucket: "ingest".into(),
+    };
+    let fp_key = FingerprintCounterKey {
+        namespace: "acme".into(),
+        fingerprint_hex: "ab".into(),
+    };
+    let deny_key = DenyHintKey {
+        namespace: "acme".into(),
+        identity_fingerprint_hex: "cd".into(),
+    };
+    assert_eq!(
+        store
+            .check_rate_limit(&rate_key, 5, Duration::from_secs(60))
+            .unwrap_err()
+            .code,
+        EphemeralErrorCode::InvalidKey
+    );
+    assert_eq!(
+        store
+            .increment_fingerprint(&fp_key, Duration::from_secs(60))
+            .unwrap_err()
+            .code,
+        EphemeralErrorCode::InvalidKey
+    );
+    assert_eq!(
+        store.fingerprint_count(&fp_key).unwrap_err().code,
+        EphemeralErrorCode::InvalidKey
+    );
+    assert_eq!(
+        store
+            .set_deny_hint(&deny_key, Duration::from_secs(30))
+            .unwrap_err()
+            .code,
+        EphemeralErrorCode::InvalidKey
+    );
+    assert_eq!(
+        store.is_denied(&deny_key).unwrap_err().code,
+        EphemeralErrorCode::InvalidKey
+    );
+}
+
+#[test]
+fn fallback_uses_the_primary_result_when_it_succeeds() {
+    let mut store =
+        FallbackEphemeralStore::new(ScriptedPrimary { error: None }, InMemoryEphemeralStore::new());
+    let rate_key = RateLimitKey {
+        namespace: "acme".into(),
+        bucket: "ingest".into(),
+    };
+    let fp_key = FingerprintCounterKey {
+        namespace: "acme".into(),
+        fingerprint_hex: "ab".into(),
+    };
+    let deny_key = DenyHintKey {
+        namespace: "acme".into(),
+        identity_fingerprint_hex: "cd".into(),
+    };
+    assert_eq!(
+        store
+            .check_rate_limit(&rate_key, 5, Duration::from_secs(60))
+            .unwrap()
+            .remaining,
+        41
+    );
+    assert_eq!(
+        store
+            .increment_fingerprint(&fp_key, Duration::from_secs(60))
+            .unwrap(),
+        41
+    );
+    assert_eq!(store.fingerprint_count(&fp_key).unwrap(), 41);
+    store
+        .set_deny_hint(&deny_key, Duration::from_secs(30))
+        .unwrap();
+    assert!(store.is_denied(&deny_key).unwrap());
+    let _ = store.primary();
+    let _ = store.fallback();
+}
+
 #[cfg(feature = "valkey")]
 mod valkey_protocol {
     use super::*;

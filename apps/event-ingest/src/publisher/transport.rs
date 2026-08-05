@@ -41,7 +41,10 @@ impl<T: JetStreamTransport> JetStreamTransport for RetryingJetStreamTransport<T>
         payload: &[u8],
     ) -> Result<(), GatewayError> {
         let mut last_error = None;
-        for _ in 0..self.max_attempts {
+        for attempt in 0..self.max_attempts {
+            if attempt > 0 {
+                crate::backoff::sleep_before_retry(attempt - 1);
+            }
             match self.transport.publish_event(subject, message_id, payload) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.retryable => last_error = Some(error),

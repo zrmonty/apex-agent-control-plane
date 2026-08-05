@@ -14,8 +14,8 @@ services:
       APEX_NATS_USERNAME_FILE: /run/secrets/nats_username
       APEX_NATS_PASSWORD_FILE: /run/secrets/nats_password
       APEX_CLICKHOUSE_ENDPOINT: ${APEX_CLICKHOUSE_ENDPOINT:-https://clickhouse-projection:8443/v1/events}
-      APEX_ALLOW_PRIVATE_SINK_DESTINATIONS: ${APEX_ALLOW_PRIVATE_SINK_DESTINATIONS:-1}
-      APEX_PRIVATE_SINK_HOSTS: ${APEX_PRIVATE_SINK_HOSTS:-clickhouse-projection,archive-provider}
+      APEX_ALLOW_PRIVATE_SINK_DESTINATIONS: ${APEX_ALLOW_PRIVATE_SINK_DESTINATIONS:?set to 1 only if APEX_PRIVATE_SINK_HOSTS is narrowed to this profile's own service hostnames}
+      APEX_PRIVATE_SINK_HOSTS: ${APEX_PRIVATE_SINK_HOSTS:?set to the exact comma-separated sink hostnames this deployment trusts, e.g. clickhouse-projection,archive-provider}
       APEX_CLICKHOUSE_CA_FILE: /run/secrets/clickhouse_client_ca
       APEX_CLICKHOUSE_CLIENT_CERT_FILE: /run/secrets/ingest_clickhouse_client_cert
       APEX_CLICKHOUSE_CLIENT_KEY_FILE: /run/secrets/ingest_clickhouse_client_key

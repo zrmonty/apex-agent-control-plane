@@ -42,13 +42,6 @@ pub(crate) fn canonical_secret_path(
     if metadata.len() == 0 || metadata.len() > 1024 * 1024 {
         return Err(GatewayError::invalid_sink_configuration());
     }
-    #[cfg(unix)]
-    if private_key {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(GatewayError::invalid_sink_configuration());
-        }
-    }
     if private_key && !crate::permissions::private_key_permissions_restricted(&canonical) {
         return Err(GatewayError::invalid_sink_configuration());
     }

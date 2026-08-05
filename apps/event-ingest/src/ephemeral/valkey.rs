@@ -113,10 +113,19 @@ fn read_password(path: &Path) -> Result<String, EphemeralError> {
 /// Live Valkey-backed store. Connection failures surface as `Unavailable`.
 pub struct ValkeyEphemeralStore {
     connection: redis::Connection,
+    config: ValkeyConfig,
 }
 
 impl ValkeyEphemeralStore {
     pub fn connect(config: &ValkeyConfig) -> Result<Self, EphemeralError> {
+        let connection = Self::build_connection(config)?;
+        Ok(Self {
+            connection,
+            config: config.clone(),
+        })
+    }
+
+    fn build_connection(config: &ValkeyConfig) -> Result<redis::Connection, EphemeralError> {
         config.validate()?;
         let password = read_password(&config.password_file)?;
         let ca = fs::read(&config.ca_file).map_err(|_| EphemeralError::unavailable())?;
@@ -126,20 +135,23 @@ impl ValkeyEphemeralStore {
         // ConnectionInfo must request TLS (`rediss` scheme semantics) before
         // certificates are attached. Credentials stay out of logs and process
         // listing by loading the password from a mounted secret file.
-        let connection_info = redis::ConnectionInfo {
-            addr: redis::ConnectionAddr::TcpTls {
-                host: config.host.clone(),
-                port: config.port,
-                insecure: false,
-                tls_params: None,
-            },
-            redis: redis::RedisConnectionInfo {
-                db: 0,
-                username: Some(config.username.clone()),
-                password: Some(password),
-                protocol: Default::default(),
-            },
-        };
+        // `ConnectionInfo`/`RedisConnectionInfo` are builder-only as of redis
+        // 1.0 (their fields are private), hence `into_connection_info()` +
+        // `set_redis_settings()` rather than a struct literal.
+        use redis::IntoConnectionInfo;
+        let connection_info = redis::ConnectionAddr::TcpTls {
+            host: config.host.clone(),
+            port: config.port,
+            insecure: false,
+            tls_params: None,
+        }
+        .into_connection_info()
+        .map_err(|_| EphemeralError::unavailable())?
+        .set_redis_settings(
+            redis::RedisConnectionInfo::default()
+                .set_username(&config.username)
+                .set_password(&password),
+        );
         let client = redis::Client::build_with_tls(
             connection_info,
             redis::TlsCertificates {
@@ -154,26 +166,73 @@ impl ValkeyEphemeralStore {
         let mut connection = client
             .get_connection_with_timeout(Duration::from_secs(3))
             .map_err(|_| EphemeralError::unavailable())?;
+        // The connect timeout above only bounds the initial handshake. Without
+        // read/write timeouts, a network blackhole (not a clean refusal) on any
+        // later command blocks this connection's request thread forever while
+        // holding the store's shared mutex, livelocking every caller in the
+        // process. Bound every subsequent command the same way the HTTP sinks
+        // bound theirs.
+        connection
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|_| EphemeralError::unavailable())?;
+        connection
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .map_err(|_| EphemeralError::unavailable())?;
         let _: String = redis::cmd("PING")
             .query(&mut connection)
             .map_err(|_| EphemeralError::unavailable())?;
-        Ok(Self { connection })
+        Ok(connection)
+    }
+
+    /// A read/write timeout (or any other I/O error) can fire mid-command,
+    /// leaving that command's reply unread on the wire. Reusing the same
+    /// connection afterward risks a *silent* protocol desync: the next
+    /// command would read the previous command's stale reply instead of its
+    /// own, corrupting a rate-limit decision rather than erroring visibly.
+    /// Treat every command error as poisoning the connection and reconnect
+    /// before the next call. Best-effort: if reconnecting also fails, the
+    /// caller's current error still surfaces as `Unavailable` and the next
+    /// call tries again.
+    fn reconnect(&mut self) {
+        if let Ok(connection) = Self::build_connection(&self.config) {
+            self.connection = connection;
+        }
+    }
+
+    /// Runs one Valkey command, reconnecting on any failure so the
+    /// connection is never reused in a possibly-desynced state.
+    fn run<T>(
+        &mut self,
+        op: impl FnOnce(&mut redis::Connection) -> redis::RedisResult<T>,
+    ) -> Result<T, EphemeralError> {
+        match op(&mut self.connection) {
+            Ok(value) => Ok(value),
+            Err(_) => {
+                self.reconnect();
+                Err(EphemeralError::unavailable())
+            }
+        }
     }
 
     fn incr_with_ttl(&mut self, key: &str, ttl_secs: u64) -> Result<u64, EphemeralError> {
-        // redis-rs maps INCR to INCRBY; ACL must allow both.
-        let count: u64 = self
-            .connection
-            .incr(key, 1u64)
-            .map_err(|_| EphemeralError::unavailable())?;
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE")
+        // Establish the key's expiry before it is ever incremented, not after.
+        // `SET key 0 NX EX ttl` is a single atomic round trip that only takes
+        // effect the first time (a no-op once the key exists), so it never
+        // resets an in-progress window. The previous order — INCR first,
+        // EXPIRE only when count==1 — left a window where a crash or dropped
+        // connection between the two calls created a counter with no TTL,
+        // which then rate-limited its identity forever until manually cleared.
+        self.run(|connection| {
+            redis::cmd("SET")
                 .arg(key)
+                .arg(0u64)
+                .arg("NX")
+                .arg("EX")
                 .arg(ttl_secs)
-                .query(&mut self.connection)
-                .map_err(|_| EphemeralError::unavailable())?;
-        }
-        Ok(count)
+                .query::<()>(connection)
+        })?;
+        // redis-rs maps INCR to INCRBY; ACL must allow both.
+        self.run(|connection| connection.incr(key, 1u64))
     }
 }
 
@@ -217,10 +276,7 @@ impl EphemeralStore for ValkeyEphemeralStore {
     fn fingerprint_count(&mut self, key: &FingerprintCounterKey) -> Result<u64, EphemeralError> {
         validate_fingerprint_key(key)?;
         let redis_key = fingerprint_redis_key(key);
-        let value: Option<u64> = self
-            .connection
-            .get(redis_key)
-            .map_err(|_| EphemeralError::unavailable())?;
+        let value: Option<u64> = self.run(|connection| connection.get(&redis_key))?;
         Ok(value.unwrap_or(0))
     }
 
@@ -228,20 +284,13 @@ impl EphemeralStore for ValkeyEphemeralStore {
         validate_deny_key(key)?;
         let secs = window_secs(ttl)?;
         let redis_key = deny_hint_redis_key(key);
-        let _: () = self
-            .connection
-            .set_ex(redis_key, 1u8, secs)
-            .map_err(|_| EphemeralError::unavailable())?;
-        Ok(())
+        self.run(|connection| connection.set_ex(&redis_key, 1u8, secs))
     }
 
     fn is_denied(&mut self, key: &DenyHintKey) -> Result<bool, EphemeralError> {
         validate_deny_key(key)?;
         let redis_key = deny_hint_redis_key(key);
-        let value: Option<u8> = self
-            .connection
-            .get(redis_key)
-            .map_err(|_| EphemeralError::unavailable())?;
+        let value: Option<u8> = self.run(|connection| connection.get(&redis_key))?;
         Ok(value.is_some())
     }
 }

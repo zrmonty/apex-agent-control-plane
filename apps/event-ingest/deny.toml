@@ -1,0 +1,48 @@
+# cargo-deny configuration for the event-ingest gateway.
+# Run: cargo deny check
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = []
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Vulnerabilities always fail. "Unmaintained" is tracked but does not fail CI
+# on its own -- an unmaintained crate isn't a vulnerability until one is
+# actually filed against it (which lands here as a normal advisory anyway).
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # Never let an OpenSSL variant into the dependency tree: every TLS path
+    # in this gateway is deliberately rustls-only (see http_sinks, nats,
+    # postgres_transport). A transitive openssl dependency would silently
+    # introduce a second, differently-configured TLS stack.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
