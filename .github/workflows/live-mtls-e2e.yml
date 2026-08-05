@@ -143,6 +143,14 @@ jobs:
           # never be reached by a bare connection string alone.
           APEX_POSTGRES_URL: postgres://apex:apex_e2e_local_only@127.0.0.1:15432/apex?sslmode=disable
           APEX_ALLOW_POSTGRES_PLAINTEXT: "1"
+          # Each postgres_* test opens its own connection via connect(); any
+          # transport-level failure (even a transient one under concurrent
+          # connection load) is deliberately mapped to the same generic
+          # InvalidIdempotencyConfiguration/InvalidOutboxConfiguration error
+          # as a real config problem, so these must run one at a time rather
+          # than risk the default multi-threaded runner opening many
+          # connections to the loopback Postgres at once.
+          RUST_TEST_THREADS: "1"
         run: cargo test --lib --features "postgres,test-support" postgres_ -- --nocapture
 
       - name: Object-Lock acceptance (MinIO)

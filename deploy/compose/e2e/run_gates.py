@@ -213,6 +213,14 @@ def main() -> int:
         )
         gate("live_mtls_rust_tests", code == 0, out, required=True)
 
+        # Each postgres_* test opens its own connection via connect(); any
+        # transport-level failure (including a transient one under
+        # concurrent connection load) is deliberately mapped to the same
+        # generic InvalidIdempotencyConfiguration/InvalidOutboxConfiguration
+        # error as a real config problem, so these must run one at a time
+        # rather than risk the default multi-threaded test runner opening
+        # many connections to the loopback Postgres at once.
+        postgres_test_env = {**test_env, "RUST_TEST_THREADS": "1"}
         code, out = run(
             [
                 "cargo",
@@ -225,7 +233,7 @@ def main() -> int:
                 "--nocapture",
             ],
             cwd=INGEST,
-            env=test_env,
+            env=postgres_test_env,
             timeout=600,
         )
         if code != 0:
@@ -240,7 +248,7 @@ def main() -> int:
                     "--nocapture",
                 ],
                 cwd=INGEST,
-                env=test_env,
+                env=postgres_test_env,
                 timeout=600,
             )
             gate("postgres_durability", code2 == 0, out + "\n" + out2, required=True)
