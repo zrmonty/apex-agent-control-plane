@@ -65,11 +65,54 @@ jobs:
             exit 1
           fi
 
-  rust-sast:
+  rust-control-plane:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/event-ingest
+        working-directory: apps/control-plane-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Test (control gateway)
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          RUST_BACKTRACE: "1"
+          RUST_TEST_THREADS: "1"
+        run: cargo test --locked --features test-support -- --nocapture
+      - name: Check PostgreSQL feature
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo check --locked --features postgres
+      - name: Clippy
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        # Mirrors the rust-ingest job: surface every finding, but fail only on
+        # hard compiler/clippy errors, because CI's stable clippy can drift
+        # slightly from the locally pinned toolchain.
+        run: |
+          set -eu
+          cargo clippy --locked --all-targets --features test-support -- -W clippy::all 2>&1 | tee /tmp/clippy-control.log
+          if grep -E '^error(\[|:)' /tmp/clippy-control.log; then
+            exit 1
+          fi
+
+  rust-sast:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both Rust services carry their own Cargo.lock and deny.toml, so both
+        # need their own advisory/license/ban scan. Auditing only one leaves
+        # the other's dependency tree unscanned.
+        crate: [apps/event-ingest, apps/control-plane-api]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
