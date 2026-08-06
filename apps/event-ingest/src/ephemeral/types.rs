@@ -121,21 +121,51 @@ pub(crate) fn validate_deny_key(key: &DenyHintKey) -> Result<(), EphemeralError>
     Ok(())
 }
 
+/// Hex-encodes one variable key component so it cannot contain the `:`
+/// separator used between components.
+///
+/// `is_scope_identifier` deliberately permits `:` inside a workspace or
+/// namespace, so interpolating two such components raw would let distinct
+/// scopes collapse onto one Valkey key -- for example `("a:b", "c")` and
+/// `("a", "b:c")`. These keys carry per-tenant rate-limit counters and deny
+/// hints, so a collision is a cross-tenant isolation failure: one workspace
+/// could spend another's admission budget, or trip another's deny hint.
+/// Mirrors the same defence `publisher/jetstream.rs` applies to JetStream
+/// subject components.
+#[cfg(feature = "valkey")]
+fn encode_key_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        encoded.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+        encoded.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+    }
+    encoded
+}
+
 #[cfg(feature = "valkey")]
 pub(crate) fn rate_limit_redis_key(key: &RateLimitKey) -> String {
-    format!("{KEY_PREFIX}:rl:{}:{}", key.namespace, key.bucket)
+    format!(
+        "{KEY_PREFIX}:rl:{}:{}",
+        encode_key_component(&key.namespace),
+        encode_key_component(&key.bucket)
+    )
 }
 
 #[cfg(feature = "valkey")]
 pub(crate) fn fingerprint_redis_key(key: &FingerprintCounterKey) -> String {
-    format!("{KEY_PREFIX}:fp:{}:{}", key.namespace, key.fingerprint_hex)
+    format!(
+        "{KEY_PREFIX}:fp:{}:{}",
+        encode_key_component(&key.namespace),
+        encode_key_component(&key.fingerprint_hex)
+    )
 }
 
 #[cfg(feature = "valkey")]
 pub(crate) fn deny_hint_redis_key(key: &DenyHintKey) -> String {
     format!(
         "{KEY_PREFIX}:deny:{}:{}",
-        key.namespace, key.identity_fingerprint_hex
+        encode_key_component(&key.namespace),
+        encode_key_component(&key.identity_fingerprint_hex)
     )
 }
 
