@@ -64,7 +64,7 @@ pub use sinks::{
     ArchivePublisher, ClickHousePublisher, DurableEventSink, DurableFanoutPublisher,
     RetryingDurableSink,
 };
-pub use validation::{Caller, IngestRequest};
+pub use validation::{Caller, IngestRequest, canonical_event_hash};
 pub(crate) use validation::{is_lowercase_uuidv7, is_scope_identifier};
 
 /// Install the explicitly selected ring provider before any TLS client or

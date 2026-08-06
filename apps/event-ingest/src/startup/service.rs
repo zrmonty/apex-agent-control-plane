@@ -328,9 +328,11 @@ fn open_durability_stores(capacity: usize) -> DurabilityResult {
     Ok((Box::new(outbox), Box::new(idempotency)))
 }
 
+type SharedEphemeralStore = Arc<Mutex<Box<dyn apex_event_ingest::EphemeralStore>>>;
+
 fn build_ephemeral_store(
     trusted_base: &std::path::Path,
-) -> Result<Arc<Mutex<Box<dyn apex_event_ingest::EphemeralStore>>>, Box<dyn std::error::Error>> {
+) -> Result<SharedEphemeralStore, Box<dyn std::error::Error>> {
     #[cfg(feature = "valkey")]
     use apex_event_ingest::FallbackEphemeralStore;
     use apex_event_ingest::{EphemeralStore, InMemoryEphemeralStore};

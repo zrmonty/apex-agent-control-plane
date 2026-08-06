@@ -4,7 +4,13 @@ use sha2::{Digest, Sha256};
 use super::convert::prost_struct_to_json;
 use crate::{GatewayError, GatewayErrorCode, proto};
 
-pub(crate) fn canonical_event_hash(
+/// Computes the RFC 8785/JCS canonical SHA-256 hash of an event envelope.
+///
+/// Exposed beyond this crate so independently authenticated writers (for
+/// example the OOB control gateway in `apps/control-plane-api`) can construct
+/// a validly-hashed `control` envelope without duplicating the canonicalization
+/// rules that the ingest admission boundary enforces.
+pub fn canonical_event_hash(
     envelope: &proto::EventEnvelope,
 ) -> Result<String, GatewayError> {
     let scope = envelope

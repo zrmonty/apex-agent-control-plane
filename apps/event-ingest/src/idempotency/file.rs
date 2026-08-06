@@ -84,6 +84,10 @@ impl FileIdempotencyStore {
         ));
         let writer_lock = OpenOptions::new()
             .create(true)
+            // The lock file's content is never read; only its exclusive-lock
+            // state is meaningful. `truncate(false)` keeps any existing
+            // bytes intact instead of silently discarding them on reopen.
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)

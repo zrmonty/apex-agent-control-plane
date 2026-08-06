@@ -4,7 +4,7 @@ Apex is a self-hosted control plane for AI agents. It is cloud-agnostic.
 
 Apex helps teams observe, govern, evaluate, secure, and control agent workloads. It runs on local hosts, on-premises systems, and cloud systems. Each agent action is a scoped event. Security, compliance, and cost controls stay near the runtime.
 
-> **Status:** Phase 0 is complete. It delivers the event contract, Python SDK (`Apex.connect`, gold-standard template, model execution attribution), hardened ingest admission, Security Alerts, durable outbox and fanout seams, storage contracts, and Compose provider slots. Phase 1 has started with the React operator UI scaffold; its live control-plane API, authenticated sessions, and server-derived data remain Phase 1 work. See [Phase 0 progress](docs/phase-0-progress.md).
+> **Status:** Phase 0 is complete. It delivers the event contract, Python SDK (`Apex.connect`, gold-standard template, model execution attribution), hardened ingest admission, Security Alerts, durable outbox and fanout seams, storage contracts, and Compose provider slots. Phase 1 has started with the React operator UI scaffold and an out-of-band control-plane command gateway (`apps/control-plane-api`, Phase 0.5) is under active development. Live control-plane sessions, authenticated operator API access, and server-derived UI data remain later work. See [Phase 0 progress](docs/phase-0-progress.md).
 
 ## What Apex provides
 
@@ -110,7 +110,7 @@ Phase 0 supports the paths below. **Implemented** means the client or boundary i
 | Ingest → ClickHouse projection | Authenticated HTTPS POST; mTLS; optional bearer | Canonical event bytes; `X-Apex-Event-Id` | Client, reference provider, live-mTLS, gateway-ref |
 | Ingest → archive staging | Authenticated HTTPS PUT; mTLS; optional bearer; create-only keys | One event per event-id key; `If-None-Match: *` | Client and reference provider; backends: local, S3/MinIO, Azure Blob, GCS |
 | Operators → operator UI | Local React 19 + Vite preview; the browser is not an authorization boundary | Clearly labelled illustrative topology, connection workflow, and reserved operating routes | Phase 1 scaffold implemented; live API/session integration pending |
-| Operators → control-plane API | Planned session and workload connections | Configuration, policy, diagnostics, evaluations, commands | Phase 1 planned |
+| Operators → control-plane API (OOB commands) | gRPC; operator-token auth independent of the ingest data path | `stop` / `pause` / `resume` / `inject` / `set_budget` cooperative controls (ADR-0005), canonicalized into `control` events, durable command outbox (ADR-0006) | In progress (`apps/control-plane-api`); not yet merged, no authenticated UI session wiring |
 
 The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-staging`, required and explicit — there is no default-on path) binds one shared token to exactly one workload identity, scope set, and pinned client certificate. It is a single-agent staging fallback, not a multi-tenant credential store: do not point more than one agent identity at the same gateway through this path. Real multi-agent and multi-tenant fleets use SPIFFE/SPIRE workload identity instead (see [Frictionless Secure Agent Integration](docs/architecture/Frictionless%20Secure%20Agent%20Integration.md)).
 
@@ -173,7 +173,7 @@ flowchart LR
 
 ```text
 apps/
-  control-plane-api/       Control API, policy, configuration, realtime updates
+  control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget); in progress
   event-ingest/            gRPC ingestion and event validation
   operator-ui/             Operations, compliance, evaluation, Cost Lens GUI
 crates/

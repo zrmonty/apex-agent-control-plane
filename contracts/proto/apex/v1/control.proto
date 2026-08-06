@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package apex.v1;
+
+import "google/protobuf/struct.proto";
+
+// Out-of-band (OOB) control command gateway. Independently authenticated
+// from the EventIngest data path (see event.proto): a distinct operator
+// credential space, not the ingest workload bearer token. Every accepted
+// command is durably enqueued to the same event outbox used by ingest and
+// surfaces as a `control` event (EventType.CONTROL) in the queryable trace.
+//
+// Cooperative v1 semantics only (ADR-0005): this issues commands for the
+// instrumented runtime to observe and act on. It never forcibly terminates
+// or suspends a process.
+service ControlGateway {
+  rpc SubmitCommand(ControlCommandRequest) returns (ControlCommandResponse);
+}
+
+message ControlCommandRequest {
+  // Caller-supplied lowercase UUIDv7 idempotency key. Optional: the gateway
+  // generates one when omitted. Resubmitting the same command_id with the
+  // same fields is a no-op duplicate; resubmitting it with different fields
+  // is rejected as an idempotency conflict.
+  optional string command_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string agent_id = 4;
+  string run_id = 5;
+  optional string parent_run_id = 6;
+  string trace_id = 7;
+  ControlAction action = 8;
+  optional string reason_code = 9;
+  // Action-specific object. `inject.content` is untrusted data and must
+  // never be promoted into instructions or authorization decisions by any
+  // downstream consumer.
+  google.protobuf.Struct parameters = 10;
+}
+
+message ControlCommandResponse {
+  // True when this command_id was already durably accepted with the same
+  // fields (idempotent replay), false on first acceptance.
+  bool duplicate = 1;
+  string command_id = 2;
+  // True once the durable outbox row has been marked complete (fanned out
+  // to the JetStream/ClickHouse trace). False means the command was
+  // durably accepted but fanout is still pending -- for example while the
+  // primary data path is degraded. The command is not lost either way.
+  bool delivered = 3;
+}
+
+enum ControlAction {
+  CONTROL_ACTION_UNSPECIFIED = 0;
+  STOP = 1;
+  PAUSE = 2;
+  RESUME = 3;
+  INJECT = 4;
+  SET_BUDGET = 5;
+}

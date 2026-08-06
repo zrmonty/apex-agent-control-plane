@@ -39,14 +39,20 @@ impl IngestRequest {
         }
     }
 
-    #[cfg(feature = "test-support")]
     pub fn event_id(&self) -> &str {
         &self.event_id
     }
 
-    #[cfg(feature = "test-support")]
     pub fn envelope(&self) -> &[u8] {
         &self.envelope
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    pub fn namespace_id(&self) -> &str {
+        &self.namespace_id
     }
 
     #[cfg(feature = "test-support")]
@@ -60,7 +66,12 @@ impl IngestRequest {
         &self.scope_key
     }
 
-    pub(crate) fn from_validated_transport(
+    /// Validates a decoded transport envelope against every v1 admission rule
+    /// (identifiers, timestamp, integrity hash, structure, secret policy, and
+    /// the `control` action schema) and returns the canonical outbox-ready
+    /// request. This is the single validation gate independent writers (the
+    /// OOB control gateway) must go through -- it must never be bypassed.
+    pub fn from_validated_transport(
         envelope: proto::EventEnvelope,
     ) -> Result<Self, GatewayError> {
         if envelope.encoded_len() > MAX_ENVELOPE_BYTES {
