@@ -101,8 +101,21 @@ class DiagnosticHandler(BaseHTTPRequestHandler):
         return False
 
     def read_body(self, max_bytes: int = MAX_EVENT_BYTES) -> bytes | None:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
+        # Content-Length is attacker-controlled text. A bare int() on it is
+        # wrong twice over: it raises out of the request handler on anything
+        # non-numeric (dropping the connection with a traceback instead of a
+        # typed diagnostic), and it silently accepts spellings RFC 9110 does
+        # not -- `int(" 5 ")`, `int("+5")`, `int("5_0") == 50`, and Unicode
+        # decimal digits. Any of those is a parser divergence between this
+        # handler and an intermediary. Accept only ASCII digits.
+        raw_length = self.headers.get("Content-Length", "0")
+        if not isinstance(raw_length, str) or not raw_length.isascii() or not raw_length.isdigit():
+            self.send_diagnostic(
+                400, "INVALID_ENVELOPE", "Content-Length is not a valid integer."
+            )
+            return None
+        length = int(raw_length)
+        if length == 0:
             return b""
         if length > max_bytes:
             self.send_diagnostic(
