@@ -27,7 +27,7 @@ mod service;
 
 pub use auth::{
     OperatorCaller, OperatorCredentialResolver, OperatorTokenAuthenticator,
-    StaticOperatorTokenResolver,
+    OperatorTokenTableError, StaticOperatorTokenResolver, parse_operator_token_table,
 };
 pub use envelope::{ControlCommandInput, build_control_request};
 pub use errors::CommandError;

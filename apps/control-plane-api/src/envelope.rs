@@ -26,6 +26,16 @@ const GATEWAY_AGENT_CODE: &str = "apex-control-gateway";
 const GATEWAY_PROMPT_REVISION: &str = "control-command-v1";
 const GATEWAY_MODEL: &str = "n-a";
 
+/// How far ahead of the gateway's own clock a caller-supplied `command_id`'s
+/// embedded UUIDv7 timestamp may sit. This only absorbs ordinary clock skew
+/// between an operator console and the gateway.
+const MAX_COMMAND_ID_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
+/// How far behind the gateway's own clock that same embedded timestamp may
+/// sit. Generous enough that an idempotent retry after a long outage still
+/// resolves to `duplicate` rather than a spurious rejection, but bounded so
+/// the emitted `control` event's audit timestamp cannot be set arbitrarily.
+const MAX_COMMAND_ID_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
+
 pub struct ControlCommandInput {
     pub command_id: Option<String>,
     pub workspace_id: String,
@@ -87,7 +97,27 @@ pub fn build_control_request(
     // so the outbox recognizes it as `AlreadyPending`/`AlreadyComplete`
     // rather than a spurious `IDEMPOTENCY_CONFLICT` caused only by two
     // submissions landing in different microseconds.
-    let timestamp = rfc3339_from_uuidv7(&command_id).unwrap_or_else(rfc3339_now);
+    //
+    // Determinism alone is not enough. `command_id` is entirely caller-chosen,
+    // so deriving the timestamp from it without a bound would let any holder
+    // of a valid operator credential stamp a `stop`/`inject`/`set_budget`
+    // command with an arbitrary audit time -- backdating it before an
+    // incident window, or postdating it out of a retention query. The emitted
+    // `control` event is the audit record for that command, so the embedded
+    // clock must stay inside a bounded window around the gateway's own.
+    let command_millis = uuidv7_unix_millis(&command_id).ok_or_else(|| {
+        CommandError::new(
+            crate::errors::CommandErrorCode::InvalidCommand,
+            "command_id must be a canonical lowercase UUIDv7.",
+        )
+    })?;
+    if !command_millis_within_acceptance_window(command_millis, now_unix_millis()) {
+        return Err(CommandError::new(
+            crate::errors::CommandErrorCode::InvalidCommand,
+            "command_id's embedded UUIDv7 timestamp is outside the accepted clock window. Generate the command_id at submission time.",
+        ));
+    }
+    let timestamp = format_rfc3339_micros(u128::from(command_millis) * 1_000);
 
     let data = build_control_data(action_name, input.reason_code.as_deref(), input.parameters);
 
@@ -192,32 +222,53 @@ fn string_value(value: &str) -> prost_types::Value {
     }
 }
 
-/// Derives an RFC 3339 microsecond timestamp from a UUIDv7 string's embedded
-/// 48-bit millisecond Unix timestamp. Returns `None` for anything that is
-/// not a parseable UUIDv7 (the caller falls back to wall-clock time; a
-/// malformed `command_id` is rejected downstream by
-/// `IngestRequest::from_validated_transport` regardless of the timestamp
-/// used here).
-fn rfc3339_from_uuidv7(command_id: &str) -> Option<String> {
+/// Extracts the embedded 48-bit millisecond Unix timestamp from a UUIDv7.
+///
+/// Deliberately stricter than `Uuid::parse_str` alone: the value must already
+/// be in the canonical lowercase hyphenated form the ingest boundary accepts
+/// (`is_lowercase_uuidv7`). `parse_str` also accepts braced, URN, simple, and
+/// uppercase spellings, so without this round-trip check a `command_id` could
+/// derive a timestamp here through one grammar and then be judged by a
+/// different one downstream.
+fn uuidv7_unix_millis(command_id: &str) -> Option<u64> {
     let uuid = Uuid::parse_str(command_id).ok()?;
-    if uuid.get_version_num() != 7 {
+    if uuid.get_version_num() != 7 || uuid.hyphenated().to_string() != command_id {
         return None;
     }
     let (secs, nanos) = uuid.get_timestamp()?.to_unix();
-    let total_micros = (secs as u128) * 1_000_000 + (nanos as u128) / 1_000;
-    Some(format_rfc3339_micros(total_micros))
+    u64::try_from((secs as u128) * 1_000 + (nanos as u128) / 1_000_000).ok()
 }
 
-/// Formats the current UTC time as `YYYY-MM-DDTHH:MM:SS.ffffffZ`, matching
-/// the RFC 3339 microsecond-precision contract `event-ingest` requires. No
-/// `chrono` dependency is used elsewhere in this workspace, so this mirrors
-/// that convention with a direct civil-calendar conversion (Howard
-/// Hinnant's `civil_from_days`) instead of adding one.
-fn rfc3339_now() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format_rfc3339_micros(now.as_micros())
+/// True when a `command_id`'s embedded clock is close enough to the
+/// gateway's own clock to be a plausible submission time rather than a
+/// chosen audit timestamp.
+fn command_millis_within_acceptance_window(command_millis: u64, now_millis: u64) -> bool {
+    if command_millis > now_millis {
+        command_millis - now_millis <= MAX_COMMAND_ID_FUTURE_SKEW_MS
+    } else {
+        now_millis - command_millis <= MAX_COMMAND_ID_AGE_MS
+    }
+}
+
+fn now_unix_millis() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Derives the RFC 3339 microsecond timestamp a given `command_id` maps to.
+/// Returns `None` for anything that is not a canonical lowercase UUIDv7.
+/// `build_control_request` composes `uuidv7_unix_millis` and
+/// `format_rfc3339_micros` directly so it can bound the value first; this
+/// keeps the end-to-end mapping expressible for the tests that pin it.
+#[cfg(test)]
+fn rfc3339_from_uuidv7(command_id: &str) -> Option<String> {
+    uuidv7_unix_millis(command_id)
+        .map(|millis| format_rfc3339_micros(u128::from(millis) * 1_000))
 }
 
 fn format_rfc3339_micros(total_micros: u128) -> String {
@@ -255,12 +306,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rfc3339_now_matches_the_ingest_boundary_format() {
-        let timestamp = rfc3339_now();
+    fn derived_timestamps_match_the_ingest_boundary_format() {
+        let timestamp = rfc3339_from_uuidv7(&Uuid::now_v7().to_string())
+            .expect("a freshly generated UUIDv7 must yield a timestamp");
         assert_eq!(timestamp.len(), 27);
         assert!(timestamp.ends_with('Z'));
         assert_eq!(timestamp.as_bytes()[4], b'-');
         assert_eq!(timestamp.as_bytes()[19], b'.');
+    }
+
+    #[test]
+    fn acceptance_window_bounds_backdating_and_postdating_symmetrically() {
+        let now = 1_800_000_000_000_u64;
+        assert!(command_millis_within_acceptance_window(now, now));
+        assert!(command_millis_within_acceptance_window(
+            now + MAX_COMMAND_ID_FUTURE_SKEW_MS,
+            now
+        ));
+        assert!(!command_millis_within_acceptance_window(
+            now + MAX_COMMAND_ID_FUTURE_SKEW_MS + 1,
+            now
+        ));
+        assert!(command_millis_within_acceptance_window(
+            now - MAX_COMMAND_ID_AGE_MS,
+            now
+        ));
+        assert!(!command_millis_within_acceptance_window(
+            now - MAX_COMMAND_ID_AGE_MS - 1,
+            now
+        ));
+        assert!(!command_millis_within_acceptance_window(0, now));
+    }
+
+    #[test]
+    fn uuidv7_unix_millis_requires_the_canonical_lowercase_spelling() {
+        let canonical = uuidv7_with_millis(1_700_000_000_000);
+        assert_eq!(
+            uuidv7_unix_millis(&canonical),
+            Some(1_700_000_000_000),
+            "canonical form must parse"
+        );
+        // Same UUID, non-canonical spellings that `Uuid::parse_str` accepts
+        // but the ingest boundary's `is_lowercase_uuidv7` does not.
+        assert!(uuidv7_unix_millis(&canonical.to_uppercase()).is_none());
+        assert!(uuidv7_unix_millis(&format!("{{{canonical}}}")).is_none());
+        assert!(uuidv7_unix_millis(&format!("urn:uuid:{canonical}")).is_none());
+        assert!(uuidv7_unix_millis(&canonical.replace('-', "")).is_none());
     }
 
     #[test]
@@ -290,5 +381,97 @@ mod tests {
         // A v4 UUID (random, no embedded timestamp) must fall back to `None`.
         let v4 = "018f0000-0000-4000-8000-000000000000";
         assert!(rfc3339_from_uuidv7(v4).is_none());
+    }
+
+    fn test_operator() -> OperatorCaller {
+        OperatorCaller::scoped("operator:zack", ["acme/prod"]).expect("test operator")
+    }
+
+    /// Builds a well-formed lowercase UUIDv7 whose embedded 48-bit
+    /// millisecond clock is exactly `millis`. Everything else is fixed, so
+    /// the only thing under test is the timestamp the gateway derives.
+    fn uuidv7_with_millis(millis: u64) -> String {
+        let ms = millis & 0xFFFF_FFFF_FFFF;
+        format!(
+            "{:08x}-{:04x}-7000-8000-000000000000",
+            (ms >> 16) as u32,
+            (ms & 0xFFFF) as u16
+        )
+    }
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn stop_input(command_id: &str) -> ControlCommandInput {
+        ControlCommandInput {
+            command_id: Some(command_id.to_owned()),
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            parent_run_id: None,
+            trace_id: "trace-1".to_owned(),
+            action: proto::ControlAction::Stop,
+            reason_code: Some("operator.request".to_owned()),
+            parameters: Some(ProstStruct::default()),
+        }
+    }
+
+    /// A `command_id` is fully caller-chosen, and its embedded UUIDv7
+    /// millisecond clock is what stamps the emitted `control` event's
+    /// `timestamp`. An operator must not be able to choose a timestamp
+    /// unrelated to when the command was actually submitted: the control
+    /// event is the audit record for "who told this agent to stop, and
+    /// when". Anything outside a bounded acceptance window around the
+    /// gateway's own clock must be refused.
+    #[test]
+    fn build_control_request_rejects_a_backdated_command_id() {
+        // Unix epoch: a well-formed lowercase UUIDv7 whose embedded clock is
+        // 1970-01-01T00:00:00Z.
+        let epoch_id = "00000000-0000-7000-8000-000000000000";
+        let error = build_control_request(stop_input(epoch_id), &test_operator())
+            .expect_err("an epoch-dated command_id must not be accepted");
+        assert_eq!(error.code, crate::errors::CommandErrorCode::InvalidCommand);
+    }
+
+    #[test]
+    fn build_control_request_rejects_a_postdated_command_id() {
+        // A year in the future -- still a perfectly valid RFC 3339 UTC
+        // timestamp of the exact length the ingest boundary requires, so
+        // nothing downstream catches it.
+        let future_id = uuidv7_with_millis(now_millis() + 365 * 86_400_000);
+        let error = build_control_request(stop_input(&future_id), &test_operator())
+            .expect_err("a future-dated command_id must not be accepted");
+        assert_eq!(error.code, crate::errors::CommandErrorCode::InvalidCommand);
+    }
+
+    #[test]
+    fn build_control_request_accepts_a_current_command_id_and_derives_its_timestamp() {
+        let command_id = Uuid::now_v7().to_string();
+        let (returned, request) =
+            build_control_request(stop_input(&command_id), &test_operator())
+                .expect("a freshly generated command_id must be accepted");
+        assert_eq!(returned, command_id);
+        assert_eq!(request.event_id(), command_id);
+    }
+
+    #[test]
+    fn build_control_request_rejects_a_command_id_that_is_not_a_uuidv7() {
+        // Previously this fell back to wall-clock time and relied on a
+        // downstream identifier check. The timestamp source must never be
+        // decided by an unparseable caller value.
+        for bad in [
+            "not-a-uuid",
+            "018f0000-0000-4000-8000-000000000000",
+            "{018f0000-0000-7000-8000-000000000000}",
+        ] {
+            let error = build_control_request(stop_input(bad), &test_operator())
+                .expect_err("a non-UUIDv7 command_id must be refused outright");
+            assert_eq!(error.code, crate::errors::CommandErrorCode::InvalidCommand);
+        }
     }
 }

@@ -147,6 +147,24 @@ mod tests {
         request
     }
 
+    /// A canonical lowercase UUIDv7 stamped with the current millisecond, so
+    /// it stays inside the gateway's `command_id` clock-acceptance window
+    /// (see `envelope::command_millis_within_acceptance_window`). `suffix`
+    /// makes distinct-but-current ids for tests that need several.
+    fn fresh_command_id(suffix: u64) -> String {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            & 0xFFFF_FFFF_FFFF;
+        format!(
+            "{:08x}-{:04x}-7000-8000-{:012x}",
+            (ms >> 16) as u32,
+            (ms & 0xFFFF) as u16,
+            suffix & 0xFFFF_FFFF_FFFF
+        )
+    }
+
     fn stop_request() -> proto::ControlCommandRequest {
         proto::ControlCommandRequest {
             command_id: None,
@@ -178,7 +196,7 @@ mod tests {
     async fn submit_command_is_idempotent_for_a_repeated_command_id() {
         let service = service();
         let mut request = stop_request();
-        request.command_id = Some("018f0000-0000-7000-8000-000000000001".to_owned());
+        request.command_id = Some(fresh_command_id(1));
         let first = service
             .submit_command(authed_request(request.clone()))
             .await
@@ -198,14 +216,14 @@ mod tests {
     async fn submit_command_rejects_a_reused_command_id_with_different_fields() {
         let service = service();
         let mut first_request = stop_request();
-        first_request.command_id = Some("018f0000-0000-7000-8000-000000000002".to_owned());
+        first_request.command_id = Some(fresh_command_id(2));
         service
             .submit_command(authed_request(first_request))
             .await
             .unwrap();
 
         let mut second_request = stop_request();
-        second_request.command_id = Some("018f0000-0000-7000-8000-000000000002".to_owned());
+        second_request.command_id = Some(fresh_command_id(2));
         second_request.action = proto::ControlAction::Pause as i32; // different fields, same id.
         let status = service
             .submit_command(authed_request(second_request))
@@ -219,14 +237,14 @@ mod tests {
         let service = service();
         for index in 0..MAX_COMMANDS_PER_WINDOW {
             let mut request = stop_request();
-            request.command_id = Some(format!("018f0000-0000-7000-8000-{index:012}"));
+            request.command_id = Some(fresh_command_id(u64::from(index)));
             service
                 .submit_command(authed_request(request))
                 .await
                 .unwrap();
         }
         let mut request = stop_request();
-        request.command_id = Some("018f0000-0000-7000-8000-999999999999".to_owned());
+        request.command_id = Some(fresh_command_id(0xffff_ffff));
         let status = service
             .submit_command(authed_request(request))
             .await
@@ -237,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn submit_command_handles_concurrent_duplicate_submissions_without_a_torn_write() {
         let service = Arc::new(service());
-        let command_id = "018f0000-0000-7000-8000-0000000000ab".to_owned();
+        let command_id = fresh_command_id(0xab);
         let mut handles = Vec::new();
         for _ in 0..8 {
             let service = service.clone();

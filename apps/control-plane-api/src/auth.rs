@@ -75,10 +75,12 @@ impl OperatorCaller {
             if !is_identifier(workspace) || !is_identifier(namespace) {
                 return Err(CommandError::invalid_authorization());
             }
-            scopes.insert(scope);
-            if scopes.len() > MAX_ALLOWED_SCOPES {
+            // Bound before inserting: checking afterwards admits one scope
+            // past the ceiling.
+            if !scopes.contains(&scope) && scopes.len() >= MAX_ALLOWED_SCOPES {
                 return Err(CommandError::invalid_authorization());
             }
+            scopes.insert(scope);
         }
         Ok(Self {
             subject,
@@ -112,11 +114,14 @@ fn is_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+/// An operator subject is stamped verbatim into the emitted `control`
+/// event's `actor.id`, where `event-ingest`'s admission gate applies its
+/// `is_scope_identifier` grammar. Enforcing the same grammar here means a
+/// subject that could never produce an admissible event is rejected when the
+/// credential is constructed, rather than turning every command that
+/// operator submits into an opaque `INVALID_COMMAND` at request time.
 fn is_valid_subject(subject: &str) -> bool {
-    !subject.is_empty()
-        && subject.len() <= MAX_SUBJECT_BYTES
-        && subject.is_ascii()
-        && !subject.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    subject.len() <= MAX_SUBJECT_BYTES && is_identifier(subject)
 }
 
 /// Deployment-provided operator token resolution. Implementations receive
@@ -162,6 +167,119 @@ impl OperatorCredentialResolver for StaticOperatorTokenResolver {
             .cloned()
             .ok_or_else(CommandError::unauthenticated)
     }
+}
+
+/// Field separator inside one `APEX_CONTROL_OPERATOR_TOKENS` entry.
+///
+/// Deliberately a character that cannot appear on the *scope* side of an
+/// entry: scopes are `*` or `workspace/namespace` pairs drawn from
+/// [`is_identifier`]'s grammar plus `/` and `,`. Because the right-hand side
+/// provably never contains `|`, [`parse_operator_token_table`] can split from
+/// the right and recover the token intact even when the token itself
+/// contains the separator.
+///
+/// A `:` separator (the original form) cannot offer that property, because
+/// `is_identifier` accepts `:` inside a workspace or namespace. Splitting
+/// `token:scopes` on the first `:` silently truncates any token containing a
+/// colon down to its prefix -- registering a shorter secret than the operator
+/// configured -- and folds the remainder into the scope string, where it
+/// validates as a *different*, unintended workspace.
+const OPERATOR_ENTRY_SEPARATOR: char = '|';
+/// Refuse to register a credential short enough to be brute-forcible, and
+/// refuse an implausibly long one.
+const MIN_OPERATOR_TOKEN_BYTES: usize = 16;
+const MAX_OPERATOR_TOKEN_BYTES: usize = 4096;
+const MAX_OPERATOR_TOKEN_ENTRIES: usize = 256;
+
+/// Why an `APEX_CONTROL_OPERATOR_TOKENS` value was refused. The entry index
+/// is included so an operator can find the bad entry; the token itself never
+/// appears in this type, its `Debug`, or its `Display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorTokenTableError {
+    pub entry_index: usize,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for OperatorTokenTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "APEX_CONTROL_OPERATOR_TOKENS entry {}: {}",
+            self.entry_index, self.reason
+        )
+    }
+}
+
+impl std::error::Error for OperatorTokenTableError {}
+
+/// Parses the `APEX_CONTROL_OPERATOR_TOKENS` credential table:
+/// `token|workspace/ns[,workspace/ns...];token|*;...`, where `*` grants a
+/// global break-glass operator scope.
+///
+/// Every malformed entry is a hard error. Silently skipping one would let a
+/// typo quietly drop an operator's credential (or, worse, register a
+/// mis-parsed one) while the gateway still starts and reports healthy.
+pub fn parse_operator_token_table(
+    raw: &str,
+) -> Result<StaticOperatorTokenResolver, OperatorTokenTableError> {
+    let mut resolver = StaticOperatorTokenResolver::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    for (entry_index, entry) in raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .enumerate()
+    {
+        let fail = |reason: &'static str| OperatorTokenTableError {
+            entry_index,
+            reason,
+        };
+        if entry_index >= MAX_OPERATOR_TOKEN_ENTRIES {
+            return Err(fail("too many operator token entries"));
+        }
+        // Split from the right: the scope side cannot contain the separator,
+        // so this recovers the whole token even if it contains one.
+        let Some((token, scopes)) = entry.rsplit_once(OPERATOR_ENTRY_SEPARATOR) else {
+            return Err(fail(
+                "expected token|scopes (use '|', not ':', between the token and its scopes)",
+            ));
+        };
+        if token.len() < MIN_OPERATOR_TOKEN_BYTES {
+            return Err(fail("operator token is shorter than 16 bytes"));
+        }
+        if token.len() > MAX_OPERATOR_TOKEN_BYTES {
+            return Err(fail("operator token is longer than 4096 bytes"));
+        }
+        // Must be presentable in an `authorization: Bearer <token>` header:
+        // `extract_bearer_token` rejects anything else, so accepting it here
+        // would register a credential that can never authenticate.
+        if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(fail(
+                "operator token must be printable ASCII with no whitespace",
+            ));
+        }
+        let scopes = scopes.trim();
+        let caller = if scopes == "*" {
+            OperatorCaller::global(format!("operator:static:{entry_index}"))
+        } else {
+            let parsed = scopes
+                .split(',')
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<_>>();
+            if parsed.is_empty() {
+                return Err(fail("no scopes listed; use '*' for a global operator"));
+            }
+            OperatorCaller::scoped(format!("operator:static:{entry_index}"), parsed)
+        }
+        .map_err(|_| fail("invalid scope; expected '*' or workspace/namespace"))?;
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if !seen.insert(digest) {
+            return Err(fail("duplicate operator token"));
+        }
+        resolver = resolver.with_token(token, caller);
+    }
+    Ok(resolver)
 }
 
 const AUTH_FAILURES_PER_WINDOW: u32 = 20;
@@ -355,5 +473,119 @@ mod tests {
     fn scoped_construction_rejects_malformed_scope_strings() {
         assert!(OperatorCaller::scoped("operator:zack", ["not-a-scope"]).is_err());
         assert!(OperatorCaller::scoped("operator:zack", ["ac me/prod"]).is_err());
+    }
+
+    #[test]
+    fn scoped_construction_enforces_the_scope_ceiling_exactly() {
+        let at_limit =
+            (0..MAX_ALLOWED_SCOPES).map(|index| format!("workspace{index}/prod"));
+        assert!(OperatorCaller::scoped("operator:zack", at_limit).is_ok());
+        let over_limit =
+            (0..=MAX_ALLOWED_SCOPES).map(|index| format!("workspace{index}/prod"));
+        assert!(OperatorCaller::scoped("operator:zack", over_limit).is_err());
+    }
+
+    #[test]
+    fn subject_must_satisfy_the_ingest_actor_identifier_grammar() {
+        // These authenticate fine but could never produce an admissible
+        // `control` event, because `actor.id` is checked against
+        // `is_scope_identifier` at the ingest boundary. Reject them at
+        // credential construction instead of at every command.
+        for bad in ["operator zack", "operator/zack", "\"operator\"", "", "a..b"] {
+            assert!(
+                OperatorCaller::global(bad).is_err(),
+                "{bad:?} must not be accepted as an operator subject"
+            );
+        }
+        assert!(OperatorCaller::global("operator:break-glass").is_ok());
+    }
+
+    /// The token table is a credential store. Parsing it must never quietly
+    /// register a *different* credential than the operator configured.
+    #[test]
+    fn token_table_preserves_a_token_that_contains_the_separator_character() {
+        // A token containing '|' still round-trips whole, because the scope
+        // side of an entry provably cannot contain the separator.
+        let token = "abcdefgh|ijklmnop|qrstuvwx";
+        let resolver = parse_operator_token_table(&format!("{token}|acme/prod"))
+            .expect("entry must parse");
+        let caller = resolver.resolve(token).expect("the whole token must resolve");
+        assert!(caller.allows_scope("acme", "prod"));
+        // No prefix of the token may authenticate.
+        assert!(resolver.resolve("abcdefgh").is_err());
+        assert!(resolver.resolve("abcdefgh|ijklmnop").is_err());
+    }
+
+    #[test]
+    fn token_table_preserves_a_token_that_contains_colons() {
+        // The original ':' separator truncated this token to "session" and
+        // granted scope "abcdef0123456789:acme/prod" instead of "acme/prod".
+        let token = "session:abcdef0123456789";
+        let resolver =
+            parse_operator_token_table(&format!("{token}|acme/prod")).expect("entry must parse");
+        let caller = resolver.resolve(token).expect("the whole token must resolve");
+        assert!(caller.allows_scope("acme", "prod"));
+        assert!(!caller.allows_scope("abcdef0123456789:acme", "prod"));
+        assert!(resolver.resolve("session").is_err());
+    }
+
+    #[test]
+    fn token_table_fails_closed_on_every_malformed_entry() {
+        for (raw, why) in [
+            ("no-separator-here-at-all", "missing separator"),
+            ("short|acme/prod", "token under the length floor"),
+            ("abcdefgh:acme/prod", "legacy ':' form must not be guessed at"),
+            ("abcdefghijklmnop|", "no scopes listed"),
+            ("abcdefghijklmnop|not-a-scope", "scope without a '/'"),
+            ("abcdefghijklmnop|ac me/prod", "scope with whitespace"),
+            (
+                "abcdefghijklmnop|acme/prod;abcdefghijklmnop|other/prod",
+                "duplicate token",
+            ),
+        ] {
+            assert!(
+                parse_operator_token_table(raw).is_err(),
+                "{why}: {raw:?} must be refused, not silently skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn token_table_parses_scoped_and_global_entries() {
+        let resolver = parse_operator_token_table(
+            "  scoped-operator-token-1|acme/prod, acme/staging ; global-operator-token-2|*  ",
+        )
+        .expect("well-formed table must parse");
+
+        let scoped = resolver.resolve("scoped-operator-token-1").unwrap();
+        assert!(scoped.allows_scope("acme", "prod"));
+        assert!(scoped.allows_scope("acme", "staging"));
+        assert!(!scoped.allows_scope("other", "prod"));
+
+        let global = resolver.resolve("global-operator-token-2").unwrap();
+        assert!(global.allows_scope("anything", "anywhere"));
+
+        // Subjects are distinct per entry so the audit trail can tell two
+        // static operator credentials apart.
+        assert_ne!(scoped.subject(), global.subject());
+    }
+
+    #[test]
+    fn token_table_rejects_a_token_that_could_never_be_sent_in_a_bearer_header() {
+        // `extract_bearer_token` refuses whitespace and non-ASCII, so a table
+        // entry carrying them would register an unusable credential.
+        assert!(parse_operator_token_table("token with spaces|acme/prod").is_err());
+        assert!(parse_operator_token_table("t\u{00e9}kenabcdefghijkl|acme/prod").is_err());
+    }
+
+    #[test]
+    fn empty_token_table_authenticates_nobody() {
+        let auth = OperatorTokenAuthenticator::new(
+            parse_operator_token_table("").expect("an empty table is valid"),
+        );
+        assert!(
+            auth.authenticate(&metadata_with_auth("Bearer anything-at-all"))
+                .is_err()
+        );
     }
 }
