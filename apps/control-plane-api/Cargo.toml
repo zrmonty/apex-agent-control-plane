@@ -34,6 +34,15 @@ prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 
+[dev-dependencies]
+# Paused/mocked time for deterministic tests of the interval-based fanout
+# worker (see replay.rs's tests) -- real wall-clock sleeps racing a
+# background tick is exactly the flake class two prior CI fixes in this repo
+# already had to close elsewhere. Test-only: Cargo unions this with the main
+# `tokio` dependency's features solely for test builds, so the release binary
+# never links `test-util`.
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = []
 test-support = ["apex-event-ingest/test-support"]

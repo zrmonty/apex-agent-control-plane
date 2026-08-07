@@ -98,7 +98,34 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    /// Moves the paused virtual clock past exactly one worker tick, then
+    /// yields repeatedly so the now-runnable worker task actually executes
+    /// its tick (lock acquisition and the publish call are real await
+    /// points, not resolved by the clock jump alone) before the caller
+    /// inspects shared state.
+    ///
+    /// A real-time `sleep` here would reintroduce the exact race this
+    /// rewrite exists to remove: `advance` and `yield_now` only move the
+    /// deterministic paused clock and the task scheduler, never the wall
+    /// clock, so this is not a timing guess at any margin.
+    async fn advance_past_one_tick(interval: Duration) {
+        // Yield first: a freshly spawned/just-resumed worker task has not
+        // necessarily been polled yet, so it may not have registered its
+        // `sleep(interval)` timer at the current instant. Advancing the
+        // clock before that registration would jump time forward without
+        // ever expiring the timer the worker is about to create. Yielding
+        // guarantees at least one poll -- and thus timer registration --
+        // happens before the clock moves.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(interval).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn fanout_worker_retries_after_a_transient_publish_failure() {
         let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> =
             Box::new(InMemoryOutbox::new(16).unwrap());
@@ -118,14 +145,15 @@ mod tests {
             fail_next: true,
             published: vec![],
         }));
-        let _handle = spawn_fanout_worker(backend.clone(), publisher.clone(), Duration::from_millis(5));
+        let interval = Duration::from_millis(5);
+        let _handle = spawn_fanout_worker(backend.clone(), publisher.clone(), interval);
 
         // First tick: publish fails, row stays pending.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        advance_past_one_tick(interval).await;
         assert!(publisher.lock().await.published.is_empty());
 
         // Second tick: publish succeeds, row is marked complete.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        advance_past_one_tick(interval).await;
         assert_eq!(publisher.lock().await.published.len(), 1);
         let remaining = backend.with_lock(|outbox| outbox.pending()).unwrap();
         assert!(remaining.is_empty());
