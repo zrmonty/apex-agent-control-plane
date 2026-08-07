@@ -147,16 +147,24 @@ mod tests {
         request
     }
 
-    /// A canonical lowercase UUIDv7 stamped with the current millisecond, so
-    /// it stays inside the gateway's `command_id` clock-acceptance window
-    /// (see `envelope::command_millis_within_acceptance_window`). `suffix`
-    /// makes distinct-but-current ids for tests that need several.
+    /// A canonical lowercase UUIDv7 stamped with a recent millisecond, so it
+    /// stays inside the gateway's `command_id` clock-acceptance window (see
+    /// `envelope::command_millis_within_acceptance_window`). `suffix`
+    /// distinguishes ids for tests that need several.
+    ///
+    /// The millisecond is captured once per test binary rather than read per
+    /// call: idempotency tests submit the *same* id twice and must get the
+    /// same string back, which a per-call clock read would not guarantee
+    /// across a millisecond boundary.
     fn fresh_command_id(suffix: u64) -> String {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-            & 0xFFFF_FFFF_FFFF;
+        static BASE_MILLIS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let ms = *BASE_MILLIS.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                & 0xFFFF_FFFF_FFFF
+        });
         format!(
             "{:08x}-{:04x}-7000-8000-{:012x}",
             (ms >> 16) as u32,
