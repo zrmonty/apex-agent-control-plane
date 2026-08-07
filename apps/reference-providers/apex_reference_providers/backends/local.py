@@ -44,9 +44,14 @@ class LocalArchiveBackend:
             return PutResult(status="conflict", provider="local")
 
     def health(self) -> HealthCapabilities:
+        # Declared honestly, per contracts/archive-provider/v1.md: this backend
+        # is a create-only SQLite table. It has no retention clock and no legal
+        # hold -- anyone who can reach the file can DELETE the row. Advertising
+        # those as "supported" would let a compliance-required deployment start
+        # against a dev backend that cannot hold anything immutable.
         return HealthCapabilities(
-            immutable_retention="supported",
-            legal_hold="supported",
+            immutable_retention="unavailable",
+            legal_hold="unavailable",
             version_identifier="supported",
             read_after_write="supported",
             content_verification="supported",

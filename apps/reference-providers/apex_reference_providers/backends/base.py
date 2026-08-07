@@ -51,6 +51,11 @@ def build_backend(
     s3_secret_key: str | None = None,
     s3_region: str | None = None,
     s3_ca_file: str | None = None,
+    # Immutability policy (S3/MinIO Object Lock)
+    require_object_lock: bool = True,
+    object_lock_mode: str | None = None,
+    retain_days: int | None = None,
+    legal_hold: bool = False,
 ) -> ArchiveBackend:
     kind = (kind or "local").strip().lower()
     if kind in {"local", "sqlite", "file"}:
@@ -77,7 +82,7 @@ def build_backend(
             credentials_file=gcs_credentials_file,
         )
     if kind in {"s3", "minio"}:
-        from .s3 import S3ArchiveBackend
+        from .s3 import DEFAULT_RETAIN_DAYS, S3ArchiveBackend
 
         return S3ArchiveBackend(
             endpoint=s3_endpoint,
@@ -86,5 +91,9 @@ def build_backend(
             secret_key=s3_secret_key,
             region=s3_region or "us-east-1",
             ca_file=s3_ca_file,
+            require_object_lock=require_object_lock,
+            object_lock_mode=object_lock_mode,
+            retain_days=retain_days if retain_days is not None else DEFAULT_RETAIN_DAYS,
+            legal_hold=legal_hold,
         )
     raise ValueError(f"unsupported archive backend: {kind}")

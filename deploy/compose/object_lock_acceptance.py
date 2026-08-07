@@ -30,6 +30,25 @@ def _cred(name: str) -> str:
     return os.environ.get(name, "").strip()
 
 
+def _provider_s3_module():
+    """Import the reference archive backend from the repo checkout.
+
+    The acceptance script runs standalone (no installed package), so the
+    provider tree is added to sys.path here rather than relying on the caller
+    to set PYTHONPATH.
+    """
+    providers = Path(__file__).resolve().parents[2] / "apps" / "reference-providers"
+    if str(providers) not in sys.path:
+        sys.path.insert(0, str(providers))
+    try:
+        from apex_reference_providers.backends import s3 as provider_s3
+    except ImportError as exc:
+        raise SystemExit(
+            f"archive backend checks require the reference provider package under {providers}: {exc}"
+        ) from exc
+    return provider_s3
+
+
 def _ssl_context(ca_file: str | None) -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     if ca_file:
@@ -201,7 +220,172 @@ def main() -> None:
         raise SystemExit("version identifier missing on head_object")
     print(f"version_identifier ok ({head['VersionId']})")
 
+    _assert_deletion_denied(s3, args.bucket, ClientError)
+    _assert_archive_backend_applies_retention(s3, args, ClientError)
+
     print("OBJECT_LOCK_ACCEPTANCE_PASSED")
+
+
+def _assert_archive_backend_applies_retention(s3, args, client_error) -> None:
+    """Prove the *archive write path* produces retained objects.
+
+    Regression guard. Proving MinIO supports Object Lock says nothing about
+    whether Apex uses it. The S3 backend previously called `put_object` with no
+    `ObjectLockMode`/`ObjectLockRetainUntilDate`, and because a bucket with
+    Object Lock merely enabled applies no default retention, every archived
+    event was written completely unprotected and could be erased with a single
+    `DeleteObject`. This check writes through the real backend and then reads
+    the retention state back.
+    """
+    import datetime as _dt
+
+    s3_module = _provider_s3_module()
+    DEFAULT_OBJECT_LOCK_MODE = s3_module.DEFAULT_OBJECT_LOCK_MODE
+    ArchiveRetentionError = s3_module.ArchiveRetentionError
+    from apex_reference_providers.backends import build_backend  # noqa: PLC0415
+
+    access = _cred("MINIO_ACCESS_KEY") or _cred("MINIO_ROOT_USER")
+    secret = _cred("MINIO_SECRET_KEY") or _cred("MINIO_ROOT_PASSWORD")
+    backend = build_backend(
+        "s3",
+        s3_endpoint=args.endpoint,
+        s3_bucket=args.bucket,
+        s3_access_key=access,
+        s3_secret_key=secret,
+        s3_region="us-east-1",
+        s3_ca_file=args.ca_file,
+        require_object_lock=True,
+        retain_days=1,
+    )
+
+    capabilities = backend.health()
+    if capabilities.immutable_retention != "required":
+        raise SystemExit(
+            "archive backend must declare immutable_retention=required when Object Lock is enforced, "
+            f"got {capabilities.immutable_retention!r}"
+        )
+
+    event_id = "0190abcd-1234-7abc-8def-" + _dt.datetime.now().strftime("%H%M%S%f")[:12]
+    result = backend.put(event_id, "a" * 64, b"apex-archive-retention-regression")
+    if result.status != "created":
+        raise SystemExit(f"archive backend put returned {result.status!r}, expected 'created'")
+
+    key = f"events/{event_id}.pb"
+    retention = s3.get_object_retention(Bucket=args.bucket, Key=key, VersionId=result.version_id)
+    mode = retention.get("Retention", {}).get("Mode")
+    if mode != DEFAULT_OBJECT_LOCK_MODE:
+        raise SystemExit(
+            f"archive backend wrote an object with retention mode {mode!r}, "
+            f"expected {DEFAULT_OBJECT_LOCK_MODE!r}"
+        )
+    print(f"archive backend write path applies {mode} retention")
+
+    try:
+        s3.delete_object(Bucket=args.bucket, Key=key, VersionId=result.version_id)
+    except client_error as err:
+        print(f"  archived event resists deletion ({err.response.get('Error', {}).get('Code')}) ok")
+    else:
+        raise SystemExit("archive backend wrote a DELETABLE event object")
+
+    # The backend must refuse to start against a bucket that cannot retain.
+    unprotected = f"{args.bucket}-no-lock-probe"
+    try:
+        s3.create_bucket(Bucket=unprotected)
+    except client_error:
+        pass
+    try:
+        build_backend(
+            "s3",
+            s3_endpoint=args.endpoint,
+            s3_bucket=unprotected,
+            s3_access_key=access,
+            s3_secret_key=secret,
+            s3_region="us-east-1",
+            s3_ca_file=args.ca_file,
+            require_object_lock=True,
+        )
+    except ArchiveRetentionError:
+        print("  archive backend fails closed on a non-Object-Lock bucket ok")
+    else:
+        raise SystemExit("archive backend started against a bucket without Object Lock")
+
+
+def _assert_deletion_denied(s3, bucket: str, client_error) -> None:
+    """Prove the archive write path produces an object that cannot be deleted.
+
+    contracts/archive-provider/v1.md requires every adapter to prove that
+    "mutation and deletion are denied while protected". Proving the *store*
+    supports Object Lock is not the same claim and does not imply it: a bucket
+    with Object Lock merely enabled applies no retention by default, so an
+    object written without explicit lock headers is fully deletable. This
+    check therefore writes the object the way the archive backend writes it
+    and then tries to destroy it.
+    """
+    import datetime as _dt
+
+    DEFAULT_OBJECT_LOCK_MODE = _provider_s3_module().DEFAULT_OBJECT_LOCK_MODE
+
+    key = "object-lock-acceptance/deletion-probe.pb"
+    payload = b"apex-deletion-denial-probe-v1"
+    retain_until = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=1)
+    put = s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=payload,
+        ContentType="application/x-protobuf",
+        Metadata={"apex_event_hash": "0" * 64, "apex_event_id": "deletion-probe"},
+        ObjectLockMode=DEFAULT_OBJECT_LOCK_MODE,
+        ObjectLockRetainUntilDate=retain_until,
+    )
+    version_id = put.get("VersionId")
+    if not version_id:
+        raise SystemExit("deletion probe: bucket is not versioned; Object Lock cannot apply")
+
+    retention = s3.get_object_retention(Bucket=bucket, Key=key, VersionId=version_id)
+    mode = retention.get("Retention", {}).get("Mode")
+    if mode != DEFAULT_OBJECT_LOCK_MODE:
+        raise SystemExit(
+            f"deletion probe: retention mode is {mode!r}, expected {DEFAULT_OBJECT_LOCK_MODE!r}"
+        )
+    print(f"deletion probe: written under {mode} retention")
+
+    def _must_fail(label: str, call) -> None:
+        try:
+            call()
+        except client_error as err:
+            print(f"  {label}: denied ({err.response.get('Error', {}).get('Code')}) ok")
+            return
+        raise SystemExit(f"deletion probe: {label} SUCCEEDED against a retained object")
+
+    _must_fail(
+        "DeleteObject(VersionId)",
+        lambda: s3.delete_object(Bucket=bucket, Key=key, VersionId=version_id),
+    )
+    _must_fail(
+        "DeleteObject(VersionId, BypassGovernanceRetention)",
+        lambda: s3.delete_object(
+            Bucket=bucket,
+            Key=key,
+            VersionId=version_id,
+            BypassGovernanceRetention=True,
+        ),
+    )
+    # DeleteObjects reports per-key failures in the response body rather than
+    # raising, so an empty Errors list here means the batch call really did
+    # erase a retained version.
+    batch = s3.delete_objects(
+        Bucket=bucket,
+        Delete={"Objects": [{"Key": key, "VersionId": version_id}]},
+    )
+    if batch.get("Deleted"):
+        raise SystemExit("deletion probe: DeleteObjects batch erased a retained version")
+    print(f"  DeleteObjects(batch): denied ({batch.get('Errors', [{}])[0].get('Code')}) ok")
+
+    # Retention must survive every attempt above.
+    survivor = s3.head_object(Bucket=bucket, Key=key, VersionId=version_id)
+    if survivor["ContentLength"] != len(payload):
+        raise SystemExit("deletion probe: retained object was mutated")
+    print("deletion probe: retained version intact after every delete attempt")
 
 
 if __name__ == "__main__":

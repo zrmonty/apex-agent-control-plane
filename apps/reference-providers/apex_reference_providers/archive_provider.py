@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .backends import build_backend
+from .backends.s3 import ArchiveRetentionError
 from .common import HASH, MAX_EVENT_BYTES, UUID_V7, DiagnosticHandler, build_tls_context
 
 
@@ -29,6 +30,32 @@ def _env_file(name: str) -> str | None:
         return Path(path).read_text(encoding="utf-8").strip()
     value = os.environ.get(name)
     return value.strip() if value else None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Strict boolean parse. An unrecognized value is a configuration error,
+    never a silent fallback to the permissive side: ``REQUIRE_OBJECT_LOCK=yes``
+    must not quietly disable retention because it is not the literal 'true'.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise SystemExit(f"{name} must be exactly true or false, got {raw!r}")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from exc
 
 
 class Handler(DiagnosticHandler):
@@ -63,6 +90,19 @@ class Handler(DiagnosticHandler):
         # X-Apex-Event-Hash is integrity.event_hash (canonical digest), not body SHA-256.
         try:
             result = self.backend.put(header_id, event_hash, body)
+        except ArchiveRetentionError:
+            # The bytes may be stored but are provably NOT under immutable
+            # retention. Retrying cannot fix a bucket that does not enforce
+            # Object Lock, so this is terminal, not transient -- reporting it
+            # as retryable would let the gateway spin while the operator
+            # never learns the archive is not WORM.
+            self.send_diagnostic(
+                500,
+                "ARCHIVE_VERIFICATION",
+                "The archive could not prove immutable retention for this event.",
+                retryable=False,
+            )
+            return
         except Exception:
             self.send_diagnostic(
                 503,
@@ -143,6 +183,13 @@ def main(argv: list[str] | None = None) -> None:
         s3_secret_key=_env_file("APEX_ARCHIVE_S3_SECRET_KEY"),
         s3_region=os.environ.get("APEX_ARCHIVE_S3_REGION", "us-east-1"),
         s3_ca_file=os.environ.get("APEX_ARCHIVE_S3_CA_FILE"),
+        # APEX_ARCHIVE_REQUIRE_OBJECT_LOCK was previously validated by the
+        # compose preflight but read by nothing, so "strict retention" was a
+        # phantom control: events were archived with no retention at all.
+        require_object_lock=_env_bool("APEX_ARCHIVE_REQUIRE_OBJECT_LOCK", True),
+        object_lock_mode=os.environ.get("APEX_ARCHIVE_OBJECT_LOCK_MODE"),
+        retain_days=_env_int("APEX_ARCHIVE_RETAIN_DAYS", 365),
+        legal_hold=_env_bool("APEX_ARCHIVE_LEGAL_HOLD", False),
     )
     context = build_tls_context(cert=args.cert, key=args.key, client_ca=args.client_ca)
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
