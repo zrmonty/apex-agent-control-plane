@@ -20,6 +20,37 @@
 //!   outbox location (defaults under `./data/control-outbox`). This is a
 //!   distinct outbox file from event-ingest's, by design: the two services
 //!   must not share a durability boundary any more than they share auth.
+//! - `APEX_CONTROL_POSTGRES_URL` -- selects the multi-writer Postgres outbox
+//!   instead of the single-writer file outbox above. Requires a binary built
+//!   with `--features postgres`; setting it without that is a hard startup
+//!   error rather than a silent downgrade to the file backend. **It must
+//!   resolve to a database or schema of the control gateway's own.**
+//!   `apex_event_ingest::PostgresOutbox` hardcodes the `apex_event_outbox`
+//!   table name, so pointing both services at one database gives them one
+//!   outbox table -- where each service's replay worker would claim the
+//!   other's rows (`FOR UPDATE SKIP LOCKED`) and republish them through its
+//!   own sinks. Give it a separate database, or a separate schema via
+//!   `?options=-c%20search_path%3Dapex_control`. Setting `APEX_POSTGRES_URL`
+//!   (event-ingest's variable) on this process is refused for the same
+//!   reason. This is the Postgres equivalent of the separate `control-outbox`
+//!   volume the file backend already gets.
+//! - `APEX_CONTROL_NATS_URL` / `APEX_CONTROL_NATS_CA_FILE` /
+//!   `APEX_CONTROL_NATS_CLIENT_CERT_FILE` / `APEX_CONTROL_NATS_CLIENT_KEY_FILE`
+//!   / `APEX_CONTROL_NATS_USERNAME_FILE` / `APEX_CONTROL_NATS_PASSWORD_FILE`
+//!   -- the JetStream client the background fanout worker publishes accepted
+//!   commands through, so a `control` event actually reaches the queryable
+//!   trace. Its own NATS client identity, not the ingest gateway's, for the
+//!   same reason it has its own TLS material and its own operator credential
+//!   table. The URL is optional: unset means no fanout, and the process says
+//!   so loudly on stderr, because commands would then be durably recorded and
+//!   never delivered. Once the URL is set the three TLS paths are required;
+//!   username/password are both-or-neither. Configuration is validated at
+//!   startup, but the **connection is not**: an unreachable broker must never
+//!   stop this gateway from starting or from accepting commands (ADR-0006).
+//! - `APEX_CONTROL_FANOUT_INTERVAL_SECS` -- fanout tick, default 5 (1..=3600).
+//!   See `startup::env::DEFAULT_FANOUT_INTERVAL_SECS` for why 5.
+//! - `APEX_CONTROL_NATS_RETRY_ATTEMPTS` -- bounded publish retry ladder,
+//!   default 3 (1..=8), mirroring event-ingest's `APEX_RETRY_ATTEMPTS`.
 //! - `APEX_CONTROL_OPERATOR_TOKENS_FILE` (production) or
 //!   `APEX_CONTROL_OPERATOR_TOKENS` (local/lab, CI) -- operator credential
 //!   table: `token1|workspace/ns[,workspace/ns...];token2|*;...`. `*` grants

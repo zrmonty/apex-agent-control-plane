@@ -15,7 +15,11 @@ use apex_control_plane_api::{
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
-use super::env::{OperatorTokenSource, operator_token_source, path, required, resolve_bind_addr};
+use super::env::{
+    OperatorTokenSource, control_postgres_url, operator_token_source, path, required,
+    resolve_bind_addr,
+};
+use super::fanout::spawn_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
 /// PEM material ceiling, matching `event-ingest`'s own 1 MiB bound on the
@@ -128,7 +132,46 @@ fn build_operator_resolver(
     Ok(parse_operator_token_table(&raw)?)
 }
 
+/// Selects the durable outbox backend, mirroring `event-ingest`'s
+/// `open_durability_stores`: a URL selects Postgres, its absence selects the
+/// file backend, and a URL set on a binary built without `--features postgres`
+/// is a hard startup error rather than a silent downgrade to a single-writer
+/// file.
+///
+/// That last case is the one this function used to get wrong in the other
+/// direction. It unconditionally built a `FileOutbox`, so `--features postgres`
+/// changed nothing about the running binary -- it only forwarded the feature to
+/// `apex-event-ingest`. A deployment that believed it had a multi-writer
+/// backend had a single-writer one, which is exactly the assumption
+/// cross-replica work would have been built on top of.
 fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(url) = control_postgres_url()? {
+            // Reused verbatim from `event-ingest`, including its multi-replica
+            // fixes (advisory-locked schema DDL, `ON CONFLICT DO NOTHING` on
+            // the insert race, and `FOR UPDATE SKIP LOCKED` claim leases in
+            // `pending()`). See `env::control_postgres_url_value` for why this
+            // must be a different database or schema from the ingest
+            // gateway's, given both share the `apex_event_outbox` table name.
+            let outbox = apex_event_ingest::PostgresOutbox::connect(&url, OUTBOX_CAPACITY)
+                .map_err(|error| {
+                    format!("failed to open control outbox: {}", error.code.as_str())
+                })?;
+            println!("apex-control-plane-api outbox backend: postgres");
+            return Ok(ControlOutboxBackend::new(Box::new(outbox)));
+        }
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        if control_postgres_url()?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_CONTROL_POSTGRES_URL is set but this binary was not built with --features postgres",
+            )
+            .into());
+        }
+    }
     let outbox_base = PathBuf::from(
         std::env::var("APEX_CONTROL_OUTBOX_BASE")
             .unwrap_or_else(|_| "./data/control-outbox".to_owned()),
@@ -140,6 +183,7 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
     let file_outbox =
         apex_event_ingest::FileOutbox::open(&outbox_file, &outbox_base, OUTBOX_CAPACITY)
             .map_err(|error| format!("failed to open control outbox: {}", error.code.as_str()))?;
+    println!("apex-control-plane-api outbox backend: file");
     Ok(ControlOutboxBackend::new(Box::new(file_outbox)))
 }
 
@@ -155,6 +199,13 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let outbox = Arc::new(open_outbox()?);
     let resolver = build_operator_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
+    // Bound to a named variable, not `_`, and kept alive until `serve` returns:
+    // this is the only thing that turns a durably accepted command into an
+    // observable `control` event. Nothing on the accept path touches it --
+    // `ControlGatewayService` never sees the publisher -- so a JetStream
+    // outage delays `delivered` and defers the trace write without affecting
+    // whether a command is accepted (ADR-0006).
+    let _fanout_worker = spawn_control_fanout(Arc::clone(&outbox), &trusted_base)?;
     let service = ControlGatewayService::new(auth, outbox);
 
     println!("apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)");

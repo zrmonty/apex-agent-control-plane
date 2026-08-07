@@ -10,7 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::env::{
-    DEFAULT_BIND_ADDR, OperatorTokenSource, operator_token_source_value, resolve_bind_addr_value,
+    DEFAULT_BIND_ADDR, OperatorTokenSource, control_postgres_url_value, fanout_interval_value,
+    nats_retry_attempts_value, operator_token_source_value, resolve_bind_addr_value,
 };
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -193,6 +194,140 @@ fn trusted_secret_path_refuses_a_symlinked_secret() {
         return;
     }
     assert!(trusted_secret_path(&link, &root, 4096, false, "cert").is_err());
+}
+
+#[test]
+fn fanout_interval_defaults_to_the_ingest_replay_cadence_and_is_bounded() {
+    use std::time::Duration;
+
+    // Unset and empty both mean "the default", which is deliberately the same
+    // 5s `event-ingest`'s own outbox replay worker uses.
+    assert_eq!(
+        fanout_interval_value(None).unwrap(),
+        Duration::from_secs(5),
+        "the default must stay pinned to event-ingest's replay cadence"
+    );
+    assert_eq!(fanout_interval_value(Some("")).unwrap(), Duration::from_secs(5));
+    assert_eq!(fanout_interval_value(Some("1")).unwrap(), Duration::from_secs(1));
+    assert_eq!(
+        fanout_interval_value(Some("3600")).unwrap(),
+        Duration::from_secs(3600)
+    );
+
+    // Zero is the one that matters: a zero-interval sleep is a busy loop that
+    // would take and release the outbox mutex the accept path shares as fast
+    // as the scheduler allows.
+    assert!(fanout_interval_value(Some("0")).is_err());
+    assert!(fanout_interval_value(Some("3601")).is_err());
+    for bad in ["-1", "5s", "five", "1.5", " 5"] {
+        assert!(
+            fanout_interval_value(Some(bad)).is_err(),
+            "{bad:?} must not parse as a fanout interval"
+        );
+    }
+}
+
+#[test]
+fn nats_retry_attempts_matches_the_transport_ceiling() {
+    assert_eq!(nats_retry_attempts_value(None).unwrap(), 3);
+    assert_eq!(nats_retry_attempts_value(Some("")).unwrap(), 3);
+    assert_eq!(nats_retry_attempts_value(Some("1")).unwrap(), 1);
+    // 8 is `RetryingJetStreamTransport::new`'s own hard ceiling; anything the
+    // env accepts past it would be refused later, at first publish, as an
+    // opaque INVALID_RETRY_CONFIGURATION rather than at startup.
+    assert_eq!(nats_retry_attempts_value(Some("8")).unwrap(), 8);
+    assert!(nats_retry_attempts_value(Some("0")).is_err());
+    assert!(nats_retry_attempts_value(Some("9")).is_err());
+    assert!(nats_retry_attempts_value(Some("three")).is_err());
+}
+
+#[test]
+fn control_postgres_url_is_this_crate_s_own_variable() {
+    assert_eq!(control_postgres_url_value(None, None).unwrap(), None);
+    assert_eq!(
+        control_postgres_url_value(Some("postgres://apex@db/control"), None).unwrap(),
+        Some("postgres://apex@db/control".to_owned())
+    );
+
+    // `apex_event_ingest::PostgresOutbox` hardcodes the `apex_event_outbox`
+    // table name, so honouring event-ingest's variable here would silently
+    // point the control gateway at the ingest gateway's outbox table -- where
+    // each service's replay worker would claim and republish the other's rows
+    // through its own sinks. Both of these must fail closed.
+    assert!(control_postgres_url_value(None, Some("postgres://apex@db/apex")).is_err());
+    assert!(
+        control_postgres_url_value(
+            Some("postgres://apex@db/control"),
+            Some("postgres://apex@db/apex")
+        )
+        .is_err()
+    );
+}
+
+/// The fanout worker runs as a tokio task, and
+/// `AsyncNatsJetStreamClient::connect` bottoms out in `Runtime::block_on`,
+/// which **panics** when the calling thread already has a runtime entered.
+/// Building the client inline in the worker would therefore look correct,
+/// compile, pass every in-process test that never spawns the worker on a real
+/// runtime -- and abort on the first tick inside the container.
+///
+/// This drives the real publisher from inside a real multi-thread runtime,
+/// against a broker that does not exist, and asserts the call *returns an
+/// error*. A regression that connects on the runtime thread fails this as a
+/// panic rather than as an assertion, which is the point.
+#[cfg(feature = "test-support")]
+#[test]
+fn lazy_jetstream_publisher_connects_without_panicking_inside_the_worker_runtime() {
+    use apex_event_ingest::{EventPublisher, IngestRequest, NatsTlsConfig};
+
+    use super::fanout::LazyJetStreamPublisher;
+
+    let base = scratch("lazy-publisher");
+    for name in ["ca.pem", "client.pem", "client.key"] {
+        fs::write(base.join(name), b"-----BEGIN CERTIFICATE-----\nnot-real\n").unwrap();
+    }
+    let key = base.join("client.key").canonicalize().unwrap();
+    if !apex_event_ingest::permissions::private_key_permissions_restricted(&key) {
+        // Same reason the symlink case skips: the host's default file ACL is
+        // not what this test is about, and `NatsTlsConfig::validated` would
+        // refuse the key before any connection is attempted.
+        eprintln!("skip lazy publisher case: this host's default key permissions are too broad");
+        return;
+    }
+    let config = NatsTlsConfig {
+        // Port 1 on loopback: refused immediately rather than after the 5s
+        // connect timeout, so this stays a fast unit test.
+        server_url: "tls://127.0.0.1:1".to_owned(),
+        ca_file: base.join("ca.pem"),
+        client_cert_file: base.join("client.pem"),
+        client_key_file: key,
+        username_file: None,
+        password_file: None,
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let outcome = runtime.block_on(async move {
+        let mut publisher = LazyJetStreamPublisher::new(config, base.clone(), 3);
+        let request = IngestRequest::new(
+            "018f0000-0000-7000-8000-000000000000",
+            "acme",
+            "prod",
+            vec![1, 2, 3],
+        );
+        tokio::spawn(async move { publisher.publish(&request) })
+            .await
+            .expect("the publish task must not panic")
+    });
+    // An error, not a success: the row stays pending and the worker retries,
+    // which is exactly the degraded-fanout behaviour ADR-0006 requires.
+    assert!(
+        outcome.is_err(),
+        "an unreachable broker must surface as a deferred publish, not a success"
+    );
 }
 
 #[cfg(unix)]

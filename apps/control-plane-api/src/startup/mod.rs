@@ -3,6 +3,7 @@
 //! `apps/event-ingest/src/startup/`.
 
 mod env;
+mod fanout;
 mod secrets;
 mod service;
 
