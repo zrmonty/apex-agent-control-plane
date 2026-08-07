@@ -80,3 +80,4 @@ deploy/compose/live-mtls/secrets-host/
 .impeccable/sketches/
 *.orig
 *.rej
+deploy/compose/live-mtls/adversarial/

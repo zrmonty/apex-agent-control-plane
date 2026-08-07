@@ -63,5 +63,12 @@ name = "live_mtls"
 path = "tests/live_mtls.rs"
 required-features = ["test-support"]
 
+# Adversarial data-admission corpus against a running gateway. Skips itself
+# unless APEX_ADVERSARIAL_GATEWAY points at one, so offline CI stays green.
+[[test]]
+name = "adversarial_ingest"
+path = "tests/adversarial_ingest.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unsafe_code = "forbid"
