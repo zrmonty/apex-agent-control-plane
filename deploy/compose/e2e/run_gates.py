@@ -30,6 +30,9 @@ COMPOSE = REPO / "deploy" / "compose"
 LIVE = COMPOSE / "live-mtls"
 INGEST = REPO / "apps" / "event-ingest"
 DEFAULT_REPORT = REPO / ".local" / "apex-lab" / "gate-report.json"
+# Distinct from the compose file's own `name:` so the gate never tears down a
+# gateway stack an operator is running by hand.
+GATEWAY_PROJECT = "apex-gateway-ref-gate"
 
 
 def run(
@@ -258,6 +261,106 @@ def main() -> int:
         gate("live_mtls_rust_tests", False, "cargo not on PATH", required=False)
         gate("postgres_durability", False, "cargo not on PATH", required=False)
 
+    # ------------------------------------------------------------------
+    # Gateway image: build it, start it, and drive a real request through it.
+    #
+    # Everything above validates the gateway profile with `docker compose
+    # config`, which parses YAML and never builds or starts anything. That is
+    # why a Dockerfile that could not produce an image, a binary that panicked
+    # before binding a listener, a data volume the runtime uid could not write,
+    # secret material the gateway refuses by policy, and a missing JetStream
+    # stream all survived: every other test drives the gateway in-process as a
+    # library. These gates exercise the real image end to end.
+    # ------------------------------------------------------------------
+    gateway_env = {
+        "APEX_BEARER_CERT_SHA256": client_fp or ("0" * 64),
+        "APEX_PROVIDER_CLIENT_CERT_SHA256": client_fp or ("0" * 64),
+    }
+    gateway_project = ["-p", GATEWAY_PROJECT, "-f", "compose.gateway-ref.yaml"]
+    run(
+        ["docker", "compose", *gateway_project, "down", "-v", "--remove-orphans"],
+        cwd=COMPOSE,
+        env=gateway_env,
+        timeout=180,
+    )
+    code, out = run(
+        ["docker", "compose", *gateway_project, "build", "ingest-gateway"],
+        cwd=COMPOSE,
+        env=gateway_env,
+        timeout=2400,
+    )
+    gate("gateway_image_build", code == 0, out, required=True)
+    gateway_built = code == 0
+
+    gateway_up = False
+    if gateway_built:
+        code, out = run(
+            ["docker", "compose", *gateway_project, "up", "-d", "--force-recreate"],
+            cwd=COMPOSE,
+            env=gateway_env,
+            timeout=600,
+        )
+        if code == 0:
+            ready, detail = _wait_for_gateway(COMPOSE, gateway_project, gateway_env)
+            gateway_up = ready
+            gate("gateway_container_starts", ready, out + "\n" + detail, required=True)
+        else:
+            gate("gateway_container_starts", False, out, required=True)
+    else:
+        gate("gateway_container_starts", False, "image build failed", required=True)
+
+    # A serving listener is not proof that the service works. Drive the
+    # committed adversarial corpus against the container: it sends real gRPC
+    # over real mTLS and then queries ClickHouse and the archive directly, so
+    # the happy path must actually land exactly once and every adversarial
+    # input must land nowhere.
+    if gateway_up and cargo_ok:
+        run(
+            [
+                sys.executable,
+                str(COMPOSE / "e2e" / "generate_adversarial_pki.py"),
+            ],
+            cwd=LIVE,
+            timeout=180,
+        )
+        adversarial_env = {
+            "APEX_ADVERSARIAL_GATEWAY": "https://localhost:18445",
+            "APEX_ADVERSARIAL_SECRETS": secrets,
+            "APEX_ADVERSARIAL_PKI": str(LIVE / "adversarial"),
+            "APEX_ADVERSARIAL_CH_CONTAINER": f"{GATEWAY_PROJECT}-clickhouse-projection-1",
+            "APEX_ADVERSARIAL_ARCHIVE_CONTAINER": f"{GATEWAY_PROJECT}-archive-provider-1",
+        }
+        code, out = run(
+            [
+                "cargo",
+                "test",
+                "--test",
+                "adversarial_ingest",
+                "--features",
+                "test-support",
+                "--",
+                "--test-threads=1",
+            ],
+            cwd=INGEST,
+            env=adversarial_env,
+            timeout=1200,
+        )
+        gate("gateway_adversarial_corpus", code == 0, out, required=True)
+    else:
+        gate(
+            "gateway_adversarial_corpus",
+            False,
+            "gateway container not serving" if not gateway_up else "cargo not on PATH",
+            required=gateway_up,
+        )
+
+    run(
+        ["docker", "compose", *gateway_project, "down", "-v", "--remove-orphans"],
+        cwd=COMPOSE,
+        env=gateway_env,
+        timeout=180,
+    )
+
     # Object-Lock MinIO
     minio_env = {
         "MINIO_ENDPOINT": "http://127.0.0.1:19000",
@@ -348,6 +451,53 @@ def main() -> int:
     print("GATE_REPORT", report_path)
     print("OVERALL", "PASS" if overall_ok else "FAIL")
     return 0 if overall_ok else 1
+
+
+def _wait_for_gateway(
+    compose_dir: Path,
+    project: list[str],
+    env: dict[str, str],
+    attempts: int = 60,
+) -> tuple[bool, str]:
+    """Waits until the gateway container is serving TLS on its published port.
+
+    Checks the container state as well as the socket: a crash-looping container
+    can still leave a bound port from a previous incarnation, and an exited
+    container must be reported as a failure rather than a timeout.
+    """
+    import socket
+
+    last = ""
+    for attempt in range(1, attempts + 1):
+        code, out = run(
+            ["docker", "compose", *project, "ps", "-a", "--format", "{{.Name}} {{.State}}"],
+            cwd=compose_dir,
+            env=env,
+            timeout=60,
+        )
+        last = out
+        for line in out.splitlines():
+            if "ingest-gateway" in line and "exited" in line.lower():
+                _, logs = run(
+                    ["docker", "compose", *project, "logs", "--no-color", "ingest-gateway"],
+                    cwd=compose_dir,
+                    env=env,
+                    timeout=60,
+                )
+                return False, f"gateway container exited:\n{out}\n{logs}"
+        try:
+            with socket.create_connection(("127.0.0.1", 18445), timeout=2):
+                return True, f"gateway serving on 127.0.0.1:18445 after {attempt} attempt(s)"
+        except OSError as exc:
+            last = f"{out}\nconnect: {exc}"
+        time.sleep(2)
+    _, logs = run(
+        ["docker", "compose", *project, "logs", "--no-color", "--tail", "80"],
+        cwd=compose_dir,
+        env=env,
+        timeout=60,
+    )
+    return False, f"{last}\n{logs}"
 
 
 def _write(path: Path, results: list[dict], overall_ok: bool) -> None:

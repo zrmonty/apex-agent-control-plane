@@ -172,6 +172,60 @@ jobs:
           python object_lock_acceptance_azure.py
           python object_lock_acceptance_gcs.py
 
+      # `docker compose config` parses YAML. It never builds an image and never
+      # starts a process, which is why a Dockerfile that could not build, a
+      # binary that panicked before binding a listener, an unwritable data
+      # volume, secret material the gateway refuses by policy, and a missing
+      # JetStream stream all reached main. Every other test drives the gateway
+      # in-process as a library. This job builds the real image and drives real
+      # gRPC through the running container.
+      - name: Build and smoke-start the gateway image
+        working-directory: deploy/compose
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
+          export APEX_BEARER_CERT_SHA256="$FP"
+          export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          docker compose $P down -v --remove-orphans || true
+          docker compose $P build ingest-gateway
+          docker compose $P up -d --force-recreate
+          for attempt in $(seq 1 90); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep ingest-gateway || true)"
+            case "$state" in
+              *exited*)
+                echo "gateway container exited: $state" >&2
+                docker compose $P logs --no-color ingest-gateway >&2
+                exit 1
+                ;;
+            esac
+            if (echo > /dev/tcp/127.0.0.1/18445) >/dev/null 2>&1; then
+              echo "gateway serving on 127.0.0.1:18445 (attempt $attempt)"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose $P ps -a >&2
+          docker compose $P logs --no-color --tail 120 >&2
+          echo "gateway never began serving" >&2
+          exit 1
+
+      - name: Adversarial corpus against the running container
+        working-directory: apps/event-ingest
+        timeout-minutes: 25
+        env:
+          APEX_ADVERSARIAL_GATEWAY: https://localhost:18445
+          APEX_ADVERSARIAL_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+          APEX_ADVERSARIAL_PKI: ${{ github.workspace }}/deploy/compose/live-mtls/adversarial
+          APEX_ADVERSARIAL_CH_CONTAINER: apex-gateway-ref-ci-clickhouse-projection-1
+          APEX_ADVERSARIAL_ARCHIVE_CONTAINER: apex-gateway-ref-ci-archive-provider-1
+        run: |
+          set -euo pipefail
+          python "${GITHUB_WORKSPACE}/deploy/compose/e2e/generate_adversarial_pki.py" \
+            --out "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial"
+          cargo test --test adversarial_ingest --features test-support -- --test-threads=1
+
       - name: Validate compose overlays (config only)
         working-directory: deploy/compose
         run: |
@@ -223,3 +277,4 @@ jobs:
           docker compose -f deploy/compose/live-mtls/compose.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true
+          docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml down -v --remove-orphans || true
