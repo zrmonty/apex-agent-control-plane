@@ -565,6 +565,36 @@ jobs:
             --out "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial"
           cargo test --test adversarial_ingest --features test-support -- --test-threads=1
 
+      # Tripwire, not a performance gate. The measured baseline on a developer
+      # workstation is ~87-92 accepted events/sec at a 116/s offering (see
+      # docs/phase-0.6-load-baseline.md); the floor here is set far below that
+      # so ordinary runner variance cannot fail the build, and it only catches
+      # a change that obviously breaks throughput -- a lost connection pool, a
+      # newly synchronous call in the request path, an fsync per field.
+      #
+      # A strict per-commit performance gate is deliberately absent: throughput
+      # on a shared runner varies by more than the regressions worth catching,
+      # and a gate that fails on noise gets disabled.
+      #
+      # Runs last against the gateway-ref container, after the adversarial
+      # corpus, because it commits a few thousand events into `acme/prod` and
+      # the file idempotency journal caps a single scope at 3,125 keys.
+      - name: Ingest throughput smoke check
+        working-directory: apps/event-ingest
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo run --release --bin apex-load-baseline --features test-support -- \
+            --endpoint https://localhost:18445 \
+            --secrets "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/secrets-host" \
+            --scenario sustained \
+            --clients 4 \
+            --sustained-rate 60 \
+            --sustained-secs 10 \
+            --min-accepted-per-sec 15 \
+            --json /tmp/apex-load-smoke.json
+          cat /tmp/apex-load-smoke.json
+
       - name: Validate compose overlays (config only)
         working-directory: deploy/compose
         run: |

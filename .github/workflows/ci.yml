@@ -51,6 +51,15 @@ jobs:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
         run: cargo check --locked --features "valkey,postgres"
+      # The load harness is not built by `--lib` above, is excluded from a
+      # default `cargo build` by `required-features`, and never enters the
+      # runtime image, so nothing else here would notice it stop compiling.
+      # The crate is already built in this job, so this costs seconds.
+      - name: Check the load-baseline harness
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo check --locked --bin apex-load-baseline --features test-support
       - name: Clippy
         env:
           CARGO_NET_RETRY: "10"

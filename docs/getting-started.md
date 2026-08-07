@@ -339,6 +339,7 @@ Do you need a regulated or pinned production deploy?
 |-------|----------|
 | Lab installer | [deploy/lab/README.md](../deploy/lab/README.md) |
 | Phase 0 status | [phase-0-progress.md](phase-0-progress.md) |
+| Ingest load baseline | [phase-0.6-load-baseline.md](phase-0.6-load-baseline.md) |
 | External agent to ingest | [how-to-external-event-ingestion.md](how-to-external-event-ingestion.md) |
 | Secure integration design | [architecture/Frictionless Secure Agent Integration.md](architecture/Frictionless%20Secure%20Agent%20Integration.md) |
 | Compose and overlays | [deploy/compose/README.md](../deploy/compose/README.md) |

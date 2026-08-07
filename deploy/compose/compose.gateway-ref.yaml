@@ -152,6 +152,45 @@ services:
       - nats_username
       - nats_password
 
+  # Times each downstream ingest dependency from a peer container on this
+  # network, with the same client identities the gateway uses. The
+  # `apex-load-baseline` harness measures the gateway from outside and can
+  # separate admission from fanout, but it cannot split the fanout band itself
+  # -- the gateway emits no per-stage timing, and instrumenting its request
+  # path would be remediation rather than measurement. This closes that gap
+  # without touching the gateway. See docs/phase-0.6-load-baseline.md.
+  #
+  # Behind a Compose profile, so a normal `up` never starts it; `docker compose
+  # run` enables the profile for the named service by itself:
+  #
+  #   docker compose -p <project> -f compose.gateway-ref.yaml \
+  #     run --rm --no-deps loadtest-stage-probe
+  loadtest-stage-probe:
+    profiles: ["loadtest"]
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    working_dir: /app
+    command: ["python", "/app/loadtest/stage_probe.py"]
+    volumes:
+      - ./loadtest:/app/loadtest:ro
+    networks: [gateway-ref]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets:
+      - ca
+      # The gateway presents this same leaf to both HTTP sinks, so the probe
+      # measures what an authorized writer sees, not an unpinned bypass.
+      - ingest_http_client_cert
+      - source: ingest_http_client_key
+        target: ingest_http_client_key
+      - ingest_nats_client_cert
+      - source: ingest_nats_client_key
+        target: ingest_nats_client_key
+      - nats_username
+      - nats_password
+
   clickhouse-projection:
     image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app

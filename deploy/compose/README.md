@@ -59,6 +59,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/gateway-ref/r
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/e2e/run.ps1
 ```
 
+### Ingest load baseline
+
+`loadtest/run_load_baseline.py` measures real throughput and per-stage latency against the built gateway image. It starts `compose.gateway-ref.yaml` under its own Compose project (`apex-gateway-loadtest`, host port 18455), drives real gRPC over mTLS at the container, and tears the stack down again.
+
+```bash
+python deploy/compose/loadtest/run_load_baseline.py
+```
+
+Add `--quick` for a smoke run, `--skip-build` to reuse the current image, `--keep-up` to leave the stack running. The `loadtest-stage-probe` service (Compose profile `loadtest`, so a normal `up` never starts it) times each downstream dependency from a peer container. Results and method: [docs/phase-0.6-load-baseline.md](../../docs/phase-0.6-load-baseline.md).
+
 ## What this profile starts
 
 This profile starts the Phase 0 ingest gateway and durable dependencies: NATS JetStream, ClickHouse, and an S3-compatible archive staging store.

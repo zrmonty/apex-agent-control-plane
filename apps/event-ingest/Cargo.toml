@@ -53,6 +53,16 @@ valkey = ["dep:redis"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
 postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pki-types", "dep:uuid"]
 
+# Throughput / per-stage latency harness driven at a *live* gateway container
+# (Phase 0.6 work item 1 -- see docs/phase-0.6-load-baseline.md). It is a gRPC
+# client, not a shipped service: `required-features` keeps it out of a default
+# `cargo build`, and apps/event-ingest/Dockerfile builds `--bin
+# apex-event-ingest` explicitly, so it never enters the runtime image.
+[[bin]]
+name = "apex-load-baseline"
+path = "src/bin/load_baseline.rs"
+required-features = ["test-support"]
+
 [[test]]
 name = "gateway"
 path = "tests/gateway.rs"
