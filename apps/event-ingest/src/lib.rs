@@ -1,6 +1,11 @@
 //! Phase 0 ingest admission boundary. Transport adapters translate `GatewayError`
 //! into tonic status values without exposing caller or payload contents.
 
+// Declared before `proto`: the generated code names `crate::RedactedProstCodec`
+// (see build.rs `codec_path`), so the codec must be in scope at the crate root.
+mod codec;
+pub use codec::{RedactedProstCodec, RedactedProstDecoder, RedactedProstEncoder};
+
 pub mod proto {
     tonic::include_proto!("apex.v1");
 }

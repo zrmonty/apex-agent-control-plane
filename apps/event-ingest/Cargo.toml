@@ -84,5 +84,12 @@ name = "gateway_kill"
 path = "tests/gateway_kill.rs"
 required-features = ["test-support"]
 
+# Stops and blackholes the Valkey accelerator under load. Opt-in via
+# APEX_VALKEY_OUTAGE=1; needs a gateway built with --features valkey.
+[[test]]
+name = "ephemeral_outage"
+path = "tests/ephemeral_outage.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unsafe_code = "forbid"

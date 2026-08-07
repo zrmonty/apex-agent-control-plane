@@ -292,6 +292,18 @@ def main() -> int:
     gate("gateway_image_build", code == 0, out, required=True)
     gateway_built = code == 0
 
+    # The optional-feature build is a separate artifact and broke separately:
+    # `--features postgres` compiles deploy/postgres/*.sql via include_str!, so
+    # a build context that omits that directory fails outright and no image
+    # with the Postgres backends could be produced at all.
+    code, out = run(
+        ["docker", "compose", *gateway_project, "build", "ingest-gateway"],
+        cwd=COMPOSE,
+        env={**gateway_env, "GATEWAY_CARGO_FEATURES": "valkey,postgres"},
+        timeout=2400,
+    )
+    gate("gateway_image_build_optional_features", code == 0, out, required=True)
+
     gateway_up = False
     if gateway_built:
         code, out = run(

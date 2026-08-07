@@ -754,17 +754,25 @@ fn oversized_and_deeply_nested_payloads_are_rejected() {
         envelope.data.as_mut().unwrap().fields.insert("deep".to_owned(), deepest);
         envelope.integrity.as_mut().unwrap().event_hash = "e".repeat(64);
         let status = send_envelope(&channel, envelope).await.expect_err("deep nesting must be rejected");
-        // Fail-closed either way, but note WHERE it fails: prost's decoder hits
-        // its own recursion limit before the envelope ever reaches the
-        // gateway's MAX_STRUCT_DEPTH check, so tonic reports `Internal` with a
-        // verbose decoder message instead of routing through the gateway's
-        // redacted `InvalidArgument` table. Accepted here because nothing
-        // lands; tracked as a diagnostics finding, since `Internal` reads as a
-        // server fault and is commonly retried by clients.
-        assert!(
-            matches!(status.code(), tonic::Code::InvalidArgument | tonic::Code::Internal),
-            "deep nesting: unexpected {status:?}"
+        // prost's decoder hits its own recursion limit before the envelope ever
+        // reaches the gateway's MAX_STRUCT_DEPTH check, so this rejection is
+        // produced entirely inside the codec. It must still land in the
+        // gateway's error contract: `InvalidArgument`, not the `Internal` that
+        // tonic_prost::ProstCodec produces by default. `Internal` reads as a
+        // server fault and is widely retried, so a client with a deterministic
+        // bad payload would resend it forever. See src/codec.rs.
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "deep nesting must be caller error, not a retryable server fault: {status:?}"
         );
+        for leak in ["EventEnvelope", "Struct.fields", "struct_value", "recursion limit"] {
+            assert!(
+                !status.message().contains(leak),
+                "deep nesting leaked decoder internals ({leak}): {}",
+                status.message()
+            );
+        }
         assert_nothing_landed("200-level nested Struct", &id);
     });
 }

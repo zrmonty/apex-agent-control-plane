@@ -133,6 +133,27 @@ Storage contracts: [deploy/clickhouse/schema.sql](deploy/clickhouse/schema.sql),
 
 External agent procedure: [How to connect an external agent for event ingestion](docs/how-to-external-event-ingestion.md).
 
+## Docker images
+
+Apex runs as several small containers. No image does more than one job. The definitive topology is [deploy/compose/compose.yaml](deploy/compose/compose.yaml); this table explains what each service does and why it exists.
+
+| Service | Built from | What it handles |
+|---|---|---|
+| `ingest-gateway` | `apps/event-ingest/Dockerfile` (Rust) | The only entry point for agent events. Terminates gRPC and mTLS. Authenticates the caller. Validates and canonicalizes each event, writes it to a durable local outbox, then fans it out to JetStream, the ClickHouse projection, and the archive, all before acknowledging the caller. This full chain currently runs synchronously per event and single-flight process-wide — a known throughput limit; a future pass moves fanout to a background worker pool decoupled from admission. |
+| `jetstream` | Approved NATS image | The durable event backbone between the gateway and its consumers. Holds events so a slow or restarting consumer does not lose data. |
+| `clickhouse` | Approved ClickHouse image | Stores the queryable event table. Nothing writes to it directly except the `clickhouse-projection` service. |
+| `clickhouse-projection` | `apps/reference-providers/Dockerfile` (Python), run in `clickhouse_projection` mode | A narrow write API in front of ClickHouse. Accepts an event only over mTLS from the one pinned client certificate the ingest gateway presents. Refuses every other caller. |
+| `archive-provider` | The same `apps/reference-providers/Dockerfile`, run in `archive_provider` mode instead | The compliance write path. Accepts one event per object, applies Object-Lock retention, and reads the object back to confirm the write and the lock both took effect before acknowledging. Refuses to overwrite or accept an unlocked write. |
+| `archive-store` | Approved MinIO (or other S3-compatible) image | The object storage backing the archive. Holds the actual immutable event objects. |
+| `archive-store-init` | Approved MinIO client (`mc`) image | Runs once, before anything else writes. Creates the archive bucket with Object-Lock enabled and verifies retention is actually active. Exits; does not stay running. |
+| `valkey` *(optional overlay)* | Approved Valkey image | Accelerates rate-limit and abuse-counter checks across gateway restarts. Never the source of truth for authorization, audit, or durable events — the gateway keeps working correctly if this is absent. |
+
+`clickhouse-projection` and `archive-provider` are the same built image, `apex-reference-providers`, given different roles by the command-line subcommand each service passes at startup (`clickhouse_projection` or `archive_provider`) — not two separate codebases to maintain.
+
+Every service above drops all Linux capabilities and mounts its filesystem read-only except for an explicit data volume or `/tmp`. `ingest-gateway` also runs as a fixed non-root UID (`apps/event-ingest/Dockerfile`). `clickhouse-projection` and `archive-provider` do not: `apps/reference-providers/Dockerfile` has no `USER` directive and `compose.yaml` does not override it, so both currently run as root — a known hardening gap, not a deliberate choice, worth closing before either is treated as production-hardened rather than a reference implementation. Every service-to-service link is mTLS regardless; `clickhouse-projection` and `archive-provider` pin the exact client certificate fingerprint they accept and fail closed on anything else. See [Security and regulated deployment posture](#security-and-regulated-deployment-posture).
+
+Two more services are planned but not yet packaged as images: the out-of-band control gateway (`apps/control-plane-api`) and the operator UI (`apps/operator-ui`) both run today as a bare binary or a local dev server, not a container. See [Phase 0.5 progress](docs/phase-0.5-progress.md) for what is left before the control gateway gets its own `Dockerfile` and Compose entry.
+
 ## Design principles
 
 1. **Secure by default.** Deny-by-default authorization. Workload identity. Encrypted transport. Minimal capture. Auditable decisions. Safe display of untrusted content.

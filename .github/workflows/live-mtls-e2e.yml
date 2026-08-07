@@ -190,6 +190,13 @@ jobs:
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
           docker compose $P down -v --remove-orphans || true
           docker compose $P build ingest-gateway
+          # The optional-feature build is a separate artifact and broke
+          # separately: --features postgres compiles deploy/postgres/*.sql via
+          # include_str!, so a context omitting that directory fails outright
+          # and no image with the Postgres backends could be produced at all.
+          GATEWAY_CARGO_FEATURES=valkey,postgres docker compose $P build ingest-gateway
+          # Serve the default-feature image.
+          docker compose $P build ingest-gateway
           docker compose $P up -d --force-recreate
           for attempt in $(seq 1 90); do
             state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep ingest-gateway || true)"

@@ -22,6 +22,15 @@ WORKDIR /src
 # and a host `target/` directory cannot leak into the container build.
 COPY apps/event-ingest ./apps/event-ingest
 COPY contracts ./contracts
+# `--features postgres` compiles deploy/postgres/*.sql into the binary with
+# include_str!. Without this the documented feature build fails outright:
+#
+#   error: couldn't read `src/outbox/../../../../deploy/postgres/outbox.sql`
+#
+# which meant no image could ever be produced with the Postgres backends --
+# the multi-process outbox and idempotency authority that compose.yaml's
+# production profile is built around.
+COPY deploy/postgres ./deploy/postgres
 WORKDIR /src/apps/event-ingest
 ARG CARGO_FEATURES=
 RUN if [ -n "$CARGO_FEATURES" ]; then \
