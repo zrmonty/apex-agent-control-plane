@@ -98,6 +98,24 @@ fn operator_identity() -> Identity {
     )
 }
 
+/// The *ingest* workload's client certificate and bearer token, i.e. the
+/// credential set that authenticates against the data path.
+fn ingest_workload_credential() -> Option<(Identity, String)> {
+    let root = secrets_dir();
+    if !root.join("ingest-http-client.pem").is_file() {
+        return None;
+    }
+    let identity = Identity::from_pem(
+        require_secret(&root, "ingest-http-client.pem"),
+        require_secret(&root, "ingest-http-client.key"),
+    );
+    let token = match std::fs::read(root.join("ingest-bearer-token")) {
+        Ok(bytes) => String::from_utf8(bytes).ok()?.trim().to_owned(),
+        Err(_) => "gateway-ref-token".to_owned(),
+    };
+    Some((identity, token))
+}
+
 fn rogue_identity() -> Option<Identity> {
     let root = adversarial_dir();
     if !root.join("wrong-ca-client.pem").is_file() {
@@ -245,6 +263,45 @@ async fn rejects_a_client_with_no_certificate() {
             panic!("a certificate-less client reached the application layer: {status}")
         }
         Attempt::Accepted(_) => panic!("a command was accepted without a client certificate"),
+    }
+}
+
+/// ADR-0006 requires the control channel to be independently authenticated
+/// from the ingest data path: "an ingest workload token is not accepted here
+/// and vice versa". The unit tests assert that about the resolver; this
+/// asserts it about the two credentials a real deployment actually issues,
+/// against the running service.
+///
+/// In this lab profile both leaves chain to the same CA, so the certificate
+/// alone gets through the handshake -- which is what makes this test about
+/// the credential boundary rather than the transport one. A production
+/// deployment additionally separates the CAs (CONTROL_CLIENT_CA_FILE vs
+/// GATEWAY_CLIENT_CA_FILE in deploy/compose/compose.yaml), so there the same
+/// attempt would not survive the handshake either.
+#[tokio::test]
+async fn rejects_an_ingest_workload_credential() {
+    if !live_enabled() {
+        eprintln!("skip live control mTLS: set APEX_CONTROL_LIVE_MTLS=1");
+        return;
+    }
+    apex_control_plane_api::install_rustls_provider();
+    let Some((identity, ingest_token)) = ingest_workload_credential() else {
+        panic!(
+            "missing ingest workload fixtures under {}; run generate_pki.py",
+            secrets_dir().display()
+        );
+    };
+    match attempt(Some(identity), Some(&ingest_token))
+        .await
+        .expect("attempt must complete")
+    {
+        Attempt::Status(status) => assert_eq!(status.code(), tonic::Code::Unauthenticated),
+        Attempt::Transport(error) => {
+            eprintln!("ingest workload credential refused at transport: {error}")
+        }
+        Attempt::Accepted(_) => {
+            panic!("an ingest workload credential submitted a control command")
+        }
     }
 }
 

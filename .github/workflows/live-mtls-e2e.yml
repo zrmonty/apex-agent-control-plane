@@ -45,6 +45,13 @@ jobs:
           # dev environment, a native Linux runner actually enforces chmod 0600, so
           # this only ever failed on GitHub Actions, never reproduced locally.
           chmod 644 secrets/nats-username secrets/nats-password 2>/dev/null || true
+          # Same class of failure, same fix, for the control gateway: the
+          # operator token table is written 0600 owned by the runner, and
+          # control-secrets-init runs as uid 10002, so it cannot read the
+          # bind-mounted host file without this. The staged copy inside the
+          # container is chmod 0600 by that init step, and the gateway's own
+          # permission check still fails closed if the step is skipped.
+          chmod 644 secrets/control-operator-tokens 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
@@ -203,7 +210,13 @@ jobs:
           GATEWAY_CARGO_FEATURES=valkey,postgres docker compose $P build ingest-gateway
           # Serve the default-feature image.
           docker compose $P build ingest-gateway
-          docker compose $P up -d --force-recreate
+          # Named explicitly rather than bare `up -d`. This profile now also
+          # defines the control gateway and its own secrets-init, and a bare
+          # `up -d` would start those here too -- so a control-side init
+          # failure would fail *this* step, under the gateway's name, with
+          # only the gateway's logs printed. Compose still starts everything
+          # ingest-gateway depends_on.
+          docker compose $P up -d --force-recreate ingest-gateway
           for attempt in $(seq 1 90); do
             state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep ingest-gateway || true)"
             case "$state" in
@@ -223,6 +236,76 @@ jobs:
           docker compose $P logs --no-color --tail 120 >&2
           echo "gateway never began serving" >&2
           exit 1
+
+      # Same reasoning as the gateway step above, for the service that had none
+      # of it: apps/control-plane-api shipped with no Dockerfile and no Compose
+      # entry at all, so nothing anywhere proved its image could build, its
+      # binary could bind, or its container could write its outbox volume.
+      # `docker compose config` in the overlay-validation step below would
+      # happily pass on a Dockerfile that does not compile.
+      - name: Build and smoke-start the control gateway image
+        working-directory: deploy/compose
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          docker compose $P build control-plane-api
+          # The optional-feature build is a separate artifact that can break
+          # separately: --features postgres forwards to
+          # apex-event-ingest/postgres, which compiles deploy/postgres/*.sql
+          # via include_str!, so a build context omitting that directory fails
+          # outright -- exactly how it broke for event-ingest.
+          CONTROL_CARGO_FEATURES=postgres docker compose $P build control-plane-api
+          # Serve the default-feature image.
+          docker compose $P build control-plane-api
+          docker compose $P up -d --force-recreate control-plane-api
+          for attempt in $(seq 1 90); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep control-plane-api || true)"
+            case "$state" in
+              *exited*)
+                echo "control gateway container exited: $state" >&2
+                docker compose $P logs --no-color control-secrets-init control-plane-api >&2
+                exit 1
+                ;;
+            esac
+            if (echo > /dev/tcp/127.0.0.1/18446) >/dev/null 2>&1; then
+              echo "control gateway serving on 127.0.0.1:18446 (attempt $attempt)"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose $P ps -a >&2
+          docker compose $P logs --no-color --tail 120 control-secrets-init control-plane-api >&2
+          echo "control gateway never began serving" >&2
+          exit 1
+
+      # An open TCP port only proves the process bound one. These drive real
+      # gRPC over real mTLS and, critically, prove the negative cases: a client
+      # with no certificate and a client holding a certificate from an
+      # untrusted CA must both be stopped at the handshake, while a trusted
+      # certificate with no operator token must reach the application and come
+      # back Unauthenticated. Nothing else in CI can catch a TLS gate that
+      # silently made client certificates optional -- every other test drives
+      # the service in-process, where ServerTlsConfig is never built at all.
+      - name: Live control-gateway mTLS tests
+        working-directory: apps/control-plane-api
+        timeout-minutes: 15
+        env:
+          APEX_CONTROL_LIVE_MTLS: "1"
+          APEX_CONTROL_LIVE_ENDPOINT: https://localhost:18446
+          # Host-restricted tree (0600 keys); Docker still mounts secrets/.
+          APEX_CONTROL_LIVE_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+          APEX_CONTROL_LIVE_ADVERSARIAL_PKI: ${{ github.workspace }}/deploy/compose/live-mtls/adversarial
+        run: |
+          set -euo pipefail
+          # The adversarial step below regenerates these unconditionally; mint
+          # them here only if absent, so this gate does not have to wait on a
+          # 25-minute step to learn whether the TLS boundary holds.
+          if [ ! -f "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial/wrong-ca-client.pem" ]; then
+            python "${GITHUB_WORKSPACE}/deploy/compose/e2e/generate_adversarial_pki.py" \
+              --out "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial"
+          fi
+          cargo test --test live_control_mtls -- --nocapture --test-threads=1
 
       - name: Adversarial corpus against the running container
         working-directory: apps/event-ingest
