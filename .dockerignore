@@ -1,0 +1,25 @@
+# The event-ingest image builds from the repository root (build.rs needs
+# contracts/), so keep host build output, secrets, and unrelated trees out of
+# the build context.
+**/target/
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+.git/
+.github/
+.local/
+.claude/
+.codex/
+.cursor/
+.impeccable/
+apps/operator-ui/
+docs/
+examples/
+rust-test-log-extracted/
+deploy/compose/live-mtls/secrets/
+deploy/compose/live-mtls/secrets-host/
+deploy/compose/live-mtls/adversarial/
+deploy/compose/secrets/
+**/*.pem
+**/*.key
