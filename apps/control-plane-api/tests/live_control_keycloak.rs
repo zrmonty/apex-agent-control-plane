@@ -57,7 +57,7 @@ fn live_enabled() -> bool {
 /// `KeycloakConfig::validate`.
 fn keycloak_base() -> String {
     std::env::var("APEX_CONTROL_LIVE_KEYCLOAK_BASE")
-        .unwrap_or_else(|_| "https://localhost:18443".to_owned())
+        .unwrap_or_else(|_| "https://localhost:18450".to_owned())
 }
 
 const ISSUER: &str = "https://keycloak:8443/realms/apex";

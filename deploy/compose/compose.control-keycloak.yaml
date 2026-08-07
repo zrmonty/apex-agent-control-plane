@@ -62,7 +62,7 @@ services:
     ports:
       # Published so the host-side test can mint real tokens from the token
       # endpoint. Loopback only.
-      - "${APEX_KEYCLOAK_BIND:-127.0.0.1}:${APEX_KEYCLOAK_PORT:-18443}:8443"
+      - "${APEX_KEYCLOAK_BIND:-127.0.0.1}:${APEX_KEYCLOAK_PORT:-18450}:8443"
     volumes:
       - ./gateway-ref/keycloak:/opt/keycloak/data/import:ro
     secrets:
