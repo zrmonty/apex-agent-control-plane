@@ -67,7 +67,12 @@ impl EventOutbox for PostgresOutbox {
             let state: String = row.get(0);
             let envelope: Vec<u8> = row.get(1);
             return Ok(match state.as_str() {
-                "complete" => EnqueueResult::AlreadyComplete,
+                // A completed row must be matched on content, not just on the
+                // key. Answering AlreadyComplete for any payload would
+                // acknowledge an event that was never stored, and would lose
+                // the idempotency-conflict signal for a reused event_id.
+                "complete" if envelope == event.envelope => EnqueueResult::AlreadyComplete,
+                "complete" => return Err(GatewayError::idempotency_conflict()),
                 "pending" if envelope == event.envelope => EnqueueResult::AlreadyPending,
                 "pending" => return Err(GatewayError::idempotency_conflict()),
                 _ => return Err(GatewayError::internal()),

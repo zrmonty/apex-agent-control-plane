@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -13,6 +13,27 @@ use crate::{GatewayError, IngestRequest, proto};
 const MAX_OUTBOX_RECORD_BYTES: usize = crate::MAX_ENVELOPE_BYTES * 4;
 const MAX_OUTBOX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+fn payload_fingerprint(envelope: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(envelope).into()
+}
+
+fn hex_fingerprint(fingerprint: [u8; 32]) -> String {
+    fingerprint.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn parse_fingerprint(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let value = std::str::from_utf8(chunk).ok()?;
+        out[index] = u8::from_str_radix(value, 16).ok()?;
+    }
+    Some(out)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum FileOutboxRecord {
@@ -26,6 +47,11 @@ enum FileOutboxRecord {
         workspace_id: String,
         namespace_id: String,
         event_id: String,
+        /// Lowercase SHA-256 hex of the completed envelope. `None` only in
+        /// journals written before completed rows recorded content, where a
+        /// conflict cannot be proven either way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope_sha256: Option<String>,
     },
 }
 
@@ -41,7 +67,11 @@ pub struct FileOutbox {
     _writer_lock: File,
     capacity: usize,
     pending: HashMap<OutboxKey, IngestRequest>,
-    complete: HashSet<OutboxKey>,
+    /// Completed keys map to the payload fingerprint that was completed, so a
+    /// reused `event_id` carrying different content is a conflict rather than
+    /// a silent "already done" acknowledgement of an event never stored.
+    /// `None` marks a legacy record whose content was not journalled.
+    complete: HashMap<OutboxKey, Option<[u8; 32]>>,
 }
 
 impl FileOutbox {
@@ -103,7 +133,7 @@ impl FileOutbox {
             _writer_lock: writer_lock,
             capacity,
             pending: HashMap::new(),
-            complete: HashSet::new(),
+            complete: HashMap::new(),
         };
         outbox.load()?;
         Ok(outbox)
@@ -162,14 +192,27 @@ impl FileOutbox {
                     workspace_id,
                     namespace_id,
                     event_id,
+                    envelope_sha256,
                 } => {
                     let key = OutboxKey {
                         workspace_id,
                         namespace_id,
                         event_id,
                     };
+                    let fingerprint = match envelope_sha256.as_deref() {
+                        Some(hex) => Some(
+                            parse_fingerprint(hex)
+                                .ok_or_else(GatewayError::invalid_outbox_configuration)?,
+                        ),
+                        // Fall back to the pending record's content when the
+                        // journal predates fingerprinted completions.
+                        None => self
+                            .pending
+                            .get(&key)
+                            .map(|event| payload_fingerprint(&event.envelope)),
+                    };
                     self.pending.remove(&key);
-                    self.complete.insert(key);
+                    self.complete.insert(key, fingerprint);
                 }
             }
             if self.pending.len() + self.complete.len() > self.capacity {
@@ -212,8 +255,16 @@ impl EventOutbox for FileOutbox {
             namespace_id: event.namespace_id.clone(),
             event_id: event.event_id.clone(),
         };
-        if self.complete.contains(&key) {
-            return Ok(EnqueueResult::AlreadyComplete);
+        if let Some(fingerprint) = self.complete.get(&key) {
+            return match fingerprint {
+                Some(stored) if *stored == payload_fingerprint(&event.envelope) => {
+                    Ok(EnqueueResult::AlreadyComplete)
+                }
+                Some(_) => Err(GatewayError::idempotency_conflict()),
+                // Legacy record with no journalled content: a conflict cannot
+                // be proven, so preserve the historical accept-as-done result.
+                None => Ok(EnqueueResult::AlreadyComplete),
+            };
         }
         if let Some(existing) = self.pending.get(&key) {
             if existing.envelope == event.envelope {
@@ -237,17 +288,22 @@ impl EventOutbox for FileOutbox {
     }
 
     fn mark_complete(&mut self, key: &OutboxKey) -> Result<(), GatewayError> {
-        if !self.pending.contains_key(key) && !self.complete.contains(key) {
+        if !self.pending.contains_key(key) && !self.complete.contains_key(key) {
             return Err(GatewayError::internal());
         }
-        if !self.complete.contains(key) {
+        if !self.complete.contains_key(key) {
+            let fingerprint = self
+                .pending
+                .get(key)
+                .map(|event| payload_fingerprint(&event.envelope));
             self.append(&FileOutboxRecord::Complete {
                 workspace_id: key.workspace_id.clone(),
                 namespace_id: key.namespace_id.clone(),
                 event_id: key.event_id.clone(),
+                envelope_sha256: fingerprint.map(hex_fingerprint),
             })?;
             self.pending.remove(key);
-            self.complete.insert(key.clone());
+            self.complete.insert(key.clone(), fingerprint);
         }
         Ok(())
     }

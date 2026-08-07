@@ -58,6 +58,10 @@ $bearerCertSha256 = $values['APEX_BEARER_CERT_SHA256']
 if ([string]::IsNullOrWhiteSpace($bearerCertSha256) -or $bearerCertSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
     throw 'Compose preflight: APEX_BEARER_CERT_SHA256 must be exactly 64 hexadecimal characters.'
 }
+$providerCertSha256 = $values['APEX_PROVIDER_CLIENT_CERT_SHA256']
+if ([string]::IsNullOrWhiteSpace($providerCertSha256) -or $providerCertSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+    throw 'Compose preflight: APEX_PROVIDER_CLIENT_CERT_SHA256 must be exactly 64 hexadecimal characters.'
+}
 
 if ($values['APEX_ARCHIVE_REQUIRE_OBJECT_LOCK'] -notin @('true', 'false')) {
     throw 'Compose preflight: APEX_ARCHIVE_REQUIRE_OBJECT_LOCK must be explicitly true or false.'

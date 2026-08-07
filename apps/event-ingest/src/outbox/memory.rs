@@ -1,13 +1,23 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+use sha2::{Digest, Sha256};
 
 use super::types::{EnqueueResult, EventOutbox, OutboxKey};
 use crate::{GatewayError, IngestRequest};
+
+/// Completed keys retain the payload fingerprint, not just the key. Matching a
+/// completed key alone would let a reused `event_id` carrying different content
+/// be answered `AlreadyComplete` -- acknowledging an event that is never stored
+/// and discarding the idempotency-conflict signal.
+pub(crate) fn payload_fingerprint(envelope: &[u8]) -> [u8; 32] {
+    Sha256::digest(envelope).into()
+}
 
 #[derive(Debug)]
 pub struct InMemoryOutbox {
     capacity: usize,
     pending: HashMap<OutboxKey, IngestRequest>,
-    complete: HashSet<OutboxKey>,
+    complete: HashMap<OutboxKey, [u8; 32]>,
 }
 
 impl InMemoryOutbox {
@@ -20,7 +30,7 @@ impl InMemoryOutbox {
         Ok(Self {
             capacity,
             pending: HashMap::new(),
-            complete: HashSet::new(),
+            complete: HashMap::new(),
         })
     }
 }
@@ -32,8 +42,11 @@ impl EventOutbox for InMemoryOutbox {
             namespace_id: event.namespace_id.clone(),
             event_id: event.event_id.clone(),
         };
-        if self.complete.contains(&key) {
-            return Ok(EnqueueResult::AlreadyComplete);
+        if let Some(fingerprint) = self.complete.get(&key) {
+            if *fingerprint == payload_fingerprint(&event.envelope) {
+                return Ok(EnqueueResult::AlreadyComplete);
+            }
+            return Err(GatewayError::idempotency_conflict());
         }
         if let Some(existing) = self.pending.get(&key) {
             if existing.envelope == event.envelope {
@@ -51,11 +64,16 @@ impl EventOutbox for InMemoryOutbox {
     }
 
     fn mark_complete(&mut self, key: &OutboxKey) -> Result<(), GatewayError> {
-        if self.pending.remove(key).is_none() && !self.complete.contains(key) {
-            return Err(GatewayError::internal());
+        match self.pending.remove(key) {
+            Some(event) => {
+                self.complete
+                    .insert(key.clone(), payload_fingerprint(&event.envelope));
+                Ok(())
+            }
+            // Already complete is idempotent; unknown keys are a caller bug.
+            None if self.complete.contains_key(key) => Ok(()),
+            None => Err(GatewayError::internal()),
         }
-        self.complete.insert(key.clone());
-        Ok(())
     }
 
     fn pending(&mut self) -> Vec<IngestRequest> {

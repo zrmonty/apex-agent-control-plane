@@ -137,6 +137,14 @@ services:
   clickhouse-projection:
     image: ${CLICKHOUSE_API_IMAGE:?set CLICKHOUSE_API_IMAGE to an approved, digest-pinned image}
     environment:
+      # The provider binds its write API to exactly one mTLS client leaf: the
+      # ingest gateway. Without this the provider fails closed and returns 403
+      # to every write, because the only alternative -- the
+      # APEX_PROVIDER_ALLOW_UNPINNED_CLIENT escape hatch -- accepts any
+      # CA-trusted client and must never be set in a production profile.
+      # This is the same fingerprint as APEX_BEARER_CERT_SHA256 whenever the
+      # gateway presents one client certificate to both its sinks.
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set APEX_PROVIDER_CLIENT_CERT_SHA256 to the SHA-256 fingerprint of the ingest gateway client certificate}
       APEX_LISTEN_ADDR: 0.0.0.0:8443
       APEX_CLICKHOUSE_URL: https://clickhouse:8443
       APEX_CLICKHOUSE_DATABASE: apex
@@ -172,6 +180,9 @@ services:
   archive-provider:
     image: ${ARCHIVE_API_IMAGE:?set ARCHIVE_API_IMAGE to an approved, digest-pinned image}
     environment:
+      # See clickhouse-projection: without this pin the provider 403s every
+      # write, and the unpinned escape hatch is not acceptable in production.
+      APEX_PROVIDER_CLIENT_CERT_SHA256: ${APEX_PROVIDER_CLIENT_CERT_SHA256:?set APEX_PROVIDER_CLIENT_CERT_SHA256 to the SHA-256 fingerprint of the ingest gateway client certificate}
       APEX_LISTEN_ADDR: 0.0.0.0:8443
       APEX_ARCHIVE_BACKEND_URL: https://archive-store:9000
       APEX_ARCHIVE_BUCKET: ${APEX_ARCHIVE_BUCKET:-apex-events}

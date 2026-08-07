@@ -70,5 +70,12 @@ name = "adversarial_ingest"
 path = "tests/adversarial_ingest.rs"
 required-features = ["test-support"]
 
+# Partial-landing / torn-write tests. Stops and starts sink containers, so it
+# is opt-in via APEX_TORN_WRITE=1 in addition to the live gateway endpoint.
+[[test]]
+name = "torn_write"
+path = "tests/torn_write.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unsafe_code = "forbid"
