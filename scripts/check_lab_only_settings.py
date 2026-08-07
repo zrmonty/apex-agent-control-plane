@@ -19,6 +19,37 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+
+def strip_yaml_comments(text: str) -> str:
+    """Drop YAML comments so a pattern named only in a warning comment (e.g.
+    "never set APEX_FOO here") does not match like a real setting would.
+
+    A '#' starts a comment only at line start or after whitespace, and never
+    inside a quoted scalar -- mirroring the YAML spec closely enough for this
+    grep-style guard, without needing a full YAML parser. A pattern that
+    appears before the comment marker (a real value, or a value followed by a
+    trailing comment) is still checked normally.
+    """
+    stripped_lines = []
+    for line in text.splitlines():
+        in_single = in_double = False
+        cut = len(line)
+        for index, char in enumerate(line):
+            if char == "'" and not in_double:
+                in_single = not in_single
+            elif char == '"' and not in_single:
+                in_double = not in_double
+            elif (
+                char == "#"
+                and not in_single
+                and not in_double
+                and (index == 0 or line[index - 1].isspace())
+            ):
+                cut = index
+                break
+        stripped_lines.append(line[:cut])
+    return "\n".join(stripped_lines)
+
 # Only deployment manifests are scanned -- not docs or source, where the
 # setting's own name legitimately appears (e.g. where it's defined or
 # explained). The risk this guards against is a manifest an operator might
@@ -76,7 +107,7 @@ def main() -> int:
     violations: list[str] = []
     for path in tracked_manifest_files():
         try:
-            text = path.read_text(encoding="utf-8")
+            text = strip_yaml_comments(path.read_text(encoding="utf-8"))
         except (UnicodeDecodeError, OSError):
             continue
         for pattern, allowed in GUARDED_PATTERNS.items():
