@@ -238,6 +238,17 @@ impl KeycloakConfig {
                 "APEX_CONTROL_KEYCLOAK_AUDIENCE must be non-empty printable ASCII under 256 bytes",
             ));
         }
+        // `account` is on the `aud` of essentially every token Keycloak issues
+        // in a realm, by default. Configuring it as *this* gateway's expected
+        // audience makes the audience check vacuous: any token for any client
+        // in the realm would satisfy it. That is not a hypothetical typo --
+        // it is the value an operator reads out of a decoded token and copies
+        // when they are not sure which of the two entries is theirs.
+        if self.audience == "account" {
+            return Err(KeycloakConfigError(
+                "APEX_CONTROL_KEYCLOAK_AUDIENCE must not be 'account': Keycloak puts that on every token in the realm, so the audience check would accept any client's token",
+            ));
+        }
         if self.jwks_ca_pem.is_empty() {
             return Err(KeycloakConfigError(
                 "APEX_CONTROL_KEYCLOAK_CA_FILE produced no certificate material",

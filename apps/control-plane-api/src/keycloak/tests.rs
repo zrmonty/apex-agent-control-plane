@@ -629,6 +629,18 @@ fn config_validation_refuses_a_plaintext_or_credentialed_endpoint() {
     }
 }
 
+/// Keycloak puts `account` on the `aud` of essentially every token in a realm.
+/// Accepting it as *this* gateway's audience would make the audience check
+/// vacuous -- any client's token in the realm would pass -- and it is exactly
+/// the value someone copies out of a decoded token when unsure which of the
+/// two `aud` entries is theirs.
+#[test]
+fn config_validation_refuses_keycloaks_universal_account_audience() {
+    let mut config = config();
+    config.audience = "account".to_owned();
+    assert!(config.validate().is_err());
+}
+
 #[test]
 fn config_validation_refuses_a_staleness_ceiling_below_the_refresh_interval() {
     let mut config = config();
