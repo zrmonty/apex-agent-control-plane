@@ -389,16 +389,45 @@ jobs:
         run: |
           set -euo pipefail
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
-          rows="$(docker compose $P exec -T control-postgres \
-            psql -U apex -d apex_control -tAc 'SELECT count(*) FROM apex_event_outbox;' | tr -d '[:space:]')"
+          query() {
+            docker compose $P exec -T control-postgres \
+              psql -U apex -d apex_control -tAc "$1" | tr -d '[:space:]'
+          }
+          rows="$(query 'SELECT count(*) FROM apex_event_outbox;')"
           echo "apex_event_outbox rows in apex_control: $rows"
           [ "$rows" -ge 1 ] || { echo "no control command reached Postgres" >&2; exit 1; }
-          # Two fanout workers share one table. `attempts` is incremented by
-          # the FOR UPDATE SKIP LOCKED claim, so a row claimed by both replicas
-          # in the same cycle would show more attempts than fanout rounds --
-          # the double-delivery those claim leases exist to prevent.
+
+          # Wait for both replicas' fanout workers to drain the table. This is
+          # the live half of the regression that only appeared on a real
+          # Postgres-backed start: the sync postgres client blocks on its own
+          # runtime for every query, which aborted the worker task on its first
+          # tick while the process stayed up and kept accepting commands. A
+          # container that looks healthy and delivers nothing is exactly what
+          # this must not pass. The fanout tick is 5s.
+          for attempt in $(seq 1 24); do
+            pending="$(query "SELECT count(*) FROM apex_event_outbox WHERE state <> 'complete';")"
+            [ "$pending" = 0 ] && break
+            if [ "$attempt" = 24 ]; then
+              echo "$pending row(s) never drained; the Postgres-backed fanout worker is not running" >&2
+              docker compose $P logs --no-color --tail 80 control-plane-api-pg-a control-plane-api-pg-b >&2
+              exit 1
+            fi
+            sleep 5
+          done
           docker compose $P exec -T control-postgres \
             psql -U apex -d apex_control -c 'SELECT state, count(*), max(attempts) FROM apex_event_outbox GROUP BY state;'
+
+          # Two fanout workers share one table. `attempts` is incremented by
+          # the FOR UPDATE SKIP LOCKED claim, so a row claimed by both replicas
+          # would show more attempts than the one round it actually took --
+          # the double-delivery those claim leases exist to prevent. Asserted
+          # only now that every row is complete, so this reads a settled table
+          # rather than one mid-drain.
+          attempts="$(query 'SELECT max(attempts) FROM apex_event_outbox;')"
+          echo "max claim attempts across all rows: $attempts"
+          [ "$attempts" = 1 ] \
+            || { echo "expected every row claimed exactly once, got max(attempts)=$attempts" >&2; exit 1; }
+
           docker compose $P exec -T control-plane-api-pg-a sh -c \
             '[ -z "$(ls -A /var/lib/apex-control 2>/dev/null)" ] && [ ! -e ./data ]' \
             || { echo "a file outbox exists on the Postgres-backed replica" >&2; exit 1; }
