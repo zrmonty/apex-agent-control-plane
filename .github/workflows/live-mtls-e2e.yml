@@ -14,7 +14,7 @@ permissions:
 jobs:
   live-mtls-and-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +37,7 @@ jobs:
           # Docker mount tree: keys must be world-readable for non-root service images.
           # Compose on Linux ignores secret mode/uid/gid. Lab fixtures only.
           chmod 644 secrets/*.pem secrets/*.key 2>/dev/null || true
-          chmod 644 secrets/nats.conf secrets/valkey.conf secrets/valkey.acl 2>/dev/null || true
+          chmod 644 secrets/nats.conf secrets/valkey.conf secrets/valkey.acl secrets/control-valkey.acl 2>/dev/null || true
           # generate_pki.py writes nats-username AND nats-password with the same
           # runtime-secret helper, both restrictive by default; only nats-username
           # was ever widened here. gateway-secrets-init (compose.gateway-ref.yaml)
@@ -55,7 +55,11 @@ jobs:
           # the fanout worker was wired in: control-secrets-init stages them
           # into the container at 0600, but it has to be able to read the
           # bind-mounted host file first.
-          chmod 644 secrets/control-operator-tokens secrets/control-nats-username secrets/control-nats-password 2>/dev/null || true
+          # Same again for the control gateway's own Valkey ACL credential,
+          # added with the cross-replica admission ceiling: control-secrets-init
+          # (uid 10002) stages it into the container at 0600, but it has to be
+          # able to read the bind-mounted host file first.
+          chmod 644 secrets/control-operator-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
@@ -432,6 +436,120 @@ jobs:
             '[ -z "$(ls -A /var/lib/apex-control 2>/dev/null)" ] && [ ! -e ./data ]' \
             || { echo "a file outbox exists on the Postgres-backed replica" >&2; exit 1; }
 
+      # The per-operator admission ceiling was a process-local HashMap, so N
+      # replicas admitted N x the configured limit. `docker compose config`
+      # cannot see that, and neither can an in-process test that shares one
+      # store object between two services in one process. This runs two
+      # containers, each holding its own mTLS Valkey connection under its own
+      # ACL user, and the test below asserts the *combined* admission equals
+      # the ceiling rather than twice it.
+      #
+      # This gate has already earned itself: the first run reported 2 x the
+      # ceiling because the Valkey container was exiting on
+      # `chown: .: Operation not permitted` under cap_drop:[ALL] -- and the
+      # gateway kept serving happily on its process-local ceiling, so the only
+      # symptom of a dead accelerator was the limit silently not applying.
+      - name: Cross-replica admission ceiling (two replicas + Valkey)
+        working-directory: deploy/compose
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.control-valkey.yaml"
+          docker compose $P up -d --force-recreate control-valkey control-plane-api-pg-a control-plane-api-pg-b
+          for attempt in $(seq 1 60); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep -E 'control-valkey|control-plane-api-pg' || true)"
+            case "$state" in
+              *exited*)
+                echo "a container exited: $state" >&2
+                docker compose $P logs --no-color control-valkey control-plane-api-pg-a control-plane-api-pg-b >&2
+                exit 1
+                ;;
+            esac
+            if (echo > /dev/tcp/127.0.0.1/18447) >/dev/null 2>&1 \
+              && (echo > /dev/tcp/127.0.0.1/18448) >/dev/null 2>&1; then
+              echo "both replicas serving with the shared accelerator (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color --tail 120 control-valkey control-plane-api-pg-a control-plane-api-pg-b >&2
+              echo "replicas never began serving" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          # The startup line is the cheap half of the claim: a replica that
+          # fell back to the process-local ceiling because its Valkey config
+          # was refused would say so here, before any traffic is sent.
+          docker compose $P logs --no-color control-plane-api-pg-a \
+            | grep -q 'admission ceiling: shared (valkey)' \
+            || { echo "replica A did not attach the shared admission store" >&2; exit 1; }
+
+      - name: Live cross-replica admission tests
+        working-directory: apps/control-plane-api
+        timeout-minutes: 20
+        env:
+          APEX_CONTROL_LIVE_VALKEY: "1"
+          # Must agree with compose.control-valkey.yaml's own default.
+          APEX_CONTROL_ADMISSION_LIMIT: "8"
+          APEX_CONTROL_LIVE_VALKEY_CONTAINER: apex-gateway-ref-ci-control-valkey-1
+          APEX_CONTROL_LIVE_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+        run: cargo test --test live_control_valkey -- --nocapture --test-threads=1
+
+      # Same reasoning as every other live gate here, for the production
+      # operator-credential path. `src/keycloak/tests.rs` covers the whole
+      # rejection taxonomy offline, but a hand-rolled JWT mock and a
+      # hand-rolled verifier can agree with each other while both disagree with
+      # the identity provider -- and Keycloak publishes an RSA-OAEP `use: enc`
+      # key in every realm's JWKS by default, which is precisely the material a
+      # kid-only key lookup would happily verify signatures with.
+      - name: Keycloak-backed operator credentials
+        working-directory: deploy/compose
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-keycloak.yaml"
+          # Reuses the apex-control-plane-api-ref:latest image the control
+          # gateway step above already built.
+          docker compose $P up -d --force-recreate keycloak control-plane-api-oidc
+          for attempt in $(seq 1 90); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep -E 'keycloak|control-plane-api-oidc' || true)"
+            case "$state" in
+              *exited*)
+                echo "a container exited: $state" >&2
+                docker compose $P logs --no-color keycloak control-plane-api-oidc >&2
+                exit 1
+                ;;
+            esac
+            if (echo > /dev/tcp/127.0.0.1/18449) >/dev/null 2>&1; then
+              echo "the Keycloak-backed control gateway is serving (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 90 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color --tail 150 keycloak control-plane-api-oidc >&2
+              echo "the Keycloak-backed control gateway never began serving" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          # Proves the *deployed* selection path chose the Keycloak resolver,
+          # before any token is presented. This container is configured with no
+          # static table at all, so a wrong branch here means it authenticates
+          # nobody -- and every rejection below would then pass for the wrong
+          # reason.
+          docker compose $P logs --no-color control-plane-api-oidc \
+            | grep -q 'operator credentials: keycloak' \
+            || { echo "the OIDC replica did not select the Keycloak resolver" >&2; exit 1; }
+
+      - name: Live Keycloak operator credential tests
+        working-directory: apps/control-plane-api
+        timeout-minutes: 20
+        env:
+          APEX_CONTROL_LIVE_KEYCLOAK: "1"
+          APEX_CONTROL_LIVE_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+        run: cargo test --test live_control_keycloak -- --nocapture --test-threads=1
+
       - name: Adversarial corpus against the running container
         working-directory: apps/event-ingest
         timeout-minutes: 25
@@ -460,6 +578,8 @@ jobs:
           : > /tmp/apex-overlay-secrets/gcs-sa.json
           docker compose -f compose.gateway-ref.yaml config >/dev/null
           docker compose -f compose.gateway-ref.yaml -f compose.control-pg.yaml config >/dev/null
+          docker compose -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.control-valkey.yaml config >/dev/null
+          docker compose -f compose.gateway-ref.yaml -f compose.control-keycloak.yaml config >/dev/null
           AZURE_CONNECTION_STRING_FILE=/tmp/apex-overlay-secrets/azure-connection-string \
           AZURE_ACCOUNT_KEY_FILE=/tmp/apex-overlay-secrets/azure-account-key \
             docker compose -f compose.gateway-ref.yaml -f compose.azure.yaml config >/dev/null
@@ -480,8 +600,8 @@ jobs:
           # jetstream-init) exit before "Build and smoke-start" prints anything
           # beyond "didn't complete successfully: exit 1" -- without this, the
           # actual stderr that would explain why is never captured anywhere.
-          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml ps -a > /tmp/apex-ci-logs/gateway-ref-ps.txt 2>&1 || true
-          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/gateway-ref-logs.txt 2>&1 || true
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml -f ../compose.control-valkey.yaml -f ../compose.control-keycloak.yaml ps -a > /tmp/apex-ci-logs/gateway-ref-ps.txt 2>&1 || true
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml -f ../compose.control-valkey.yaml -f ../compose.control-keycloak.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/gateway-ref-logs.txt 2>&1 || true
           docker ps -a > /tmp/apex-ci-logs/docker-ps.txt 2>&1 || true
           # Print to job log (public) so we can diagnose without admin log API.
           echo "===== live-mtls ps ====="
@@ -509,4 +629,4 @@ jobs:
           docker compose -f deploy/compose/live-mtls/compose.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true
-          docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml -f deploy/compose/compose.control-pg.yaml down -v --remove-orphans || true
+          docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml -f deploy/compose/compose.control-pg.yaml -f deploy/compose/compose.control-valkey.yaml -f deploy/compose/compose.control-keycloak.yaml down -v --remove-orphans || true

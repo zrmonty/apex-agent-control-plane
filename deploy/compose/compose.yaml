@@ -154,6 +154,22 @@ services:
       # A file, never an `environment:` value. Compose environment is visible
       # to `docker inspect` and /proc/<pid>/environ; these are bearer
       # credentials that authorize stop/pause/inject against live agents.
+      #
+      # This static table is one of two credential paths. The other, and the
+      # one [[Authentication and Identity]] describes for a real deployment, is
+      # a short-lived scope-bound credential issued by Keycloak through RFC
+      # 8693 token exchange and verified here. To switch: delete this line and
+      # the control_operator_tokens secret below, and set
+      # APEX_CONTROL_KEYCLOAK_ISSUER / _AUDIENCE / _CA_FILE (plus the optional
+      # claim-mapping settings documented in .env.example and
+      # apps/control-plane-api/src/main.rs). Setting both is a hard startup
+      # error rather than a precedence rule -- two configured credential
+      # sources means one of them is being silently ignored, and this is the
+      # surface where that matters most. The `*` break-glass scope is
+      # unreachable through Keycloak unless
+      # APEX_CONTROL_KEYCLOAK_GLOBAL_ROLE *and*
+      # APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS are both configured; no claim can
+      # confer it on its own.
       APEX_CONTROL_OPERATOR_TOKENS_FILE: /run/secrets/control_operator_tokens
       # A distinct outbox file from event-ingest's, by design: the two
       # services must not share a durability boundary any more than they
@@ -177,6 +193,14 @@ services:
       APEX_CONTROL_NATS_USERNAME_FILE: /run/secrets/control_nats_username
       APEX_CONTROL_NATS_PASSWORD_FILE: /run/secrets/control_nats_password
       APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
+      # Per-operator admission ceiling. Without a shared store (see
+      # APEX_CONTROL_VALKEY_* in .env.example) this is enforced *per replica*,
+      # so N replicas of this service admit N x the limit. A single-replica
+      # deployment is unaffected; a multi-replica one should configure the
+      # control gateway's own Valkey instance and run an image built with
+      # --features valkey.
+      APEX_CONTROL_ADMISSION_LIMIT: ${APEX_CONTROL_ADMISSION_LIMIT:-50}
+      APEX_CONTROL_ADMISSION_WINDOW_SECS: ${APEX_CONTROL_ADMISSION_WINDOW_SECS:-1}
     networks: [apex-internal]
     secrets:
       - control_server_cert

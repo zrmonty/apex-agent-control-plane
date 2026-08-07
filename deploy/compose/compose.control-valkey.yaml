@@ -52,8 +52,27 @@ x-control-valkey-environment: &control-valkey-environment
 
 services:
   control-valkey:
+    # 8.1.9, digest-pinned. Not the floating tag, and not any 8.0.x below
+    # 8.0.7, which carry several CVEs including one at CVSS 8.8 -- the same
+    # reasoning live-mtls/compose.yaml records for its own Valkey.
     image: valkey/valkey@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
-    command: ["valkey-server", "/run/secrets/valkey_config"]
+    # `valkey-server` directly, not through the image's docker-entrypoint.sh.
+    # That script starts with `chown -R valkey .` against its working
+    # directory, which fails under `cap_drop: [ALL]` and takes the container
+    # down with `chown: .: Operation not permitted` -- and the failure is
+    # quiet where it matters: the gateway keeps serving on its process-local
+    # ceiling, so the *only* symptom is that the cross-replica limit silently
+    # stops applying. Found exactly that way, by this overlay's own test
+    # reporting 2 x the ceiling.
+    entrypoint: ["valkey-server"]
+    command: ["/run/secrets/valkey_config"]
+    # Bypassing docker-entrypoint.sh also bypasses the `gosu valkey` it ends
+    # with, so the uid has to be stated here or the server runs as root.
+    # 999:1000 is the image's own `valkey` user. Stricter than
+    # live-mtls/compose.yaml's Valkey, which runs `0:0` so it can read
+    # world-readable lab keys -- unnecessary here, since 0644 material is
+    # readable by any uid.
+    user: "999:1000"
     networks: [gateway-ref]
     secrets:
       - source: control_valkey_config
