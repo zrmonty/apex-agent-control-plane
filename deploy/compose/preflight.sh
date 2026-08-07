@@ -53,6 +53,30 @@ secret_keys=(
   ARCHIVE_WRITER_CERT_FILE ARCHIVE_WRITER_KEY_FILE
   ARCHIVE_BACKEND_ACCESS_KEY_FILE ARCHIVE_BACKEND_SECRET_KEY_FILE
 )
+# Private material the ingest gateway loads directly. It refuses any of these
+# whose mode has a group or other bit set, and Compose cannot enforce that for
+# us: `mode:` is ignored for file-based secrets outside Swarm, so the HOST
+# file's mode and owner are what land in the container. Without this check the
+# gateway simply exits at startup with INVALID_NATS_CONFIGURATION and never
+# binds a listener -- a failure that looks like a code fault and is really a
+# file permission.
+gateway_private_keys=(
+  GATEWAY_SERVER_KEY_FILE INGEST_BEARER_TOKEN_FILE
+  NATS_USERNAME_FILE NATS_PASSWORD_FILE INGEST_NATS_CLIENT_KEY_FILE
+  INGEST_CLICKHOUSE_CLIENT_KEY_FILE INGEST_ARCHIVE_CLIENT_KEY_FILE
+)
+# The uid apps/event-ingest/Dockerfile runs as. The container cannot read a
+# 0400 file owned by anyone else, so ownership is as load-bearing as the mode.
+gateway_uid=10001
+
+is_gateway_private_key() {
+  local needle="$1" candidate
+  for candidate in "${gateway_private_keys[@]}"; do
+    [[ "$candidate" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
 for key in "${secret_keys[@]}"; do
   raw_path="$(require_value "$key")"
   if [[ "$raw_path" = /* ]]; then
@@ -61,6 +85,24 @@ for key in "${secret_keys[@]}"; do
     resolved="${SCRIPT_DIR}/${raw_path}"
   fi
   [[ -f "$resolved" ]] || fail "secret file for ${key} does not exist"
+
+  if is_gateway_private_key "$key"; then
+    case "$(uname -s)" in
+      Linux) mode="$(stat -c '%a' "$resolved")"; owner="$(stat -c '%u' "$resolved")" ;;
+      Darwin) mode="$(stat -f '%Lp' "$resolved")"; owner="$(stat -f '%u' "$resolved")" ;;
+      *) mode=""; owner="" ;;
+    esac
+    if [[ -n "$mode" ]]; then
+      # Zero-pad so 400 and 0400 compare the same way.
+      printf -v mode '%04d' "$((10#$mode))"
+      if [[ "${mode: -2}" != "00" ]]; then
+        fail "secret file for ${key} is mode ${mode}; the ingest gateway refuses private material readable or writable by group or other. Run: chmod 0400 '${resolved}'"
+      fi
+      if [[ "$owner" != "$gateway_uid" ]]; then
+        fail "secret file for ${key} is owned by uid ${owner}, but the ingest gateway container runs as uid ${gateway_uid} and could not read it. Run: chown ${gateway_uid} '${resolved}'"
+      fi
+    fi
+  fi
 done
 
 agent_id="$(require_value APEX_BEARER_AGENT_ID)"

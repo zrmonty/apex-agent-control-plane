@@ -1,5 +1,31 @@
 name: apex-phase0
 
+# OPERATOR WARNING -- `mode:` on the secrets below does NOT do what it looks
+# like it does.
+#
+# Compose ignores `mode`, `uid`, and `gid` for *file-based* secrets outside
+# Swarm: it bind-mounts the host file, so the host file's own mode and owner are
+# what land in the container. The `mode: "0400"` entries throughout this file
+# are therefore documentation of intent, not an enforced control. This
+# repository's own CI works around it by chmod-ing the generated lab keys to
+# 0644, which guarantees the opposite of the stated intent.
+#
+# This matters because the gateway refuses private key material with any group
+# or other permission bit set. Mounted at 0444 (Compose's usual result) or 0777
+# (a Docker Desktop Windows bind), it exits at startup with
+# INVALID_NATS_CONFIGURATION and never binds a listener.
+#
+# What an operator must actually do on the host, for every file referenced by a
+# `secrets:` entry marked `mode: "0400"` below:
+#
+#     chown 10001:10001 <file>     # the uid apps/event-ingest/Dockerfile runs as
+#     chmod 0400 <file>
+#
+# `deploy/compose/preflight.sh` / `preflight.ps1` check for this before you
+# start the stack. `compose.gateway-ref.yaml` takes the other approach -- an
+# unprivileged init container restages the material at 0600 into a volume --
+# which is the better pattern if you cannot control host ownership.
+
 services:
   ingest-gateway:
     image: ${APEX_INGEST_IMAGE:?set APEX_INGEST_IMAGE to an approved, digest-pinned image}
