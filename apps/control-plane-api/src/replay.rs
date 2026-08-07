@@ -45,7 +45,11 @@ where
                     publisher_guard.publish(&event)
                 }));
                 match publish_result {
-                    Ok(Ok(())) => {
+                    // Either outcome means the event is durable: Published
+                    // because this call stored it, AlreadyComplete because a
+                    // previous attempt did and the outbox proved it. Both must
+                    // settle the row.
+                    Ok(Ok(_outcome)) => {
                         let key = OutboxKey {
                             workspace_id: event.workspace_id().to_owned(),
                             namespace_id: event.namespace_id().to_owned(),
@@ -81,13 +85,16 @@ mod tests {
     }
 
     impl EventPublisher for FlakyPublisher {
-        fn publish(&mut self, event: &apex_event_ingest::IngestRequest) -> Result<(), GatewayError> {
+        fn publish(
+            &mut self,
+            event: &apex_event_ingest::IngestRequest,
+        ) -> Result<apex_event_ingest::PublishOutcome, GatewayError> {
             if self.fail_next {
                 self.fail_next = false;
                 return Err(GatewayError::publish_failed());
             }
             self.published.push(event.event_id().to_owned());
-            Ok(())
+            Ok(apex_event_ingest::PublishOutcome::Published)
         }
     }
 
