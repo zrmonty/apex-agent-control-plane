@@ -71,12 +71,15 @@ struct FailingPublisher {
 }
 
 impl EventPublisher for FailingPublisher {
-    fn publish(&mut self, _event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(
+        &mut self,
+        _event: &IngestRequest,
+    ) -> Result<crate::PublishOutcome, GatewayError> {
         self.calls += 1;
         if self.fail {
             Err(GatewayError::publish_failed())
         } else {
-            Ok(())
+            Ok(crate::PublishOutcome::Published)
         }
     }
 }
@@ -357,5 +360,108 @@ fn jetstream_publisher_rejects_invalid_event_id() {
     assert_eq!(
         publisher.publish(&bad).unwrap_err().code,
         GatewayErrorCode::InvalidEventId
+    );
+}
+
+/// After a torn fanout is reconciled by outbox replay, an identical
+/// re-submission must be reported as a duplicate, not as freshly accepted.
+///
+/// Reproduces the exact divergence: a publish failure aborts the idempotency
+/// reservation while the durable outbox row survives, and the replay worker
+/// later completes that row without touching the idempotency journal. The
+/// outbox then knows the event is done and the idempotency store has no memory
+/// of the key.
+///
+/// Before `PublishOutcome`, `publish` answered `Ok(())` for both "I stored it"
+/// and "it was already stored", so the gateway reported `Accepted` --
+/// telling a producer its event had just been made durable when the replay
+/// worker had stored it earlier. A producer treating the acknowledgement as
+/// proof of *this* call's durability was being misled.
+#[test]
+fn an_identical_replay_after_outbox_reconciliation_is_reported_as_duplicate() {
+    let event = sample_request(EVENT);
+
+    // The replay worker's end state: the outbox holds a completed row.
+    let mut outbox = InMemoryOutbox::new(8).unwrap();
+    outbox.enqueue(&event).unwrap();
+    outbox
+        .mark_complete(&crate::outbox::OutboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            event_id: EVENT.to_owned(),
+        })
+        .unwrap();
+
+    // The aborted reservation's end state: an idempotency store with no record
+    // of the key at all.
+    let idempotency = InMemoryIdempotencyStore::new(8).unwrap();
+    let publisher = OutboxedPublisher::new(InMemoryPublisher::default(), outbox);
+    let mut gateway = IngestGateway::with_idempotency_store(publisher, Box::new(idempotency));
+
+    let outcome = gateway.ingest(&scope_caller(), event.clone()).unwrap();
+    assert_eq!(
+        outcome,
+        IngestOutcome::Duplicate,
+        "an event the outbox already completed must be reported as a duplicate, \
+         not as though this call made it durable"
+    );
+
+    // ...and it must not have been fanned out a second time.
+    assert!(
+        gateway
+            .publisher()
+            .publisher()
+            .published_event_ids()
+            .is_empty(),
+        "a duplicate must not reach the fanout"
+    );
+
+    // The commit above heals the divergence, so the next submission takes the
+    // fast Duplicate path in `reserve()` and never reaches the publisher.
+    let second = gateway.ingest(&scope_caller(), event).unwrap();
+    assert_eq!(
+        second,
+        IngestOutcome::Duplicate,
+        "the idempotency journal must have been settled by the first answer"
+    );
+    assert!(
+        gateway
+            .publisher()
+            .publisher()
+            .published_event_ids()
+            .is_empty()
+    );
+}
+
+/// A first, genuinely new event must still report `Accepted`.
+///
+/// Guards the other direction: making duplicates truthful must not make every
+/// answer "duplicate".
+#[test]
+fn a_first_submission_through_the_outbox_still_reports_accepted() {
+    let outbox = InMemoryOutbox::new(8).unwrap();
+    let idempotency = InMemoryIdempotencyStore::new(8).unwrap();
+    let publisher = OutboxedPublisher::new(InMemoryPublisher::default(), outbox);
+    let mut gateway = IngestGateway::with_idempotency_store(publisher, Box::new(idempotency));
+
+    assert_eq!(
+        gateway.ingest(&scope_caller(), sample_request(EVENT)).unwrap(),
+        IngestOutcome::Accepted
+    );
+    assert_eq!(
+        gateway.publisher().publisher().published_event_ids(),
+        [EVENT.to_owned()]
+    );
+
+    // The ordinary replay path: the idempotency store answers Duplicate before
+    // the publisher is consulted at all.
+    assert_eq!(
+        gateway.ingest(&scope_caller(), sample_request(EVENT)).unwrap(),
+        IngestOutcome::Duplicate
+    );
+    assert_eq!(
+        gateway.publisher().publisher().published_event_ids().len(),
+        1,
+        "an ordinary duplicate must not reach the fanout either"
     );
 }

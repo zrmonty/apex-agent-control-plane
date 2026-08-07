@@ -7,9 +7,12 @@ use std::fs::{create_dir, remove_dir_all, write};
 struct CountingPublisher(usize);
 
 impl EventPublisher for CountingPublisher {
-    fn publish(&mut self, _event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(
+        &mut self,
+        _event: &IngestRequest,
+    ) -> Result<crate::PublishOutcome, GatewayError> {
         self.0 += 1;
-        Ok(())
+        Ok(crate::PublishOutcome::Published)
     }
 }
 

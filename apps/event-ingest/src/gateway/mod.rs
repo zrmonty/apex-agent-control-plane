@@ -9,7 +9,7 @@ mod tests;
 
 pub use adapter::AuthenticatedIngestAdapter;
 pub use core::IngestGateway;
-pub use publisher::EventPublisher;
+pub use publisher::{EventPublisher, PublishOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestOutcome {

@@ -1,4 +1,4 @@
-use crate::{EventPublisher, GatewayError, IngestRequest};
+use crate::{EventPublisher, GatewayError, IngestRequest, PublishOutcome};
 
 #[derive(Debug, Default)]
 pub struct InMemoryPublisher {
@@ -12,8 +12,8 @@ impl InMemoryPublisher {
 }
 
 impl EventPublisher for InMemoryPublisher {
-    fn publish(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError> {
         self.published_event_ids.push(event.event_id.clone());
-        Ok(())
+        Ok(PublishOutcome::Published)
     }
 }

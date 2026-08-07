@@ -4,7 +4,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use super::IngestOutcome;
-use super::publisher::EventPublisher;
+use super::publisher::{EventPublisher, PublishOutcome};
 use crate::outbox::PendingEventReplayer;
 use crate::{
     GatewayError, GatewayErrorCode,
@@ -195,10 +195,13 @@ impl<P: EventPublisher> IngestGateway<P> {
         };
         let publish_result = catch_unwind(AssertUnwindSafe(|| self.publisher.publish(&event)))
             .map_err(|_| GatewayError::internal())?;
-        if let Err(error) = publish_result {
-            self.idempotency.abort(reservation);
-            return Err(error);
-        }
+        let outcome = match publish_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.idempotency.abort(reservation);
+                return Err(error);
+            }
+        };
         // Only the durable outbox can prove that a retry will not fan out a
         // second time. Plain publishers retain an uncertain reservation after
         // a commit failure; releasing it there would make side effects
@@ -209,7 +212,24 @@ impl<P: EventPublisher> IngestGateway<P> {
             }
             return Err(error);
         }
-        Ok(IngestOutcome::Accepted)
+        Ok(match outcome {
+            PublishOutcome::Published => IngestOutcome::Accepted,
+            // The outbox already had this exact event completed while the
+            // idempotency journal did not -- the signature of a torn fanout
+            // that aborted the reservation and was later reconciled by the
+            // replay worker, which completes outbox rows without settling
+            // idempotency state.
+            //
+            // Two things happen here. The commit above heals the divergence,
+            // so the *next* submission takes the fast Duplicate path in
+            // `reserve()` and never reaches the publisher at all. And the
+            // answer stops lying: reporting `Accepted` told a producer its
+            // event had just been stored, when it had in fact been stored
+            // earlier by the replay worker. A producer that treats the
+            // acknowledgement as "this call made it durable" -- the exact
+            // reading the outbox exists to support -- was being misled.
+            PublishOutcome::AlreadyComplete => IngestOutcome::Duplicate,
+        })
     }
 
     fn record_security_signal(&mut self, signal: SecuritySignal, event: &IngestRequest) {

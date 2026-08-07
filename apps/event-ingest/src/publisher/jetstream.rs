@@ -1,7 +1,7 @@
 use super::transport::JetStreamTransport;
 use crate::{
     EventPublisher, GatewayError, GatewayErrorCode, IngestRequest, MAX_ENVELOPE_BYTES,
-    MAX_JETSTREAM_SUBJECT_BYTES, is_lowercase_uuidv7, is_scope_identifier,
+    MAX_JETSTREAM_SUBJECT_BYTES, PublishOutcome, is_lowercase_uuidv7, is_scope_identifier,
 };
 
 pub struct JetStreamPublisher<T: JetStreamTransport> {
@@ -19,7 +19,7 @@ impl<T: JetStreamTransport> JetStreamPublisher<T> {
 }
 
 impl<T: JetStreamTransport> EventPublisher for JetStreamPublisher<T> {
-    fn publish(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError> {
         if !is_scope_identifier(&event.workspace_id) || !is_scope_identifier(&event.namespace_id) {
             return Err(GatewayError::scope_denied());
         }
@@ -41,7 +41,8 @@ impl<T: JetStreamTransport> EventPublisher for JetStreamPublisher<T> {
             return Err(GatewayError::new(GatewayErrorCode::SubjectTooLong));
         }
         self.transport
-            .publish_event(&subject, &event.event_id, &event.envelope)
+            .publish_event(&subject, &event.event_id, &event.envelope)?;
+        Ok(PublishOutcome::Published)
     }
 }
 

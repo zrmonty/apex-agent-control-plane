@@ -1,7 +1,10 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::traits::{ArchivePublisher, ClickHousePublisher};
-use crate::{EventPublisher, GatewayError, IngestRequest, JetStreamPublisher, JetStreamTransport};
+use crate::{
+    EventPublisher, GatewayError, IngestRequest, JetStreamPublisher, JetStreamTransport,
+    PublishOutcome,
+};
 
 pub struct DurableFanoutPublisher<J: JetStreamTransport, C, A> {
     jetstream: JetStreamPublisher<J>,
@@ -42,13 +45,17 @@ where
     C: ClickHousePublisher,
     A: ArchivePublisher,
 {
-    fn publish(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError> {
         catch_unwind(AssertUnwindSafe(|| self.jetstream.publish(event)))
             .map_err(|_| GatewayError::internal())??;
         let clickhouse = catch_unwind(AssertUnwindSafe(|| self.clickhouse.write_event(event)))
             .map_err(|_| GatewayError::internal())?;
         clickhouse?;
         catch_unwind(AssertUnwindSafe(|| self.archive.write_event(event)))
-            .map_err(|_| GatewayError::internal())?
+            .map_err(|_| GatewayError::internal())??;
+        // A fanout has no memory of previous events, so reaching here always
+        // means this call did the work. Only an outbox-backed publisher can
+        // report AlreadyComplete.
+        Ok(PublishOutcome::Published)
     }
 }

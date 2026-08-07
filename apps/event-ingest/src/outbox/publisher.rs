@@ -1,5 +1,5 @@
 use super::types::{EnqueueResult, EventOutbox, OutboxKey};
-use crate::{EventPublisher, GatewayError, IngestRequest};
+use crate::{EventPublisher, GatewayError, IngestRequest, PublishOutcome};
 
 pub struct OutboxedPublisher<P, O> {
     pub(crate) publisher: P,
@@ -38,7 +38,9 @@ where
     /// pending row cannot be mistaken for a successful duplicate.
     fn replay_pending_inner(&mut self) -> Result<(), GatewayError> {
         for event in self.outbox.pending() {
-            self.publisher.publish(&event)?;
+            // The outcome is not meaningful here: `self.publisher` is the
+            // fanout, not another outbox, so it always reports Published.
+            let _ = self.publisher.publish(&event)?;
             let key = OutboxKey {
                 workspace_id: event.workspace_id.clone(),
                 namespace_id: event.namespace_id.clone(),
@@ -69,9 +71,14 @@ where
         true
     }
 
-    fn publish(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError> {
         match self.outbox.enqueue(event)? {
-            EnqueueResult::AlreadyComplete => return Ok(()),
+            // The outbox already holds a completed row for this exact payload
+            // (post-9734d9a `AlreadyComplete` is fingerprint-matched, so this
+            // really is the same event, not merely the same id). Say so
+            // instead of returning a bare Ok that the caller cannot tell apart
+            // from a fresh publish.
+            EnqueueResult::AlreadyComplete => return Ok(PublishOutcome::AlreadyComplete),
             EnqueueResult::AlreadyPending => {
                 // A live request must never race a replay worker or another
                 // request into a second fanout. Workers need a separate claim
@@ -88,6 +95,7 @@ where
             namespace_id: event.namespace_id.clone(),
             event_id: event.event_id.clone(),
         };
-        self.outbox.mark_complete(&key)
+        self.outbox.mark_complete(&key)?;
+        Ok(PublishOutcome::Published)
     }
 }

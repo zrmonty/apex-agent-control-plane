@@ -1278,7 +1278,10 @@ fn rejects_an_empty_envelope_before_publishing() {
 struct FailingPublisher;
 
 impl EventPublisher for FailingPublisher {
-    fn publish(&mut self, _event: &IngestRequest) -> Result<(), GatewayError> {
+    fn publish(
+        &mut self,
+        _event: &IngestRequest,
+    ) -> Result<apex_event_ingest::PublishOutcome, GatewayError> {
         Err(GatewayError::publish_failed())
     }
 }

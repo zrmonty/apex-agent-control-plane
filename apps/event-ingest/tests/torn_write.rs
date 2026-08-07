@@ -42,6 +42,22 @@ fn skip(name: &str) -> bool {
         eprintln!("skip {name}: set APEX_TORN_WRITE=1 and APEX_ADVERSARIAL_GATEWAY");
         return true;
     }
+    // These tests stop sink containers. A run that dies between `stop` and
+    // `start` leaves the stack half down, and every later test then fails for
+    // that reason rather than the one being measured.
+    for container in [ch_container(), archive_container()] {
+        let running = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", &container])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
+            .unwrap_or(false);
+        if !running {
+            eprintln!("setup: restarting {container}");
+            start(&container);
+        }
+    }
     false
 }
 
@@ -120,20 +136,51 @@ fn archive_objects(event_id: &str) -> u32 {
     docker_python(&archive_container(), &script).and_then(|v| v.parse().ok()).expect("archive query")
 }
 
+/// The gateway's durable journals, as text.
+///
+/// Two shapes are supported. A natively-run gateway writes them to a host
+/// directory (`APEX_ADVERSARIAL_OUTBOX_DIR`). A containerised gateway -- now
+/// the supported deployment -- keeps them in a volume, so they are read with
+/// `docker exec` against `APEX_TORN_GATEWAY_CONTAINER` instead.
+///
+/// Returning an empty string when neither is configured would silently turn
+/// every "a pending row must exist" assertion into a pass against no evidence,
+/// so an unconfigured harness panics rather than reporting a hollow success.
+fn journal(file: &str) -> String {
+    if let Some(dir) = outbox_dir() {
+        return std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+    }
+    let container = std::env::var("APEX_TORN_GATEWAY_CONTAINER").unwrap_or_else(|_| {
+        panic!(
+            "set APEX_ADVERSARIAL_OUTBOX_DIR (native gateway) or \
+             APEX_TORN_GATEWAY_CONTAINER (containerised gateway); without one \
+             of them the durable-journal assertions prove nothing"
+        )
+    });
+    let output = Command::new("docker")
+        .args(["exec", &container, "cat", &format!("/var/lib/apex/{file}")])
+        .output()
+        .unwrap_or_else(|e| panic!("docker exec against {container} failed: {e}"));
+    // A missing file is legitimate before the first write.
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Lines mentioning this event in the durable outbox journal, and whether any
 /// of them is still in a non-complete state.
 fn outbox_lines(event_id: &str) -> Vec<String> {
-    let Some(dir) = outbox_dir() else { return Vec::new() };
-    std::fs::read_to_string(dir.join("outbox.jsonl"))
-        .map(|text| text.lines().filter(|l| l.contains(event_id)).map(str::to_owned).collect())
-        .unwrap_or_default()
+    journal("outbox.jsonl")
+        .lines()
+        .filter(|l| l.contains(event_id))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn idempotency_lines(event_id: &str) -> Vec<String> {
-    let Some(dir) = outbox_dir() else { return Vec::new() };
-    std::fs::read_to_string(dir.join("idempotency.jsonl"))
-        .map(|text| text.lines().filter(|l| l.contains(event_id)).map(str::to_owned).collect())
-        .unwrap_or_default()
+    journal("idempotency.jsonl")
+        .lines()
+        .filter(|l| l.contains(event_id))
+        .map(str::to_owned)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -381,20 +428,33 @@ fn pending_outbox_rows_survive_and_do_not_duplicate() {
     });
     let response = second.expect("an identical replay after recovery must not be rejected");
 
-    // KNOWN GAP (reported, not yet fixed): `duplicate` is false here.
-    //
-    // The data invariant below is the one that matters and it holds -- the
-    // event exists exactly once in every store. But the flag is wrong. A
+    // The event was made durable by the replay worker, not by this call, so
+    // this call must say `duplicate`. It used to say `duplicate: false`: a
     // publish failure aborts the idempotency reservation while the outbox row
-    // survives and is later completed by the replay worker, so the idempotency
-    // journal has no memory of the key and the outbox answers AlreadyComplete
-    // without the gateway being able to tell the difference. Reporting it
-    // truthfully needs `EventPublisher::publish` to return an outcome and the
-    // replay worker to settle the idempotency reservation; that is a design
-    // change, not a patch, so it is recorded here rather than papered over.
+    // survives and is later completed by the replay worker, leaving the
+    // idempotency journal with no memory of the key while the outbox answered
+    // AlreadyComplete -- and `publish` returned a bare `Ok(())` that the
+    // gateway could not tell apart from a fresh publish.
     //
-    // Tighten this to `assert!(response.duplicate)` once that lands.
-    let _ = response.duplicate;
+    // `EventPublisher::publish` now returns `PublishOutcome`, so the gateway
+    // distinguishes the two and settles the reservation, healing the
+    // divergence. See src/gateway/publisher.rs.
+    assert!(
+        response.duplicate,
+        "an event already made durable by outbox replay must be reported as a \
+         duplicate, not as though this call stored it"
+    );
+
+    // The next identical submission must also be a duplicate, now via the fast
+    // idempotency path rather than the outbox.
+    let third = runtime().block_on(async {
+        let channel = channel().await;
+        send(&channel, sign(base(&id))).await
+    });
+    assert!(
+        third.expect("a second identical replay must not be rejected").duplicate,
+        "the idempotency journal must have been settled by the previous answer"
+    );
 
     assert_eq!(clickhouse_rows(&id), 1, "post-recovery replay duplicated the ClickHouse row");
     assert_eq!(archive_objects(&id), 1, "post-recovery replay duplicated the archive object");

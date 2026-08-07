@@ -91,5 +91,13 @@ name = "ephemeral_outage"
 path = "tests/ephemeral_outage.rs"
 required-features = ["test-support"]
 
+# Transport attacks above the handshake: certificate swap on reconnect,
+# negotiable compression, SQL metacharacters on the wire, per-request identity.
+# Skips itself unless APEX_ADVERSARIAL_GATEWAY names a live gateway.
+[[test]]
+name = "transport_attacks"
+path = "tests/transport_attacks.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unsafe_code = "forbid"

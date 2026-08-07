@@ -41,7 +41,9 @@ pub use errors::{
     DiagnosticCorrelation, DiagnosticEvidence, DiagnosticFailure, DiagnosticScope,
     GatewayDiagnosticReport, GatewayError, GatewayErrorCode, RedactionSummary,
 };
-pub use gateway::{AuthenticatedIngestAdapter, EventPublisher, IngestGateway, IngestOutcome};
+pub use gateway::{
+    AuthenticatedIngestAdapter, EventPublisher, IngestGateway, IngestOutcome, PublishOutcome,
+};
 pub use http_sinks::{ArchiveHttpPublisher, AuthenticatedHttpConfig, ClickHouseHttpPublisher};
 #[cfg(feature = "postgres")]
 pub use idempotency::PostgresIdempotencyStore;
