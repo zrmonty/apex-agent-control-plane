@@ -257,3 +257,83 @@ fn live_clickhouse_and_archive_provider_mtls() {
         .write_event(&event)
         .expect("identical archive replay must be accepted via hash match");
 }
+
+/// Cross-tenant Valkey key isolation, verified against the real server.
+///
+/// `is_scope_identifier` permits `:` inside a workspace or namespace, and `:`
+/// is also the Valkey key separator. Interpolating components raw would let
+/// `("a:b", "c")` and `("a", "b:c")` collapse onto one key, so one tenant could
+/// spend another's admission budget or trip another's deny hint. The builder
+/// hex-encodes each component; this proves the property end to end on a live
+/// server rather than only at the formatting function.
+#[test]
+fn live_valkey_cross_tenant_keys_do_not_collide() {
+    if !live_enabled() {
+        eprintln!("skip live_valkey_cross_tenant_keys: set APEX_LIVE_MTLS=1");
+        return;
+    }
+    install_rustls_provider();
+    #[cfg(not(feature = "valkey"))]
+    {
+        panic!("live Valkey test requires --features valkey");
+    }
+    #[cfg(feature = "valkey")]
+    {
+        use apex_event_ingest::{EphemeralStore, RateLimitKey, ValkeyConfig, ValkeyEphemeralStore};
+
+        let root = secrets_dir();
+        let config = ValkeyConfig {
+            host: std::env::var("APEX_LIVE_VALKEY_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
+            port: std::env::var("APEX_LIVE_VALKEY_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16379),
+            username: "apex-ingest".into(),
+            password_file: require_secret(&root, "valkey-ingest-password"),
+            ca_file: require_secret(&root, "ca.pem"),
+            client_cert_file: require_secret(&root, "ingest-valkey-client.pem"),
+            client_key_file: require_secret(&root, "ingest-valkey-client.key"),
+            trusted_base: root.clone(),
+        };
+        let mut store = ValkeyEphemeralStore::connect(&config).expect("Valkey mTLS handshake");
+
+        // Unique per run so repeated runs never inherit a previous window.
+        let run = std::process::id();
+        let tenant_a = RateLimitKey {
+            namespace: format!("a{run}:b"),
+            bucket: "c".into(),
+        };
+        let tenant_b = RateLimitKey {
+            namespace: format!("a{run}"),
+            bucket: "b:c".into(),
+        };
+
+        // Spend tenant A's entire budget.
+        let limit = 2;
+        let window = Duration::from_secs(30);
+        for _ in 0..limit {
+            assert!(
+                store
+                    .check_rate_limit(&tenant_a, limit, window)
+                    .expect("tenant A rate limit")
+                    .allowed
+            );
+        }
+        assert!(
+            !store
+                .check_rate_limit(&tenant_a, limit, window)
+                .expect("tenant A rate limit")
+                .allowed,
+            "tenant A must be limited once its own budget is spent"
+        );
+
+        // Tenant B shares no budget with tenant A despite the ambiguous split.
+        assert!(
+            store
+                .check_rate_limit(&tenant_b, limit, window)
+                .expect("tenant B rate limit")
+                .allowed,
+            "cross-tenant Valkey key collision: tenant B inherited tenant A's spent budget"
+        );
+    }
+}
