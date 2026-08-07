@@ -19,7 +19,7 @@ use super::env::{
     OperatorTokenSource, control_postgres_url, operator_token_source, path, required,
     resolve_bind_addr,
 };
-use super::fanout::spawn_control_fanout;
+use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
 /// PEM material ceiling, matching `event-ingest`'s own 1 MiB bound on the
@@ -187,7 +187,20 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
     Ok(ControlOutboxBackend::new(Box::new(file_outbox)))
 }
 
-pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Synchronous by design, exactly as `apps/event-ingest/src/startup/service.rs`
+/// is and for the same reason: some clients constructed below own an internal
+/// tokio runtime and `block_on` it during construction, which **panics** on a
+/// thread that already has a runtime entered.
+///
+/// This is not hypothetical. `run()` was `async` under `#[tokio::main]` until
+/// the Postgres backend was wired in, at which point
+/// `PostgresOutbox::connect` -> `postgres::Config::connect` panicked with
+/// "Cannot start a runtime from within a runtime" on the first real container
+/// start -- while every in-process test stayed green, because none of them
+/// construct a blocking client inside an async `run()`. The runtime this
+/// process serves on is therefore created at the end, once construction is
+/// complete.
+pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = resolve_bind_addr()?;
     // Confines every configured secret path under one operator-owned
     // directory, so a compromised env var cannot point this process at
@@ -199,20 +212,35 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let outbox = Arc::new(open_outbox()?);
     let resolver = build_operator_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
-    // Bound to a named variable, not `_`, and kept alive until `serve` returns:
-    // this is the only thing that turns a durably accepted command into an
-    // observable `control` event. Nothing on the accept path touches it --
-    // `ControlGatewayService` never sees the publisher -- so a JetStream
-    // outage delays `delivered` and defers the trace write without affecting
-    // whether a command is accepted (ADR-0006).
-    let _fanout_worker = spawn_control_fanout(Arc::clone(&outbox), &trusted_base)?;
-    let service = ControlGatewayService::new(auth, outbox);
+    // Resolved and validated here, with no runtime entered; spawned below,
+    // inside one. No socket is opened either way -- an unreachable broker
+    // must never stop this gateway from starting (ADR-0006).
+    let fanout = prepare_control_fanout(&trusted_base)?;
+    let service = ControlGatewayService::new(auth, Arc::clone(&outbox));
 
-    println!("apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)");
-    Server::builder()
-        .tls_config(tls)?
-        .add_service(bounded_control_gateway_server(service))
-        .serve(bind_addr)
-        .await?;
+    // Everything above is built without a runtime entered. Same comment, same
+    // reason, as `event-ingest`'s own `run()`.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        // Bound to a named variable, not `_`, and kept alive until `serve`
+        // returns: this is the only thing that turns a durably accepted
+        // command into an observable `control` event. Nothing on the accept
+        // path touches it -- `ControlGatewayService` never sees the publisher
+        // -- so a JetStream outage delays `delivered` and defers the trace
+        // write without affecting whether a command is accepted (ADR-0006).
+        let _fanout_worker = fanout.map(|fanout| fanout.spawn(outbox));
+        println!(
+            "apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)"
+        );
+        Server::builder()
+            .tls_config(tls)?
+            .add_service(bounded_control_gateway_server(service))
+            .serve(bind_addr)
+            .await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
     Ok(())
 }

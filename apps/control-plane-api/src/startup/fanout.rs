@@ -152,18 +152,41 @@ fn connect_off_runtime(
     }
 }
 
-/// Spawns the fanout worker, or returns `None` when no broker is configured.
+/// Everything the fanout worker needs, resolved before a runtime exists.
 ///
-/// The returned handle must be bound to a live variable for the process
-/// lifetime by the caller. Dropping a `JoinHandle` detaches rather than
-/// aborts the task in tokio, so a dropped handle would not stop delivery
-/// today -- but relying on that would make "who owns this worker" invisible,
-/// and a later `abort_on_drop` wrapper or `JoinSet` would silently switch off
-/// command delivery with no code change anywhere near this file.
-pub(crate) fn spawn_control_fanout(
-    backend: Arc<ControlOutboxBackend>,
+/// Split from spawning because [`super::service::run`] is synchronous by
+/// design (see its doc comment): construction happens with no runtime
+/// entered, and `tokio::spawn` requires one. This half touches only the
+/// environment and the filesystem.
+pub(crate) struct ControlFanout {
+    publisher: Arc<tokio::sync::Mutex<LazyJetStreamPublisher>>,
+    interval: std::time::Duration,
+}
+
+impl ControlFanout {
+    /// Spawns the worker. Must be called with a runtime entered.
+    ///
+    /// The returned handle must be bound to a live variable for the process
+    /// lifetime by the caller. Dropping a `JoinHandle` detaches rather than
+    /// aborts the task in tokio, so a dropped handle would not stop delivery
+    /// today -- but relying on that would make "who owns this worker"
+    /// invisible, and a later `abort_on_drop` wrapper or `JoinSet` would
+    /// silently switch off command delivery with no code change anywhere near
+    /// this file.
+    pub(crate) fn spawn(self, backend: Arc<ControlOutboxBackend>) -> tokio::task::JoinHandle<()> {
+        println!(
+            "apex-control-plane-api fanout worker started (tick {}s)",
+            self.interval.as_secs()
+        );
+        spawn_fanout_worker(backend, self.publisher, self.interval)
+    }
+}
+
+/// Resolves and validates the fanout configuration, or returns `None` when no
+/// broker is configured. Opens no socket -- see this module's header.
+pub(crate) fn prepare_control_fanout(
     trusted_base: &Path,
-) -> Result<Option<tokio::task::JoinHandle<()>>, Box<dyn std::error::Error>> {
+) -> Result<Option<ControlFanout>, Box<dyn std::error::Error>> {
     let Some(config) = nats_config()? else {
         // Loud, on stderr, for the same reason the empty operator-token table
         // is: a control gateway whose commands are recorded but never
@@ -195,9 +218,8 @@ pub(crate) fn spawn_control_fanout(
         trusted_base.to_path_buf(),
         retry_attempts,
     )));
-    println!(
-        "apex-control-plane-api fanout worker started (tick {}s)",
-        interval.as_secs()
-    );
-    Ok(Some(spawn_fanout_worker(backend, publisher, interval)))
+    Ok(Some(ControlFanout {
+        publisher,
+        interval,
+    }))
 }

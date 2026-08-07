@@ -371,6 +371,22 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # Postgres server leaf for the control gateway's own outbox database
+    # (deploy/compose/compose.control-pg.yaml). Not optional decoration: the
+    # shared `postgres_transport` refuses `sslmode=disable` for anything but a
+    # literal loopback IP, so a containerised Postgres reached by service name
+    # can only be spoken to over verified TLS. The SAN must be the Compose
+    # service name, which is what rustls verifies against.
+    _issue(
+        out=out,
+        basename="control-postgres-server",
+        common_name="control-postgres",
+        san_dns=["control-postgres", "localhost"],
+        san_ips=["127.0.0.1", "::1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
     # Shared secrets used by configs
     # Username is treated as private material by NATS host-side validation.
     _prepare_write(out / "nats-username")

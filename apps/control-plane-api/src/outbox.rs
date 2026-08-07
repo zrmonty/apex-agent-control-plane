@@ -35,6 +35,43 @@ impl ControlOutboxBackend {
         let mut guard = self.inner.lock().map_err(|_| CommandError::internal())?;
         Ok(f(&mut guard))
     }
+
+    /// [`Self::with_lock`] for callers already inside an async task.
+    ///
+    /// Every `EventOutbox` implementation here is synchronous, and
+    /// `PostgresOutbox` is synchronous the hard way: the `postgres` crate
+    /// drives an internal tokio runtime and `block_on`s it on *every* query,
+    /// which **panics** with "Cannot start a runtime from within a runtime"
+    /// when called on a tokio worker thread. So an async caller cannot simply
+    /// call `with_lock` -- the accept path
+    /// ([`crate::service`]) already avoids this by going through
+    /// `spawn_blocking`, and this is the equivalent primitive for callers
+    /// that hold state across the call and cannot move it to another thread
+    /// (the fanout worker holds the publisher guard).
+    ///
+    /// `block_in_place` is what licenses the nested `block_on`: it converts
+    /// this worker thread into a blocking one and lets the runtime migrate
+    /// other tasks off it. It is multi-thread-only and panics on a
+    /// current-thread runtime, hence the flavor check -- outside a
+    /// multi-thread runtime there is no worker thread to protect and the call
+    /// is made directly, which is also what keeps the paused-clock tests in
+    /// [`crate::replay`] deterministic.
+    pub(crate) fn with_lock_from_async<T>(
+        &self,
+        f: impl FnOnce(&mut Box<dyn EventOutbox + Send>) -> T,
+    ) -> Result<T, CommandError> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle)
+                if matches!(
+                    handle.runtime_flavor(),
+                    tokio::runtime::RuntimeFlavor::MultiThread
+                ) =>
+            {
+                tokio::task::block_in_place(|| self.with_lock(f))
+            }
+            _ => self.with_lock(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -32,7 +32,12 @@ where
         loop {
             tokio::time::sleep(interval).await;
             let backend = backend.clone();
-            let pending = match backend.with_lock(|outbox| outbox.pending()) {
+            // `with_lock_from_async`, not `with_lock`: `PostgresOutbox` runs
+            // every query through the `postgres` crate's own internal runtime
+            // and `block_on`, which panics on a tokio worker thread. See that
+            // method's doc comment -- this exact call aborted the worker on
+            // the first Postgres-backed container start.
+            let pending = match backend.with_lock_from_async(|outbox| outbox.pending()) {
                 Ok(pending) => pending,
                 Err(_) => continue,
             };
@@ -55,7 +60,7 @@ where
                             namespace_id: event.namespace_id().to_owned(),
                             event_id: event.event_id().to_owned(),
                         };
-                        let _ = backend.with_lock(|outbox| outbox.mark_complete(&key));
+                        let _ = backend.with_lock_from_async(|outbox| outbox.mark_complete(&key));
                     }
                     Ok(Err(error)) => {
                         eprintln!(
@@ -123,6 +128,110 @@ mod tests {
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
+    }
+
+    /// An outbox whose every operation drives its own tokio runtime, exactly
+    /// the way `postgres::Client` does under `PostgresOutbox`. Delegates the
+    /// actual storage to `InMemoryOutbox` so only the blocking behaviour is
+    /// being simulated.
+    struct BlockingOutbox {
+        inner: InMemoryOutbox,
+    }
+
+    impl BlockingOutbox {
+        /// The exact shape of `postgres::Connection`'s internals: an owned
+        /// runtime, blocked on from a synchronous method. This panics with
+        /// "Cannot start a runtime from within a runtime" if the caller is a
+        /// tokio worker thread that has not entered a blocking region.
+        fn block(&self) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {});
+        }
+    }
+
+    impl apex_event_ingest::EventOutbox for BlockingOutbox {
+        fn enqueue(
+            &mut self,
+            event: &apex_event_ingest::IngestRequest,
+        ) -> Result<apex_event_ingest::EnqueueResult, GatewayError> {
+            self.block();
+            self.inner.enqueue(event)
+        }
+
+        fn mark_complete(&mut self, key: &OutboxKey) -> Result<(), GatewayError> {
+            self.block();
+            self.inner.mark_complete(key)
+        }
+
+        fn pending(&mut self) -> Vec<apex_event_ingest::IngestRequest> {
+            self.block();
+            self.inner.pending()
+        }
+    }
+
+    /// Regression test for a fault that every in-process test missed and that
+    /// only appeared on the first real Postgres-backed container start: the
+    /// worker called the outbox directly from its async task, and
+    /// `PostgresOutbox` blocks on an internal runtime for every query, so the
+    /// worker task aborted on its first tick. The process stayed up and kept
+    /// accepting commands, so the container looked healthy while nothing was
+    /// ever delivered again -- the same silent failure mode as never having
+    /// wired the worker in at all.
+    ///
+    /// Multi-threaded on purpose: the flavor is the whole point, and the
+    /// paused-clock test below runs on the default current-thread runtime
+    /// where this hazard cannot occur.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fanout_worker_survives_an_outbox_that_blocks_on_its_own_runtime() {
+        let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> = Box::new(BlockingOutbox {
+            inner: InMemoryOutbox::new(16).unwrap(),
+        });
+        let backend = Arc::new(ControlOutboxBackend::new(outbox));
+        let request = apex_event_ingest::IngestRequest::new(
+            "018f0000-0000-7000-8000-000000000000",
+            "acme",
+            "prod",
+            vec![1, 2, 3],
+        );
+        // `with_lock_from_async` even in setup: this test body *is* a tokio
+        // worker thread, so a direct `with_lock` would panic here for the very
+        // reason the test exists.
+        backend
+            .with_lock_from_async(|outbox| outbox.enqueue(&request))
+            .unwrap()
+            .unwrap();
+
+        let publisher = Arc::new(tokio::sync::Mutex::new(FlakyPublisher {
+            fail_next: false,
+            published: vec![],
+        }));
+        let _handle = spawn_fanout_worker(
+            backend.clone(),
+            publisher.clone(),
+            Duration::from_millis(20),
+        );
+
+        // Real time, not the paused clock: `block_in_place` moves work between
+        // real threads, so a virtual clock would prove nothing here. The
+        // window is generous because the assertion is "it ran at all", not
+        // "it ran within N ms".
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if !publisher.lock().await.published.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            publisher.lock().await.published.len(),
+            1,
+            "the worker must survive a blocking outbox instead of aborting on its first tick"
+        );
+        let remaining = backend
+            .with_lock_from_async(|outbox| outbox.pending())
+            .unwrap();
+        assert!(remaining.is_empty(), "the row must still be marked complete");
     }
 
     #[tokio::test(start_paused = true)]

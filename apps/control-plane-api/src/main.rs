@@ -75,10 +75,15 @@
 
 mod startup;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Deliberately **not** `#[tokio::main]`, matching `apps/event-ingest`'s own
+/// `main`. `startup::run` constructs clients that own an internal runtime and
+/// `block_on` it -- `PostgresOutbox::connect` is one -- and those panic with
+/// "Cannot start a runtime from within a runtime" on a thread that already
+/// has one entered. `run` builds the serving runtime itself, after
+/// construction is complete.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Must run before any TLS client or server is constructed, including the
     // `ServerTlsConfig` built during startup.
     apex_control_plane_api::install_rustls_provider();
-    startup::run().await
+    startup::run()
 }

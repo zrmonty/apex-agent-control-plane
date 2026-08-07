@@ -254,14 +254,14 @@ jobs:
           set -euo pipefail
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
           docker compose $P build control-plane-api
-          # The optional-feature build is a separate artifact that can break
-          # separately: --features postgres forwards to
-          # apex-event-ingest/postgres, which compiles deploy/postgres/*.sql
-          # via include_str!, so a build context omitting that directory fails
-          # outright -- exactly how it broke for event-ingest.
-          CONTROL_CARGO_FEATURES=postgres docker compose $P build control-plane-api
-          # Serve the default-feature image.
-          docker compose $P build control-plane-api
+          # The --features postgres artifact is built and, more importantly,
+          # *run* by the "Postgres-backed control gateway" step below, under
+          # its own image tag. It used to be built here and then thrown away,
+          # which caught a build break (deploy/postgres/*.sql is compiled in
+          # via include_str!, so a narrow build context fails outright) but
+          # could not catch a runtime one -- and there was one: the binary
+          # panicked on start with "Cannot start a runtime from within a
+          # runtime" the first time a real container used that backend.
           docker compose $P up -d --force-recreate control-plane-api
           for attempt in $(seq 1 90); do
             state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep control-plane-api || true)"
@@ -330,6 +330,79 @@ jobs:
             exit 1
           }
 
+      # `--features postgres` used to change nothing about the running binary:
+      # open_outbox() unconditionally built a FileOutbox and the feature only
+      # forwarded the dependency to apex-event-ingest. Building that artifact
+      # proved it compiled; nothing ran it, so the panic it took on the first
+      # real container start ("Cannot start a runtime from within a runtime",
+      # because the sync postgres client drives its own runtime on every
+      # query) was invisible. This builds it, runs two replicas of it against
+      # a real TLS Postgres, and drives concurrent traffic at both.
+      - name: Postgres-backed control gateway (two replicas)
+        working-directory: deploy/compose
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
+          docker compose $P build control-plane-api-pg-a
+          docker compose $P up -d --force-recreate control-plane-api-pg-a control-plane-api-pg-b
+          for attempt in $(seq 1 90); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep control-plane-api-pg || true)"
+            case "$state" in
+              *exited*)
+                echo "a Postgres-backed replica exited: $state" >&2
+                docker compose $P logs --no-color control-postgres control-plane-api-pg-a control-plane-api-pg-b >&2
+                exit 1
+                ;;
+            esac
+            if (echo > /dev/tcp/127.0.0.1/18447) >/dev/null 2>&1 \
+              && (echo > /dev/tcp/127.0.0.1/18448) >/dev/null 2>&1; then
+              echo "both Postgres-backed replicas serving (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 90 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color --tail 120 control-postgres control-plane-api-pg-a control-plane-api-pg-b >&2
+              echo "Postgres-backed replicas never began serving" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          # An open port is not proof of the backend. Both of these are:
+          # the outbox row must be in Postgres, and the file outbox must not
+          # exist -- a silent fallback to FileOutbox would satisfy neither.
+          docker compose $P logs --no-color control-plane-api-pg-a \
+            | grep -q 'outbox backend: postgres' \
+            || { echo "replica A did not select the Postgres backend" >&2; exit 1; }
+
+      - name: Live two-replica Postgres tests
+        working-directory: apps/control-plane-api
+        timeout-minutes: 15
+        env:
+          APEX_CONTROL_LIVE_POSTGRES: "1"
+          APEX_CONTROL_LIVE_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+        run: cargo test --test live_control_postgres -- --nocapture --test-threads=1
+
+      - name: Confirm control commands landed in Postgres, not a file
+        working-directory: deploy/compose
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
+          rows="$(docker compose $P exec -T control-postgres \
+            psql -U apex -d apex_control -tAc 'SELECT count(*) FROM apex_event_outbox;' | tr -d '[:space:]')"
+          echo "apex_event_outbox rows in apex_control: $rows"
+          [ "$rows" -ge 1 ] || { echo "no control command reached Postgres" >&2; exit 1; }
+          # Two fanout workers share one table. `attempts` is incremented by
+          # the FOR UPDATE SKIP LOCKED claim, so a row claimed by both replicas
+          # in the same cycle would show more attempts than fanout rounds --
+          # the double-delivery those claim leases exist to prevent.
+          docker compose $P exec -T control-postgres \
+            psql -U apex -d apex_control -c 'SELECT state, count(*), max(attempts) FROM apex_event_outbox GROUP BY state;'
+          docker compose $P exec -T control-plane-api-pg-a sh -c \
+            '[ -z "$(ls -A /var/lib/apex-control 2>/dev/null)" ] && [ ! -e ./data ]' \
+            || { echo "a file outbox exists on the Postgres-backed replica" >&2; exit 1; }
+
       - name: Adversarial corpus against the running container
         working-directory: apps/event-ingest
         timeout-minutes: 25
@@ -357,6 +430,7 @@ jobs:
           : > /tmp/apex-overlay-secrets/azure-account-key
           : > /tmp/apex-overlay-secrets/gcs-sa.json
           docker compose -f compose.gateway-ref.yaml config >/dev/null
+          docker compose -f compose.gateway-ref.yaml -f compose.control-pg.yaml config >/dev/null
           AZURE_CONNECTION_STRING_FILE=/tmp/apex-overlay-secrets/azure-connection-string \
           AZURE_ACCOUNT_KEY_FILE=/tmp/apex-overlay-secrets/azure-account-key \
             docker compose -f compose.gateway-ref.yaml -f compose.azure.yaml config >/dev/null
@@ -377,8 +451,8 @@ jobs:
           # jetstream-init) exit before "Build and smoke-start" prints anything
           # beyond "didn't complete successfully: exit 1" -- without this, the
           # actual stderr that would explain why is never captured anywhere.
-          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml ps -a > /tmp/apex-ci-logs/gateway-ref-ps.txt 2>&1 || true
-          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/gateway-ref-logs.txt 2>&1 || true
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml ps -a > /tmp/apex-ci-logs/gateway-ref-ps.txt 2>&1 || true
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml -f ../compose.control-pg.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/gateway-ref-logs.txt 2>&1 || true
           docker ps -a > /tmp/apex-ci-logs/docker-ps.txt 2>&1 || true
           # Print to job log (public) so we can diagnose without admin log API.
           echo "===== live-mtls ps ====="
@@ -406,4 +480,4 @@ jobs:
           docker compose -f deploy/compose/live-mtls/compose.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true
-          docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml down -v --remove-orphans || true
+          docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml -f deploy/compose/compose.control-pg.yaml down -v --remove-orphans || true

@@ -1,0 +1,167 @@
+# Overlay: run the OOB control gateway on the Postgres outbox, as two replicas.
+#
+# Usage (from deploy/compose, after live-mtls PKI generation):
+#
+#   P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
+#   docker compose $P up -d control-plane-api-pg-a control-plane-api-pg-b
+#
+# This exists because `--features postgres` used to change nothing about the
+# running binary. `startup::service::open_outbox` unconditionally built a
+# `FileOutbox`; the feature only forwarded the dependency to
+# `apex-event-ingest`. So a deployment that believed it had a multi-writer
+# outbox had a single-writer file, and CI could not tell -- it built the
+# postgres-feature image and then served the default-feature one.
+#
+# Two replicas, not one, on purpose. A single replica against Postgres proves
+# only that the connection string was read. The claim that actually matters
+# for what comes next (cross-replica rate limiting) is that two processes can
+# share one authoritative outbox: `apex_event_outbox`'s advisory-locked schema
+# DDL, its `ON CONFLICT DO NOTHING` insert race, and its
+# `FOR UPDATE SKIP LOCKED` claim leases. Those were fixed in `event-ingest`;
+# this proves they still hold when *this* crate is the one using them.
+#
+# Local/CI reference path only -- not a substitute for digest-pinned
+# production images or a managed database.
+
+# Its own image tag: this is the `--features postgres` artifact, which is a
+# separate build from the default-feature image compose.gateway-ref.yaml
+# serves and has broken separately before (deploy/postgres/*.sql is compiled
+# in via include_str!, so a narrower build context fails outright).
+x-control-pg-build: &control-pg-build
+  image: apex-control-plane-api-pg-ref:latest
+  build:
+    context: ../..
+    dockerfile: apps/control-plane-api/Dockerfile
+    args:
+      BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
+      RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
+      CARGO_FEATURES: postgres
+
+# Shared by both replicas so they cannot drift apart -- the point of the test
+# is that two *identical* processes agree on one outbox.
+x-control-pg-environment: &control-pg-environment
+  APEX_CONTROL_TRUSTED_SECRET_BASE: /var/lib/apex-control-secrets
+  APEX_CONTROL_BIND_ADDR: 0.0.0.0:9443
+  APEX_CONTROL_ALLOW_NONLOCAL_BIND: "true"
+  APEX_CONTROL_SERVER_CERT_FILE: /var/lib/apex-control-secrets/control_server_cert
+  APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
+  APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
+  APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
+  # `apex_control`, not the ingest gateway's database. `PostgresOutbox`
+  # hardcodes the `apex_event_outbox` table name, so two services sharing one
+  # database share one outbox table -- and each service's replay worker would
+  # claim (FOR UPDATE SKIP LOCKED) and republish the other's rows through its
+  # own sinks. A separate database, or a separate schema via
+  # `?options=-c%20search_path%3D...`, is the Postgres equivalent of the
+  # separate control-outbox volume the file backend gets.
+  #
+  # sslmode=require, not disable: `postgres_transport` only permits plaintext
+  # to a literal loopback IP with APEX_ALLOW_POSTGRES_PLAINTEXT=1, so a
+  # Postgres reached by Compose service name must be spoken to over verified
+  # TLS. APEX_POSTGRES_CA_FILE is the shared library's variable name, not this
+  # crate's; it is read by apex_event_ingest::postgres_transport.
+  APEX_CONTROL_POSTGRES_URL: postgres://apex:apex_e2e_local_only@control-postgres:5432/apex_control?sslmode=require
+  APEX_POSTGRES_CA_FILE: /var/lib/apex-control-secrets/ca
+  # No APEX_CONTROL_OUTBOX_BASE/_FILE: with the Postgres backend selected the
+  # file outbox is never opened, and leaving them unset is what proves it.
+  APEX_CONTROL_NATS_URL: tls://jetstream:4222
+  APEX_CONTROL_NATS_CA_FILE: /var/lib/apex-control-secrets/ca
+  APEX_CONTROL_NATS_CLIENT_CERT_FILE: /var/lib/apex-control-secrets/control_nats_client_cert
+  APEX_CONTROL_NATS_CLIENT_KEY_FILE: /var/lib/apex-control-secrets/control_nats_client_key
+  APEX_CONTROL_NATS_USERNAME_FILE: /var/lib/apex-control-secrets/control_nats_username
+  APEX_CONTROL_NATS_PASSWORD_FILE: /var/lib/apex-control-secrets/control_nats_password
+  APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
+
+services:
+  # The control gateway's own outbox database. `POSTGRES_DB: apex_control`
+  # rather than `apex`, so this profile demonstrates the separation the code
+  # comments require rather than only describing it.
+  #
+  # TLS is staged inline instead of by a separate init container. Compose
+  # ignores `mode:` on file-based secrets, and Postgres refuses to start with
+  # a key readable beyond its owner -- the same class of failure
+  # gateway-secrets-init exists to absorb. The official image's entrypoint
+  # starts as root and drops to the postgres user itself, so `install` here
+  # runs with the ownership it needs and no extra service or volume is
+  # involved. /tmp is a tmpfs, so nothing persists.
+  control-postgres:
+    image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        install -d -o postgres -g postgres -m 0700 /tmp/pgtls
+        install -o postgres -g postgres -m 0600 /run/secrets/control_postgres_server_cert /tmp/pgtls/server.crt
+        install -o postgres -g postgres -m 0600 /run/secrets/control_postgres_server_key /tmp/pgtls/server.key
+        exec docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_cert_file=/tmp/pgtls/server.crt \
+          -c ssl_key_file=/tmp/pgtls/server.key
+    environment:
+      POSTGRES_USER: apex
+      POSTGRES_PASSWORD: apex_e2e_local_only
+      POSTGRES_DB: apex_control
+      PGDATA: /var/lib/postgresql/data/pgdata
+    networks: [gateway-ref]
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apex -d apex_control"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+    secrets:
+      - source: control_postgres_server_cert
+        target: control_postgres_server_cert
+      - source: control_postgres_server_key
+        target: control_postgres_server_key
+
+  # Replica A. `depends_on: service_healthy` here, unlike the file-backed
+  # service in compose.gateway-ref.yaml, is not a retreat from ADR-0006: the
+  # outbox *is* this gateway's durability boundary, so an unreachable outbox
+  # means it cannot accept a command at all and should not pretend to. That is
+  # a different thing from JetStream, which only carries an already-durable
+  # command onward and therefore still has no dependency edge.
+  control-plane-api-pg-a:
+    <<: *control-pg-build
+    environment: *control-pg-environment
+    depends_on:
+      control-secrets-init:
+        condition: service_completed_successfully
+      control-postgres:
+        condition: service_healthy
+    networks: [gateway-ref]
+    ports:
+      - "${APEX_CONTROL_PG_BIND:-127.0.0.1}:${APEX_CONTROL_PG_PORT_A:-18447}:9443"
+    volumes:
+      - control-secrets:/var/lib/apex-control-secrets:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+  # Replica B: byte-identical configuration, second published port. Both open
+  # their own connection and both run their own fanout worker, which is the
+  # arrangement the claim-lease semantics have to survive.
+  control-plane-api-pg-b:
+    <<: *control-pg-build
+    environment: *control-pg-environment
+    depends_on:
+      control-secrets-init:
+        condition: service_completed_successfully
+      control-postgres:
+        condition: service_healthy
+    networks: [gateway-ref]
+    ports:
+      - "${APEX_CONTROL_PG_BIND:-127.0.0.1}:${APEX_CONTROL_PG_PORT_B:-18448}:9443"
+    volumes:
+      - control-secrets:/var/lib/apex-control-secrets:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+secrets:
+  control_postgres_server_cert:
+    file: ./live-mtls/secrets/control-postgres-server.pem
+  control_postgres_server_key:
+    file: ./live-mtls/secrets/control-postgres-server.key
