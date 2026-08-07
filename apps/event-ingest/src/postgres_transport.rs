@@ -45,6 +45,37 @@ pub(crate) fn connect(connection_string: &str) -> Result<Client, ()> {
     }
 }
 
+/// Applies `CREATE TABLE IF NOT EXISTS` schema DDL under a session advisory
+/// lock.
+///
+/// `IF NOT EXISTS` is not race-safe in PostgreSQL. Two sessions creating the
+/// same table both pass the catalog existence check and both insert into
+/// `pg_type`, and the loser fails with
+///
+///   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
+///
+/// Both stores run their schema on every `connect()`, so this fires whenever
+/// replicas start together -- a rolling deploy, a scale-up, or a restart storm.
+/// The failure surfaces as INVALID_OUTBOX_CONFIGURATION /
+/// INVALID_IDEMPOTENCY_CONFIGURATION, which tells the operator to go fix a
+/// configuration that is not actually wrong, and the replica does not start.
+///
+/// Serialising the DDL on an advisory lock keyed to the schema removes the
+/// race outright. The lock is session-scoped and released explicitly, so a
+/// caller that dies mid-DDL frees it when its connection closes.
+pub(crate) fn apply_schema(client: &mut Client, lock_key: i64, sql: &str) -> Result<(), ()> {
+    client
+        .execute("SELECT pg_advisory_lock($1)", &[&lock_key])
+        .map_err(|_| ())?;
+    let applied = client.batch_execute(sql).map_err(|_| ());
+    // Always release, even when the DDL itself failed, so one bad startup
+    // cannot wedge every other replica behind a held lock.
+    let released = client
+        .execute("SELECT pg_advisory_unlock($1)", &[&lock_key])
+        .map_err(|_| ());
+    applied.and(released).map(|_| ())
+}
+
 fn parse_and_classify(
     connection_string: &str,
     plaintext_allowed: bool,

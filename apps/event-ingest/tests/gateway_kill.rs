@@ -600,7 +600,7 @@ fn sigkill_during_a_concurrent_volley_never_duplicates_or_strands() {
         let pending = lines.iter().any(|l| l.contains("\"op\":\"pending\""));
         let complete = lines.iter().any(|l| l.contains("\"op\":\"complete\""));
         assert!(
-            !(pending && !complete),
+            !pending || complete,
             "event {id}: outbox row still pending after recovery: {lines:?}"
         );
         landed += row_count;
