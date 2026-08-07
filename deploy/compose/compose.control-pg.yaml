@@ -35,7 +35,13 @@ x-control-pg-build: &control-pg-build
     args:
       BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
       RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
-      CARGO_FEATURES: postgres
+      # `valkey` too, so this one image serves both multi-replica gates: the
+      # Postgres outbox claim below and the cross-replica admission ceiling in
+      # compose.control-valkey.yaml, which layers on top of this file. Without
+      # `APEX_CONTROL_VALKEY_HOST` set the feature changes nothing at runtime --
+      # the ceiling stays process-local -- so the Postgres gate still proves
+      # exactly what it did before.
+      CARGO_FEATURES: ${CONTROL_PG_CARGO_FEATURES:-postgres,valkey}
 
 # Shared by both replicas so they cannot drift apart -- the point of the test
 # is that two *identical* processes agree on one outbox.

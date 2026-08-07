@@ -357,7 +357,8 @@ services:
         for name in ca control_server_cert control_server_key \
                     control_operator_tokens control_nats_client_cert \
                     control_nats_client_key control_nats_username \
-                    control_nats_password; do
+                    control_nats_password control_valkey_client_cert \
+                    control_valkey_client_key control_valkey_password; do
           test -f "/run/secrets/$$name" || { echo "control-secrets-init: missing /run/secrets/$$name" >&2; exit 1; }
           cp "/run/secrets/$$name" "/var/lib/apex-control-secrets/$$name"
           chmod 0600 "/var/lib/apex-control-secrets/$$name"
@@ -390,6 +391,17 @@ services:
         target: control_nats_username
       - source: control_nats_password
         target: control_nats_password
+      # Staged unconditionally even though only the compose.control-valkey.yaml
+      # overlay consumes them, for the same reason the NATS material is staged
+      # for a service that may have no broker configured: this init container
+      # is the single place secret material is restaged at 0600 for uid 10002,
+      # and making its file list depend on which overlays are active would mean
+      # a missing-secret failure that only appears in some combinations.
+      - control_valkey_client_cert
+      - source: control_valkey_client_key
+        target: control_valkey_client_key
+      - source: control_valkey_password
+        target: control_valkey_password
 
   # No depends_on for jetstream or the providers, unlike ingest-gateway, and
   # note that adding the JetStream fanout wiring below did *not* change that.
@@ -508,3 +520,14 @@ secrets:
     file: ./live-mtls/secrets/control-nats-username
   control_nats_password:
     file: ./live-mtls/secrets/control-nats-password
+  # The control gateway's own Valkey client identity and ACL credential, for
+  # the cross-replica admission ceiling (compose.control-valkey.yaml). Distinct
+  # from ingest_valkey_client_* / valkey-ingest-password: `event-ingest`'s
+  # ephemeral key prefix is a fixed literal, so a shared instance would be a
+  # shared keyspace under one credential.
+  control_valkey_client_cert:
+    file: ./live-mtls/secrets/control-valkey-client.pem
+  control_valkey_client_key:
+    file: ./live-mtls/secrets/control-valkey-client.key
+  control_valkey_password:
+    file: ./live-mtls/secrets/valkey-control-password

@@ -1,0 +1,52 @@
+{
+  "realm": "other",
+  "enabled": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "clients": [
+    {
+      "clientId": "apex-control-gateway",
+      "name": "Same client id, different realm",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-other-realm-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,147 @@
+# Overlay: prove the control gateway's Keycloak operator-credential verifier
+# against a real Keycloak.
+#
+# Usage (from deploy/compose, after live-mtls PKI generation):
+#
+#   P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-keycloak.yaml"
+#   docker compose $P up -d control-plane-api-oidc
+#
+# Why a real Keycloak and not a JWT fixture: a hand-rolled mock and a
+# hand-rolled verifier can agree with each other while both disagree with the
+# identity provider. `src/keycloak/tests.rs` already covers every rejection
+# offline against locally-minted tokens; what it cannot cover is the shape
+# Keycloak actually emits -- where the `typ` claim lives, what a JWKS entry
+# carries, that the realm publishes an `enc` key alongside the `sig` one, and
+# that an access token and an ID token are distinguishable at all.
+#
+# Local/CI reference path only. The realm JSONs under gateway-ref/keycloak/
+# carry fixture client secrets that authorize nothing outside this profile.
+
+# `KC_HOSTNAME` fixes the issuer to the in-network address, so tokens minted
+# through the published host port still carry `iss: https://keycloak:8443/...`
+# and the gateway's configured issuer is one value in both places. The host
+# side only *obtains* tokens; the gateway is what verifies them.
+x-keycloak-hostname: &keycloak-hostname https://keycloak:8443
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: apex_keycloak_lab_only
+      KC_HOSTNAME: *keycloak-hostname
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+    entrypoint: ["/bin/bash", "-ec"]
+    # `start-dev` uses the in-memory dev database, which is the right trade for
+    # a throwaway verification harness: no volume, no migration step, and the
+    # realms are re-imported from source on every start, so a test can never be
+    # passing against drifted state a previous run left behind.
+    #
+    # The TLS material is restaged first. The official image runs as uid 1000
+    # while the bind-mounted lab key is written for Docker's secret mount, and
+    # /run/secrets is read-only, so Keycloak is handed a copy in its own
+    # writable conf directory instead. Same class of problem, and the same fix,
+    # as control-secrets-init in compose.gateway-ref.yaml.
+    #
+    # `start-dev` always brings up its plaintext listener as well; only the
+    # HTTPS port is published, and nothing in this repository ever addresses
+    # the other one. The gateway's JWKS client is `https_only` and trusts
+    # exactly this CA, so it could not fall back to plaintext even if a
+    # misconfiguration pointed it at 8080.
+    command:
+      - |
+        install -d -m 0700 /opt/keycloak/conf/tls
+        install -m 0600 /run/secrets/keycloak_server_cert /opt/keycloak/conf/tls/server.crt
+        install -m 0600 /run/secrets/keycloak_server_key /opt/keycloak/conf/tls/server.key
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm \
+          --https-certificate-file=/opt/keycloak/conf/tls/server.crt \
+          --https-certificate-key-file=/opt/keycloak/conf/tls/server.key \
+          --https-port=8443
+    networks: [gateway-ref]
+    ports:
+      # Published so the host-side test can mint real tokens from the token
+      # endpoint. Loopback only.
+      - "${APEX_KEYCLOAK_BIND:-127.0.0.1}:${APEX_KEYCLOAK_PORT:-18443}:8443"
+    volumes:
+      - ./gateway-ref/keycloak:/opt/keycloak/data/import:ro
+    secrets:
+      - keycloak_server_cert
+      - keycloak_server_key
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      # A TCP connect, deliberately, rather than an HTTP probe of
+      # /health/ready: Keycloak 26 serves health on the *management* port,
+      # which inherits the TLS configuration above, and this image ships
+      # neither curl nor wget to speak HTTPS to it. The connect is still a
+      # real readiness signal -- the startup log shows realm import completing
+      # *before* Quarkus binds a listener, so an open 8443 means the realms
+      # are in. Test code additionally retries the token endpoint.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8443"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+
+  # A second control gateway replica whose operator credentials come from
+  # Keycloak rather than the static table, so the deployed selection path
+  # (`startup::service::build_operator_resolver`) is exercised in a real
+  # container and not only in-process.
+  #
+  # `depends_on: service_healthy` on Keycloak, unlike the JetStream edge: the
+  # first JWKS fetch is best-effort and a failed one is not a startup failure,
+  # but a CI gate that raced Keycloak's boot would report "credentials refused"
+  # for a reason that has nothing to do with the code under test.
+  control-plane-api-oidc:
+    image: apex-control-plane-api-ref:latest
+    build:
+      context: ../..
+      dockerfile: apps/control-plane-api/Dockerfile
+      args:
+        BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
+        RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
+        CARGO_FEATURES: ${CONTROL_CARGO_FEATURES:-}
+    environment:
+      APEX_CONTROL_TRUSTED_SECRET_BASE: /var/lib/apex-control-secrets
+      APEX_CONTROL_BIND_ADDR: 0.0.0.0:9443
+      APEX_CONTROL_ALLOW_NONLOCAL_BIND: "true"
+      APEX_CONTROL_SERVER_CERT_FILE: /var/lib/apex-control-secrets/control_server_cert
+      APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
+      APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
+      # The production credential path, and deliberately the *only* one set
+      # here: configuring a static table alongside it is a hard startup error,
+      # which is what makes this container prove the Keycloak resolver rather
+      # than quietly falling back to a token file.
+      APEX_CONTROL_KEYCLOAK_ISSUER: https://keycloak:8443/realms/apex
+      APEX_CONTROL_KEYCLOAK_AUDIENCE: apex-control-gateway
+      APEX_CONTROL_KEYCLOAK_CA_FILE: /var/lib/apex-control-secrets/ca
+      # Fast enough that a CI gate does not wait minutes to observe a rotation,
+      # and still inside the 30..=3600 range the binary enforces.
+      APEX_CONTROL_KEYCLOAK_JWKS_REFRESH_SECS: "30"
+      APEX_CONTROL_KEYCLOAK_JWKS_MAX_AGE_SECS: "120"
+      APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
+      APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+    depends_on:
+      control-secrets-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    networks: [gateway-ref]
+    ports:
+      - "${APEX_CONTROL_OIDC_BIND:-127.0.0.1}:${APEX_CONTROL_OIDC_PORT:-18449}:9443"
+    volumes:
+      - control-oidc-data:/var/lib/apex-control
+      - control-secrets:/var/lib/apex-control-secrets:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+
+volumes:
+  control-oidc-data:
+
+secrets:
+  keycloak_server_cert:
+    file: ./live-mtls/secrets/keycloak-server.pem
+  keycloak_server_key:
+    file: ./live-mtls/secrets/keycloak-server.key

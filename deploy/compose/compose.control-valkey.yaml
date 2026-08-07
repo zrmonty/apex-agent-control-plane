@@ -1,0 +1,102 @@
+# Overlay: give the two Postgres-backed control gateway replicas a shared,
+# cross-replica admission ceiling.
+#
+# Usage (from deploy/compose, after live-mtls PKI generation):
+#
+#   P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.control-valkey.yaml"
+#   docker compose $P up -d control-plane-api-pg-a control-plane-api-pg-b
+#
+# Layered on top of compose.control-pg.yaml rather than duplicating it: that
+# overlay already runs the two replicas this test needs, and its own claim
+# (two processes, one authoritative outbox) is exactly the precondition that
+# makes a shared rate limit worth having. Compose merges the `environment` maps
+# across files, so this only adds the Valkey settings.
+#
+# What this exists to prove: the per-operator admission ceiling in
+# `service.rs` was a process-local HashMap, so N replicas admitted N times the
+# configured limit. That is a real weakening of a control whose whole job is to
+# stop a compromised or malfunctioning operator credential flooding the durable
+# outbox. `tests/live_control_valkey.rs` bursts past the ceiling from both
+# replicas at once and asserts the *combined* admission equals the ceiling, not
+# twice it -- then stops this container mid-run and asserts each replica falls
+# back to its own local ceiling rather than failing open or hanging.
+#
+# Local/CI reference path only.
+
+# The control gateway's own Valkey instance, own ACL user, own client
+# certificate and own password -- never the ingest workload's. Same rule as the
+# separate NATS account and the separate Postgres database, plus a concrete
+# reason: `apex_event_ingest`'s ephemeral key prefix is the fixed literal
+# `apex:ingest`, so a shared instance would put both services' rate-limit
+# counters in one keyspace under one credential, and either service's
+# compromise would let it clear or inflate the other's admission state.
+# `live-mtls/render_configs.py` narrows this user's key pattern to the hex
+# encoding of the control gateway's admission namespace, computed from the same
+# constant the Rust side uses so the two cannot drift.
+x-control-valkey-environment: &control-valkey-environment
+  APEX_CONTROL_VALKEY_HOST: control-valkey
+  APEX_CONTROL_VALKEY_PORT: "6379"
+  APEX_CONTROL_VALKEY_USERNAME: apex-control
+  APEX_CONTROL_VALKEY_PASSWORD_FILE: /var/lib/apex-control-secrets/control_valkey_password
+  APEX_CONTROL_VALKEY_CA_FILE: /var/lib/apex-control-secrets/ca
+  APEX_CONTROL_VALKEY_CLIENT_CERT_FILE: /var/lib/apex-control-secrets/control_valkey_client_cert
+  APEX_CONTROL_VALKEY_CLIENT_KEY_FILE: /var/lib/apex-control-secrets/control_valkey_client_key
+  # A low ceiling on a long window, so the live assertion is deterministic
+  # rather than a race against the clock. With a one-second window a burst that
+  # straddles a boundary can legitimately admit up to two windows' worth, and
+  # "somewhere between 8 and 16" does not distinguish a shared ceiling from two
+  # local ones. Sixty seconds cannot straddle anything on the timescale of the
+  # burst, so shared means exactly 8 and local-only means exactly 16.
+  APEX_CONTROL_ADMISSION_LIMIT: ${APEX_CONTROL_ADMISSION_LIMIT:-8}
+  APEX_CONTROL_ADMISSION_WINDOW_SECS: ${APEX_CONTROL_ADMISSION_WINDOW_SECS:-60}
+
+services:
+  control-valkey:
+    image: valkey/valkey@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
+    command: ["valkey-server", "/run/secrets/valkey_config"]
+    networks: [gateway-ref]
+    secrets:
+      - source: control_valkey_config
+        target: valkey_config
+      # The control gateway's ACL, not the ingest one: a different user, a
+      # different password, and a key pattern narrowed to this service's
+      # admission namespace.
+      - source: control_valkey_acl
+        target: valkey_acl
+      - source: control_valkey_server_cert
+        target: valkey_server_cert
+      - source: control_valkey_server_key
+        target: valkey_server_key
+      - source: ca
+        target: valkey_client_ca
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp, /data]
+    # No host-published port: nothing outside the Compose network needs to
+    # reach a non-authoritative rate-limit counter, and the live test stops the
+    # container rather than talking to it.
+
+  # Both replicas get the same Valkey settings, because the point of the test
+  # is that two *identical* processes share one ceiling.
+  control-plane-api-pg-a:
+    environment: *control-valkey-environment
+    depends_on:
+      control-valkey:
+        condition: service_started
+
+  control-plane-api-pg-b:
+    environment: *control-valkey-environment
+    depends_on:
+      control-valkey:
+        condition: service_started
+
+secrets:
+  control_valkey_config:
+    file: ./live-mtls/secrets/valkey.conf
+  control_valkey_acl:
+    file: ./live-mtls/secrets/control-valkey.acl
+  control_valkey_server_cert:
+    file: ./live-mtls/secrets/control-valkey-server.pem
+  control_valkey_server_key:
+    file: ./live-mtls/secrets/control-valkey-server.key

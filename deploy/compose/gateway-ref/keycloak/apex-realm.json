@@ -1,0 +1,289 @@
+{
+  "realm": "apex",
+  "enabled": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "apex-control-break-glass",
+        "description": "Break-glass operator role. On its own this confers nothing: the gateway additionally requires the token's sub to appear in its locally-configured APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS allow-list."
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "apex-control-gateway",
+      "name": "Apex OOB control gateway (scoped operator)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-client-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "apex-control-break-glass",
+      "name": "Apex OOB control gateway (break-glass candidate)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-break-glass-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        },
+        {
+          "name": "apex-control-break-glass-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "role": "apex-control-break-glass"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "apex-control-overbroad",
+      "name": "Apex OOB control gateway (deliberately over-broad claim)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-overbroad-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"*\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "apex-control-shortlived",
+      "name": "Apex OOB control gateway (one-second tokens)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-shortlived-secret",
+      "attributes": {
+        "access.token.lifespan": "1"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "apex-control-longlived",
+      "name": "Apex OOB control gateway (twelve-hour tokens)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-longlived-secret",
+      "attributes": {
+        "access.token.lifespan": "43200"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "apex-control-wrong-audience",
+      "name": "Apex OOB control gateway (wrong audience)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "apex-control-lab-wrong-audience-secret",
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "some-other-service",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

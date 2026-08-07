@@ -106,6 +106,7 @@ def _is_private_secret_name(name: str) -> bool:
             "control-nats-username",
             "control-nats-password",
             "valkey-ingest-password",
+            "valkey-control-password",
             "ingest-bearer-token",
         }
         or "password" in lower
@@ -128,7 +129,13 @@ def write_host_secrets(docker_out: Path, host_out: Path | None = None) -> Path:
         if not src.is_file():
             continue
         # Skip rendered service configs; host clients only need TLS + credential files.
-        if src.name in {"nats.conf", "valkey.conf", "valkey.acl", "README.txt"}:
+        if src.name in {
+            "nats.conf",
+            "valkey.conf",
+            "valkey.acl",
+            "control-valkey.acl",
+            "README.txt",
+        }:
             continue
         dest = host_out / src.name
         _prepare_write(dest)
@@ -371,6 +378,48 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # Keycloak server leaf for the live operator-credential tests
+    # (deploy/compose/compose.control-keycloak.yaml). The control gateway
+    # trusts *only* this CA for the JWKS endpoint -- `tls_certs_only` replaces
+    # the trust store rather than adding to it -- so the SAN must cover both
+    # the Compose service name (how the gateway reaches it) and localhost (how
+    # the host-side test mints tokens from it).
+    _issue(
+        out=out,
+        basename="keycloak-server",
+        common_name="keycloak",
+        san_dns=["keycloak", "localhost"],
+        san_ips=["127.0.0.1", "::1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
+    # The control gateway's own Valkey instance and its own client identity,
+    # distinct from `valkey-server` / `ingest-valkey-client` above. Not
+    # decoration: `event-ingest`'s ephemeral key prefix is the fixed literal
+    # `apex:ingest`, so a shared instance would put both services' rate-limit
+    # counters in one keyspace under one ACL user, and either service's
+    # credential could then clear or inflate the other's admission state.
+    _issue(
+        out=out,
+        basename="control-valkey-server",
+        common_name="control-valkey",
+        san_dns=["control-valkey", "localhost"],
+        san_ips=["127.0.0.1", "::1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
+    _issue(
+        out=out,
+        basename="control-valkey-client",
+        common_name="apex-control-valkey",
+        san_dns=["apex-control-valkey"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
     # Postgres server leaf for the control gateway's own outbox database
     # (deploy/compose/compose.control-pg.yaml). Not optional decoration: the
     # shared `postgres_transport` refuses `sslmode=disable` for anything but a
@@ -407,6 +456,9 @@ def main() -> None:
         pass
     _write_runtime_secret(out / "control-nats-password")
     _write_runtime_secret(out / "valkey-ingest-password")
+    # The control gateway's own Valkey ACL credential, never the ingest
+    # workload's -- same rule as the separate NATS account above.
+    _write_runtime_secret(out / "valkey-control-password")
     _write_operator_token_table(out / "control-operator-tokens")
     host_out = write_host_secrets(out)
     print(f"Wrote local-dev PKI under {out}")

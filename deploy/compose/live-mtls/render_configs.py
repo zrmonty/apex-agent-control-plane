@@ -24,6 +24,32 @@ def main() -> None:
     )
     (SECRETS / "valkey.acl").write_text(acl, encoding="utf-8")
 
+    # The OOB control gateway's own Valkey ACL, for its own Valkey instance
+    # (compose.control-valkey.yaml). A separate user with a separate password
+    # and a key pattern narrowed to this service's admission namespace.
+    #
+    # The pattern is computed, not written by hand, from the same namespace
+    # constant the Rust side uses (`service.rs::CONTROL_ADMISSION_NAMESPACE`)
+    # and the same encoding `event-ingest`'s `ephemeral::types` applies:
+    # `apex:ingest:rl:<hex(namespace)>:<hex(bucket)>`, where the `apex:ingest`
+    # prefix is a fixed literal in that crate and the namespace component is
+    # what separates the two services. Deriving it here means the ACL cannot
+    # silently drift from the key the gateway actually writes -- and a drift
+    # would not fail loudly, it would make every check_rate_limit call error
+    # and the shared ceiling quietly stop applying.
+    control_namespace = "apex.control.admission"
+    control_prefix = "apex:ingest:rl:" + control_namespace.encode("ascii").hex()
+    control_password = (
+        (SECRETS / "valkey-control-password").read_text(encoding="utf-8").strip()
+    )
+    control_acl = (
+        "user default off\n"
+        f"user apex-control on sanitize-payload >{control_password} "
+        f"~{control_prefix}:* resetchannels -@all "
+        "+ping +incr +incrby +get +set +setex +expire +ttl +exists\n"
+    )
+    (SECRETS / "control-valkey.acl").write_text(control_acl, encoding="utf-8")
+
     user = (SECRETS / "nats-username").read_text(encoding="utf-8").strip()
     nats_password = (SECRETS / "nats-password").read_text(encoding="utf-8").strip()
     control_user = (SECRETS / "control-nats-username").read_text(encoding="utf-8").strip()
