@@ -25,7 +25,11 @@ const MAX_IDEMPOTENCY_CAPACITY: usize = 1_000_000;
 type DurabilityStores = (Box<dyn EventOutbox>, Box<dyn IdempotencyStore + Send>);
 type DurabilityResult = Result<DurabilityStores, Box<dyn std::error::Error>>;
 
-pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Synchronous by design: every client built below owns an internal runtime and
+/// blocks on it during construction, so this must not run on a thread that
+/// already has a tokio runtime entered. The runtime this process serves on is
+/// created at the end, once construction is complete.
+pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let trusted_base = path("APEX_TRUSTED_SECRET_BASE")?;
     let retry_attempts = attempts()?;
     let nats_config = NatsTlsConfig {
@@ -85,7 +89,6 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let (outbox, idempotency) = open_durability_stores(capacity)?;
-    let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
     let mut publisher = OutboxedPublisher::new(fanout, outbox);
     if let Err(error) = publisher.replay_pending() {
         if !error.retryable {
@@ -148,7 +151,6 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut service =
         AuthenticatedGrpcService::new(AuthenticatedIngestAdapter::new(gateway), verifier);
     service = service.with_ephemeral_store(ephemeral_store);
-    let _replay_worker = service.spawn_replay_worker(Duration::from_secs(5));
     let server_cert_path = trusted_secret_path(
         &path("APEX_GATEWAY_SERVER_CERT_FILE")?,
         &trusted_base,
@@ -188,11 +190,25 @@ pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // certificates optional at the gRPC boundary.
         .client_auth_optional(false);
     let listen = required("APEX_LISTEN_ADDR")?.parse()?;
-    Server::builder()
-        .tls_config(tls)?
-        .add_service(bounded_event_ingest_server(service))
-        .serve(listen)
-        .await?;
+    // Everything above is built without a runtime entered. The reaper and the
+    // replay worker both call `tokio::spawn`/`spawn_blocking`, so they must be
+    // started inside this runtime rather than during construction.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
+        // Borrows `service` to clone its internal Arc handles, so the service
+        // itself can still be moved into the router below.
+        let _replay_worker = service.spawn_replay_worker(Duration::from_secs(5));
+        Server::builder()
+            .tls_config(tls)?
+            .add_service(bounded_event_ingest_server(service))
+            .serve(listen)
+            .await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
     Ok(())
 }
 
