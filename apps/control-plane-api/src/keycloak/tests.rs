@@ -663,14 +663,20 @@ fn config_validation_refuses_a_malformed_claim_path() {
 
 #[test]
 fn a_stale_key_cache_fails_closed_rather_than_trusting_keys_of_unknown_age() {
+    // A one-second ceiling, not a one-millisecond one. The first attempt below
+    // has to land *inside* the window, and a millisecond is not reliably
+    // longer than "construct a resolver, then verify an RSA signature" on a
+    // loaded CI runner -- which is exactly how this first went red on GitHub
+    // Actions while passing locally. One second is orders of magnitude more
+    // than the work between the two assertions and still keeps the test fast.
     let mut config = config();
-    config.jwks_refresh = Duration::from_millis(1);
-    config.jwks_max_age = Duration::from_millis(1);
+    config.jwks_refresh = Duration::from_secs(1);
+    config.jwks_max_age = Duration::from_secs(1);
     let resolver = KeycloakOperatorCredentialResolver::with_static_jwks(config, jwks())
         .expect("resolver must build");
     let token = token();
     assert!(resolver.resolve(&token).is_ok(), "fresh keys must verify");
-    std::thread::sleep(Duration::from_millis(20));
+    std::thread::sleep(Duration::from_millis(1_400));
     assert!(!resolver.keys_are_fresh());
     let error = resolver.resolve(&token).unwrap_err();
     assert_eq!(
