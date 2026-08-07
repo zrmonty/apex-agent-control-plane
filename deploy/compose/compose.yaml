@@ -160,6 +160,23 @@ services:
       # share auth.
       APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
       APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+      # Fanout to the primary trace, so an accepted command becomes an actual
+      # `control` event rather than a durable row nobody reads. Its own NATS
+      # client leaf and its own broker account, never the ingest gateway's:
+      # ADR-0006's credential separation has to hold at the broker too, or
+      # "independently authenticated" stops at the gRPC edge.
+      #
+      # There is still no `depends_on: jetstream` below, deliberately. The
+      # worker connects lazily on its own tick and retries forever; an
+      # unreachable broker defers `delivered` and the trace write, and affects
+      # nothing about whether this gateway starts or accepts commands.
+      APEX_CONTROL_NATS_URL: ${APEX_CONTROL_NATS_URL:-tls://jetstream:4222}
+      APEX_CONTROL_NATS_CA_FILE: /run/secrets/nats_client_ca
+      APEX_CONTROL_NATS_CLIENT_CERT_FILE: /run/secrets/control_nats_client_cert
+      APEX_CONTROL_NATS_CLIENT_KEY_FILE: /run/secrets/control_nats_client_key
+      APEX_CONTROL_NATS_USERNAME_FILE: /run/secrets/control_nats_username
+      APEX_CONTROL_NATS_PASSWORD_FILE: /run/secrets/control_nats_password
+      APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
     networks: [apex-internal]
     secrets:
       - control_server_cert
@@ -169,6 +186,17 @@ services:
       - control_client_ca
       - source: control_operator_tokens
         target: /run/secrets/control_operator_tokens
+        mode: "0400"
+      - nats_client_ca
+      - control_nats_client_cert
+      - source: control_nats_client_key
+        target: /run/secrets/control_nats_client_key
+        mode: "0400"
+      - source: control_nats_username
+        target: /run/secrets/control_nats_username
+        mode: "0400"
+      - source: control_nats_password
+        target: /run/secrets/control_nats_password
         mode: "0400"
     ports:
       - "${APEX_CONTROL_BIND:-127.0.0.1}:${APEX_CONTROL_PORT:-9443}:9443"
@@ -404,6 +432,19 @@ secrets:
     file: ${CONTROL_CLIENT_CA_FILE:?set CONTROL_CLIENT_CA_FILE to the CA that issues operator client certificates}
   control_operator_tokens:
     file: ${CONTROL_OPERATOR_TOKENS_FILE:?set CONTROL_OPERATOR_TOKENS_FILE to an operator credential table file}
+  # The control gateway's own NATS client leaf and broker account, separate
+  # from ingest_nats_client_* / nats_username / nats_password. Grant this
+  # account publish on the event subjects only -- it never manages streams --
+  # so a compromise of one service does not hand over the other's broker
+  # rights.
+  control_nats_client_cert:
+    file: ${CONTROL_NATS_CLIENT_CERT_FILE:?set CONTROL_NATS_CLIENT_CERT_FILE to the control gateway NATS client certificate}
+  control_nats_client_key:
+    file: ${CONTROL_NATS_CLIENT_KEY_FILE:?set CONTROL_NATS_CLIENT_KEY_FILE to the control gateway NATS client key}
+  control_nats_username:
+    file: ${CONTROL_NATS_USERNAME_FILE:?set CONTROL_NATS_USERNAME_FILE to the control gateway NATS user file}
+  control_nats_password:
+    file: ${CONTROL_NATS_PASSWORD_FILE:?set CONTROL_NATS_PASSWORD_FILE to the control gateway NATS password file}
   gateway_server_cert:
     file: ${GATEWAY_SERVER_CERT_FILE:?set GATEWAY_SERVER_CERT_FILE to a gateway certificate}
   gateway_server_key:

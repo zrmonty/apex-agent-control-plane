@@ -26,6 +26,22 @@ def main() -> None:
 
     user = (SECRETS / "nats-username").read_text(encoding="utf-8").strip()
     nats_password = (SECRETS / "nats-password").read_text(encoding="utf-8").strip()
+    control_user = (SECRETS / "control-nats-username").read_text(encoding="utf-8").strip()
+    control_password = (
+        (SECRETS / "control-nats-password").read_text(encoding="utf-8").strip()
+    )
+    # Two broker principals, not one shared credential. Per ADR-0006 the OOB
+    # control gateway is a separate trust boundary from the ingest data path,
+    # and that has to be true at the broker too -- otherwise "independently
+    # authenticated" stops at the gRPC edge and both services hold the same
+    # publish rights the moment either is compromised.
+    #
+    # The control principal is deliberately the narrower of the two: it
+    # publishes control events into the same `apex.events.>` stream, but it is
+    # granted no `$JS.API.>` because it never creates or manages a stream --
+    # `jetstream-init` does that with the ingest credential. Its subscribe
+    # grant is only `_INBOX.>`, which is what a JetStream publish ack is
+    # delivered on.
     nats = f"""# Generated for live-mTLS only. Do not use in production.
 port: 4222
 jetstream {{
@@ -39,6 +55,14 @@ authorization {{
       permissions: {{
         publish: ["apex.events.>", "$JS.API.>"]
         subscribe: ["_INBOX.>", "$JS.ACK.>", "$JS.FC.>"]
+      }}
+    }},
+    {{
+      user: "{control_user}"
+      password: "{control_password}"
+      permissions: {{
+        publish: ["apex.events.>"]
+        subscribe: ["_INBOX.>"]
       }}
     }}
   ]

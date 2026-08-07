@@ -51,7 +51,11 @@ jobs:
           # bind-mounted host file without this. The staged copy inside the
           # container is chmod 0600 by that init step, and the gateway's own
           # permission check still fails closed if the step is skipped.
-          chmod 644 secrets/control-operator-tokens 2>/dev/null || true
+          # Same for the control gateway's own NATS account files, added when
+          # the fanout worker was wired in: control-secrets-init stages them
+          # into the container at 0600, but it has to be able to read the
+          # bind-mounted host file first.
+          chmod 644 secrets/control-operator-tokens secrets/control-nats-username secrets/control-nats-password 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
@@ -306,6 +310,25 @@ jobs:
               --out "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial"
           fi
           cargo test --test live_control_mtls -- --nocapture --test-threads=1
+
+      # The step above proves a command is *accepted*. Until the fanout worker
+      # was wired into the binary, that was the whole story: every accepted
+      # command sat in the outbox forever, `delivered` was permanently false,
+      # and no `control` event ever reached the trace -- with every test in
+      # this workflow still green, because none of them asked the broker
+      # anything. This one does, and it deliberately does not read `delivered`
+      # back from the service that would be the thing at fault.
+      - name: Verify control commands reach JetStream
+        working-directory: deploy/compose
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          docker compose $P run --rm control-fanout-verify || {
+            echo "control fanout never delivered; gateway logs follow" >&2
+            docker compose $P logs --no-color --tail 120 control-plane-api jetstream >&2
+            exit 1
+          }
 
       - name: Adversarial corpus against the running container
         working-directory: apps/event-ingest

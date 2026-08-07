@@ -103,6 +103,8 @@ def _is_private_secret_name(name: str) -> bool:
         or lower in {
             "nats-username",
             "nats-password",
+            "control-nats-username",
+            "control-nats-password",
             "valkey-ingest-password",
             "ingest-bearer-token",
         }
@@ -351,6 +353,24 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # The control gateway's own NATS client identity for fanout, distinct from
+    # `ingest-nats-client`. It publishes into the same `apex.events.>` stream
+    # -- a control event belongs in the same trace as everything else -- but
+    # it does so as its own broker principal, so the two services' broker
+    # authorizations can differ and a compromise of one does not hand over the
+    # other's publish rights. `render_configs.py` grants this user strictly
+    # less than the ingest publisher: no `$JS.API.>`, since the control
+    # gateway never manages streams.
+    _issue(
+        out=out,
+        basename="control-nats-client",
+        common_name="apex-control-nats",
+        san_dns=["apex-control-nats"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
     # Shared secrets used by configs
     # Username is treated as private material by NATS host-side validation.
     _prepare_write(out / "nats-username")
@@ -361,6 +381,15 @@ def main() -> None:
     except OSError:
         pass
     _write_runtime_secret(out / "nats-password")
+    # The control gateway's own NATS account, never the ingest publisher's.
+    _prepare_write(out / "control-nats-username")
+    (out / "control-nats-username").write_text("control-publisher\n", encoding="utf-8")
+    try:
+        # Docker-readable; host tree gets 0600 via write_host_secrets.
+        (out / "control-nats-username").chmod(0o644)
+    except OSError:
+        pass
+    _write_runtime_secret(out / "control-nats-password")
     _write_runtime_secret(out / "valkey-ingest-password")
     _write_operator_token_table(out / "control-operator-tokens")
     host_out = write_host_secrets(out)

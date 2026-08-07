@@ -104,6 +104,54 @@ services:
       - nats_username
       - nats_password
 
+  # Asks the broker whether a submitted control command actually arrived,
+  # rather than reading `ControlCommandResponse.delivered` -- which is the
+  # service reporting on itself, and this repository has already shipped one
+  # bug in that exact shape. Run on demand (`docker compose run --rm
+  # control-fanout-verify`) after driving a command at the control gateway;
+  # nothing depends_on it, so a normal `up` never starts it.
+  #
+  # Reads with the ingest NATS credential because that account holds
+  # `$JS.API.>`; the control gateway's own account deliberately does not, and
+  # granting it stream-read rights just to test it would defeat the point.
+  control-fanout-verify:
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    working_dir: /app
+    command:
+      [
+        "python",
+        "/app/gateway-ref/verify_control_fanout.py",
+        "--host",
+        "jetstream",
+        "--port",
+        "4222",
+        "--ca",
+        "/run/secrets/ca",
+        "--cert",
+        "/run/secrets/ingest_nats_client_cert",
+        "--key",
+        "/run/secrets/ingest_nats_client_key",
+        "--username-file",
+        "/run/secrets/nats_username",
+        "--password-file",
+        "/run/secrets/nats_password",
+      ]
+    volumes:
+      - ./gateway-ref:/app/gateway-ref:ro
+    networks: [gateway-ref]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets:
+      - ca
+      - ingest_nats_client_cert
+      - source: ingest_nats_client_key
+        target: ingest_nats_client_key
+      - nats_username
+      - nats_password
+
   clickhouse-projection:
     image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
     working_dir: /app
@@ -307,7 +355,9 @@ services:
       - |
         umask 077
         for name in ca control_server_cert control_server_key \
-                    control_operator_tokens; do
+                    control_operator_tokens control_nats_client_cert \
+                    control_nats_client_key control_nats_username \
+                    control_nats_password; do
           test -f "/run/secrets/$$name" || { echo "control-secrets-init: missing /run/secrets/$$name" >&2; exit 1; }
           cp "/run/secrets/$$name" "/var/lib/apex-control-secrets/$$name"
           chmod 0600 "/var/lib/apex-control-secrets/$$name"
@@ -333,12 +383,22 @@ services:
         target: control_server_key
       - source: control_operator_tokens
         target: control_operator_tokens
+      - control_nats_client_cert
+      - source: control_nats_client_key
+        target: control_nats_client_key
+      - source: control_nats_username
+        target: control_nats_username
+      - source: control_nats_password
+        target: control_nats_password
 
-  # No depends_on for jetstream or the providers, unlike ingest-gateway. A
-  # control command is durable the moment its outbox row commits, so this
+  # No depends_on for jetstream or the providers, unlike ingest-gateway, and
+  # note that adding the JetStream fanout wiring below did *not* change that.
+  # A control command is durable the moment its outbox row commits, so this
   # gateway must come up and accept commands whether or not the primary data
   # path is reachable -- that independence is the ADR-0006 requirement this
   # profile is here to prove, and a dependency edge would quietly remove it.
+  # The fanout worker connects lazily on its own tick and retries; an
+  # unreachable broker defers delivery and nothing else.
   control-plane-api:
     <<: *control-build
     environment:
@@ -351,6 +411,17 @@ services:
       APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
       APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
       APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+      # Fanout to the primary trace. Its own NATS client leaf and its own
+      # broker account (control-publisher), never the ingest gateway's:
+      # ADR-0006's credential separation has to hold at the broker too, or
+      # "independently authenticated" stops at the gRPC edge.
+      APEX_CONTROL_NATS_URL: tls://jetstream:4222
+      APEX_CONTROL_NATS_CA_FILE: /var/lib/apex-control-secrets/ca
+      APEX_CONTROL_NATS_CLIENT_CERT_FILE: /var/lib/apex-control-secrets/control_nats_client_cert
+      APEX_CONTROL_NATS_CLIENT_KEY_FILE: /var/lib/apex-control-secrets/control_nats_client_key
+      APEX_CONTROL_NATS_USERNAME_FILE: /var/lib/apex-control-secrets/control_nats_username
+      APEX_CONTROL_NATS_PASSWORD_FILE: /var/lib/apex-control-secrets/control_nats_password
+      APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
     depends_on:
       control-secrets-init:
         condition: service_completed_successfully
@@ -425,3 +496,15 @@ secrets:
     file: ./live-mtls/secrets/control-plane-server.key
   control_operator_tokens:
     file: ./live-mtls/secrets/control-operator-tokens
+  # The control gateway's own NATS client leaf and broker account, distinct
+  # from ingest_nats_client_* / nats_username / nats_password above.
+  # render_configs.py grants this account strictly less than the ingest
+  # publisher: publish only `apex.events.>`, no `$JS.API.>`.
+  control_nats_client_cert:
+    file: ./live-mtls/secrets/control-nats-client.pem
+  control_nats_client_key:
+    file: ./live-mtls/secrets/control-nats-client.key
+  control_nats_username:
+    file: ./live-mtls/secrets/control-nats-username
+  control_nats_password:
+    file: ./live-mtls/secrets/control-nats-password
