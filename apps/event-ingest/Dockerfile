@@ -32,6 +32,23 @@ RUN if [ -n "$CARGO_FEATURES" ]; then \
 
 FROM ${RUNTIME_IMAGE}
 RUN useradd --system --uid 10001 --no-create-home apex
+# Both directories MUST exist in the image, owned by the runtime uid.
+#
+# Docker initialises a fresh named volume from the image content at the mount
+# point and copies that directory's ownership and mode with it. When the path
+# does not exist in the image, Docker creates the volume root as `root:root
+# 0755` instead, and this container -- which runs as uid 10001 -- cannot write
+# to it. That made `FileOutbox::open` fail with EACCES and the process exit
+# with INVALID_OUTBOX_CONFIGURATION on every fresh deployment of both
+# deploy/compose/compose.yaml and deploy/compose/compose.gateway-ref.yaml.
+#
+# `apex-secrets` is the staging target for the secrets-init step. The gateway
+# refuses private key material whose mode has any group/other bit set, and
+# Compose ignores `mode:` on file-based secrets (it bind-mounts the host file,
+# so the host's mode wins). An init container owned by this same uid restages
+# the material at 0600 before the gateway starts; the gateway's own check
+# stays strict and still fails closed if that step did not happen.
+RUN install -d -o 10001 -g 10001 -m 0700 /var/lib/apex /var/lib/apex-secrets
 COPY --from=build /src/apps/event-ingest/target/release/apex-event-ingest /usr/local/bin/apex-event-ingest
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/apex-event-ingest"]
