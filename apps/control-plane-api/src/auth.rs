@@ -130,6 +130,25 @@ pub trait OperatorCredentialResolver: Send + Sync + 'static {
     fn resolve(&self, token: &str) -> Result<OperatorCaller, CommandError>;
 }
 
+/// The runtime-selected resolver a deployment ends up with.
+///
+/// `startup::service::build_operator_resolver` now chooses between three
+/// implementations (static file, static inline, Keycloak) and
+/// `ControlGatewayService` is generic over the resolver, so the choice has to
+/// be erased somewhere. Doing it behind this alias -- rather than making the
+/// service take `&dyn` -- keeps every in-process test monomorphised over the
+/// concrete resolver it actually uses.
+pub type BoxedOperatorCredentialResolver = Box<dyn OperatorCredentialResolver>;
+
+/// So `Box<dyn OperatorCredentialResolver>` satisfies the trait bound itself.
+/// Without this the erased resolver could not be handed to
+/// `OperatorTokenAuthenticator<R>`.
+impl OperatorCredentialResolver for BoxedOperatorCredentialResolver {
+    fn resolve(&self, token: &str) -> Result<OperatorCaller, CommandError> {
+        (**self).resolve(token)
+    }
+}
+
 /// A static, in-process token table. Suitable for local/lab deployments and
 /// as the target of a Keycloak token-exchange sidecar that periodically
 /// rotates the table. Tokens are stored and compared only as SHA-256

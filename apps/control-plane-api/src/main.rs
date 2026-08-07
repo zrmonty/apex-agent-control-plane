@@ -51,18 +51,81 @@
 //!   See `startup::env::DEFAULT_FANOUT_INTERVAL_SECS` for why 5.
 //! - `APEX_CONTROL_NATS_RETRY_ATTEMPTS` -- bounded publish retry ladder,
 //!   default 3 (1..=8), mirroring event-ingest's `APEX_RETRY_ATTEMPTS`.
-//! - `APEX_CONTROL_OPERATOR_TOKENS_FILE` (production) or
-//!   `APEX_CONTROL_OPERATOR_TOKENS` (local/lab, CI) -- operator credential
-//!   table: `token1|workspace/ns[,workspace/ns...];token2|*;...`. `*` grants
-//!   a global (break-glass) operator scope. The token and its scopes are
-//!   separated by `|`, not `:`, so a token containing a colon cannot be
-//!   silently truncated into a shorter credential (see
-//!   `auth::parse_operator_token_table`). A malformed entry aborts startup
-//!   rather than being skipped. Setting both variables is refused. This is
+//! - `APEX_CONTROL_OPERATOR_TOKENS_FILE` or `APEX_CONTROL_OPERATOR_TOKENS`
+//!   (local/lab, CI) -- static operator credential table:
+//!   `token1|workspace/ns[,workspace/ns...];token2|*;...`. `*` grants a global
+//!   (break-glass) operator scope. The token and its scopes are separated by
+//!   `|`, not `:`, so a token containing a colon cannot be silently truncated
+//!   into a shorter credential (see `auth::parse_operator_token_table`). A
+//!   malformed entry aborts startup rather than being skipped. This is
 //!   deliberately a distinct credential space from event-ingest's ingest
-//!   bearer tokens -- per [[Authentication and Identity]] the production path
-//!   is a short-lived Keycloak-issued operator credential exchanged in front
-//!   of this process; this static table is the local/lab and CI seam for that.
+//!   bearer tokens.
+//! - `APEX_CONTROL_KEYCLOAK_ISSUER` -- **the production credential path**, and
+//!   the variable that selects it. Verifies short-lived, scope-bound operator
+//!   credentials Keycloak issued through RFC 8693 token exchange, per
+//!   [[Authentication and Identity]]. Keycloak performs the exchange; this
+//!   process is a resource server that holds no client secret and only
+//!   verifies. Setting it alongside either static source is refused, for the
+//!   same reason those two refuse each other: two configured credential
+//!   sources means one is silently ignored. Companion settings:
+//!   - `APEX_CONTROL_KEYCLOAK_AUDIENCE` (required) -- this gateway's expected
+//!     `aud`. `iss` and `aud` are *required* claims here, not
+//!     validated-only-if-present.
+//!   - `APEX_CONTROL_KEYCLOAK_CA_FILE` (required) -- CA the JWKS endpoint's
+//!     certificate must chain to. It **replaces** the trust store rather than
+//!     adding to it, so a publicly-trusted certificate cannot stand in for the
+//!     realm.
+//!   - `APEX_CONTROL_KEYCLOAK_JWKS_URL` -- defaults to
+//!     `{issuer}/protocol/openid-connect/certs`. Overriding it is supported
+//!     for split-horizon deployments and is an assertion that the URL serves
+//!     the configured issuer's keys.
+//!   - `APEX_CONTROL_KEYCLOAK_JWKS_REFRESH_SECS` (default 300, 30..=3600) --
+//!     also the bound on how long a rotated-away key keeps verifying.
+//!   - `APEX_CONTROL_KEYCLOAK_JWKS_MAX_AGE_SECS` (default 900, 30..=86400) --
+//!     staleness ceiling. Past it the resolver refuses every credential with
+//!     `CREDENTIAL_VERIFIER_UNAVAILABLE` rather than trusting keys of unknown
+//!     age. Must be at least the refresh interval.
+//!   - `APEX_CONTROL_KEYCLOAK_SCOPE_CLAIM` (default `apex_control_scopes`) --
+//!     allow-listed claim carrying `workspace/namespace` grants. A `*` in it
+//!     rejects the whole token; it never widens.
+//!   - `APEX_CONTROL_KEYCLOAK_ROLE_CLAIM` (default `realm_access.roles`) --
+//!     dotted path, objects only.
+//!   - `APEX_CONTROL_KEYCLOAK_GLOBAL_ROLE` +
+//!     `APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS` -- the *only* route to the `*`
+//!     break-glass scope, and both are required together. A claim can never
+//!     confer `*` on its own: the subject allow-list is local configuration
+//!     the identity provider does not control. Unset by default, i.e. `*` is
+//!     unreachable.
+//!   - `APEX_CONTROL_KEYCLOAK_MAX_TOKEN_LIFETIME_SECS` (default 3600,
+//!     60..=86400) -- ceiling on `exp - iat`, making "short-lived" real.
+//!   - `APEX_CONTROL_KEYCLOAK_EXPECTED_TYP` (default `Bearer`) /
+//!     `APEX_CONTROL_KEYCLOAK_ALLOW_ANY_TOKEN_TYP=true` -- Keycloak signs ID,
+//!     access and refresh tokens with the same realm keys, and an ID token's
+//!     `aud` is the client id. The waiver is exact-match and setting both is
+//!     refused.
+//! - `APEX_CONTROL_ADMISSION_LIMIT` (default 50, 1..=100000) and
+//!   `APEX_CONTROL_ADMISSION_WINDOW_SECS` (default 1, 1..=3600) -- the
+//!   per-operator admission ceiling.
+//! - `APEX_CONTROL_VALKEY_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD_FILE` /
+//!   `_CA_FILE` / `_CLIENT_CERT_FILE` / `_CLIENT_KEY_FILE` -- optional
+//!   **cross-replica** admission ceiling, reusing
+//!   `apex_event_ingest`'s `EphemeralStore`/`ValkeyEphemeralStore` rather than
+//!   forking a second accelerator. Requires `--features valkey`; setting the
+//!   host without it is a hard startup error. Without it the ceiling is
+//!   process-local, so N replicas admit N x the configured limit.
+//!
+//!   **This is the control gateway's own Valkey instance and its own ACL
+//!   user**, never the ingest workload's -- `APEX_VALKEY_HOST` on this process
+//!   is refused outright. Same rule as `APEX_CONTROL_POSTGRES_URL` and the
+//!   separate NATS account, plus a concrete reason: `event-ingest`'s Valkey
+//!   key prefix is the fixed literal `apex:ingest`, so a shared instance would
+//!   put both services' counters in one keyspace under one credential.
+//!
+//!   The accelerator is **never authoritative**. The process-local ceiling
+//!   remains the hard floor: an unreachable or misbehaving Valkey degrades to
+//!   it rather than failing open, and a Valkey that is down at startup does
+//!   not stop this gateway coming up (ADR-0006). Configuration errors still
+//!   abort startup.
 //!
 //! Transport security: this binary terminates mTLS natively via
 //! `tonic::transport::ServerTlsConfig`, presenting its own server identity

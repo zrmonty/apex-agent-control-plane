@@ -21,19 +21,27 @@ pub mod proto {
 mod auth;
 mod envelope;
 mod errors;
+mod keycloak;
 mod outbox;
 mod replay;
 mod service;
 
 pub use auth::{
-    OperatorCaller, OperatorCredentialResolver, OperatorTokenAuthenticator,
-    OperatorTokenTableError, StaticOperatorTokenResolver, parse_operator_token_table,
+    BoxedOperatorCredentialResolver, OperatorCaller, OperatorCredentialResolver,
+    OperatorTokenAuthenticator, OperatorTokenTableError, StaticOperatorTokenResolver,
+    parse_operator_token_table,
 };
 pub use envelope::{ControlCommandInput, build_control_request};
-pub use errors::CommandError;
+pub use errors::{CommandError, CommandErrorCode};
+pub use keycloak::{
+    KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
+};
 pub use outbox::{ControlOutboxBackend, submit_command};
 pub use replay::spawn_fanout_worker;
-pub use service::{ControlGatewayService, bounded_control_gateway_server};
+pub use service::{
+    ControlGatewayService, SharedEphemeralStore, bounded_control_gateway_server,
+    control_admission_rate_limit_key,
+};
 
 /// Maximum admitted `ControlCommandRequest` size, matching the ingest
 /// envelope ceiling (`apex_event_ingest::MAX_ENVELOPE_BYTES`) plus headroom

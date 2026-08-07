@@ -9,6 +9,16 @@ use apex_event_ingest::{GatewayError, GatewayErrorCode};
 pub enum CommandErrorCode {
     Unauthenticated,
     InvalidAuthorization,
+    /// The gateway could not *check* the credential, as distinct from having
+    /// checked it and found it bad. Raised only by the Keycloak resolver, when
+    /// its cached JWKS is absent or older than the configured staleness
+    /// ceiling. Kept separate from `Unauthenticated` on purpose: an operator
+    /// holding a perfectly good token during an identity-provider outage
+    /// should be told the verifier is down, not that they are unauthenticated
+    /// -- otherwise the obvious debugging move is to start weakening the
+    /// credential path. It leaks nothing an attacker does not learn anyway by
+    /// watching every request fail identically.
+    CredentialVerifierUnavailable,
     ScopeDenied,
     RateLimited,
     InvalidCommand,
@@ -23,6 +33,7 @@ impl CommandErrorCode {
         match self {
             Self::Unauthenticated => "UNAUTHENTICATED",
             Self::InvalidAuthorization => "INVALID_AUTHORIZATION_METADATA",
+            Self::CredentialVerifierUnavailable => "CREDENTIAL_VERIFIER_UNAVAILABLE",
             Self::ScopeDenied => "SCOPE_DENIED",
             Self::RateLimited => "RATE_LIMITED",
             Self::InvalidCommand => "INVALID_COMMAND",
@@ -36,6 +47,9 @@ impl CommandErrorCode {
     fn grpc_code(self) -> tonic::Code {
         match self {
             Self::Unauthenticated | Self::InvalidAuthorization => tonic::Code::Unauthenticated,
+            // `Unavailable`, not `Unauthenticated`: this is retryable and the
+            // caller's credential may well be fine.
+            Self::CredentialVerifierUnavailable => tonic::Code::Unavailable,
             Self::ScopeDenied => tonic::Code::PermissionDenied,
             Self::RateLimited | Self::Capacity => tonic::Code::ResourceExhausted,
             Self::InvalidCommand | Self::IdempotencyConflict => tonic::Code::InvalidArgument,
@@ -74,6 +88,15 @@ impl CommandError {
         Self::new(
             CommandErrorCode::ScopeDenied,
             "The authenticated operator is not permitted to issue commands in this workspace/namespace.",
+        )
+    }
+
+    /// The credential could not be checked. See
+    /// [`CommandErrorCode::CredentialVerifierUnavailable`].
+    pub fn credential_verifier_unavailable() -> Self {
+        Self::new(
+            CommandErrorCode::CredentialVerifierUnavailable,
+            "The control gateway cannot currently verify operator credentials. Retry with backoff.",
         )
     }
 

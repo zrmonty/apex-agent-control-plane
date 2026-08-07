@@ -10,8 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::env::{
-    DEFAULT_BIND_ADDR, OperatorTokenSource, control_postgres_url_value, fanout_interval_value,
-    nats_retry_attempts_value, operator_token_source_value, resolve_bind_addr_value,
+    DEFAULT_BIND_ADDR, OperatorTokenSource, admission_limit_value, bounded_secs_value,
+    control_postgres_url_value, control_valkey_host_value, expected_token_typ_value,
+    fanout_interval_value, global_subjects_value, nats_retry_attempts_value,
+    operator_token_source_value, resolve_bind_addr_value,
 };
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -76,21 +78,120 @@ fn bind_address_rejects_values_that_are_not_socket_addresses() {
 }
 
 #[test]
-fn operator_token_source_refuses_two_configured_credential_sources() {
+fn operator_credential_source_refuses_two_configured_sources() {
+    const ISSUER: &str = "https://sso.example.com/realms/apex";
     assert_eq!(
-        operator_token_source_value(None, None).unwrap(),
+        operator_token_source_value(None, None, None).unwrap(),
         OperatorTokenSource::Unset
     );
     assert_eq!(
-        operator_token_source_value(Some("/run/secrets/tokens"), None).unwrap(),
+        operator_token_source_value(Some("/run/secrets/tokens"), None, None).unwrap(),
         OperatorTokenSource::File(PathBuf::from("/run/secrets/tokens"))
     );
     assert_eq!(
-        operator_token_source_value(None, Some("token-value|acme/prod")).unwrap(),
+        operator_token_source_value(None, Some("token-value|acme/prod"), None).unwrap(),
         OperatorTokenSource::Inline("token-value|acme/prod".to_owned())
     );
-    // Both set: one of them would be silently ignored. Fail closed instead.
-    assert!(operator_token_source_value(Some("/run/secrets/tokens"), Some("t|*")).is_err());
+    // The production path is selected by its own explicit variable, never
+    // inferred from the absence of a static table.
+    assert_eq!(
+        operator_token_source_value(None, None, Some(ISSUER)).unwrap(),
+        OperatorTokenSource::Keycloak(ISSUER.to_owned())
+    );
+    // Any two set: one of them would be silently ignored. Fail closed instead.
+    assert!(operator_token_source_value(Some("/run/secrets/tokens"), Some("t|*"), None).is_err());
+    assert!(operator_token_source_value(Some("/run/secrets/tokens"), None, Some(ISSUER)).is_err());
+    assert!(operator_token_source_value(None, Some("t|*"), Some(ISSUER)).is_err());
+    assert!(
+        operator_token_source_value(Some("/run/secrets/tokens"), Some("t|*"), Some(ISSUER))
+            .is_err()
+    );
+}
+
+/// The `*` break-glass grant must be unreachable unless a human configured it,
+/// and half-configuring it must not read as "enabled".
+#[test]
+fn break_glass_subject_allow_list_parses_exact_subjects_only() {
+    assert!(global_subjects_value(None).is_empty());
+    assert!(global_subjects_value(Some("")).is_empty());
+    assert!(global_subjects_value(Some("  ,  ,")).is_empty());
+    let subjects = global_subjects_value(Some(
+        " 11111111-1111-4111-8111-111111111111 ,22222222-2222-4222-8222-222222222222 ",
+    ));
+    assert_eq!(subjects.len(), 2);
+    assert!(subjects.contains("11111111-1111-4111-8111-111111111111"));
+    // No pattern language: a wildcard is just a subject nobody will ever have.
+    let wildcard = global_subjects_value(Some("*"));
+    assert!(wildcard.contains("*"));
+    assert!(!wildcard.contains("11111111-1111-4111-8111-111111111111"));
+}
+
+/// Turning off ID-token/refresh-token confusion protection has to be typed on
+/// purpose, exactly, and cannot be reached by a near-miss.
+#[test]
+fn expected_token_typ_defaults_to_bearer_and_waives_only_on_an_exact_acknowledgement() {
+    assert_eq!(
+        expected_token_typ_value(None, None).unwrap(),
+        Some("Bearer".to_owned())
+    );
+    assert_eq!(
+        expected_token_typ_value(Some("Custom"), None).unwrap(),
+        Some("Custom".to_owned())
+    );
+    assert_eq!(expected_token_typ_value(None, Some("true")).unwrap(), None);
+    for near_miss in ["TRUE", "True", "1", "yes", "on", " true", "false", ""] {
+        assert!(
+            expected_token_typ_value(None, Some(near_miss)).is_err(),
+            "{near_miss:?} must not waive the token-type check"
+        );
+    }
+    // Both configured: one is being ignored.
+    assert!(expected_token_typ_value(Some("Bearer"), Some("true")).is_err());
+}
+
+#[test]
+fn admission_limit_is_range_checked_rather_than_clamped() {
+    assert_eq!(admission_limit_value(None).unwrap(), 50);
+    assert_eq!(admission_limit_value(Some("")).unwrap(), 50);
+    assert_eq!(admission_limit_value(Some("1")).unwrap(), 1);
+    assert_eq!(admission_limit_value(Some("100000")).unwrap(), 100_000);
+    // Zero admits nothing and is far more likely a typo than an intent to
+    // disable the control entirely.
+    assert!(admission_limit_value(Some("0")).is_err());
+    assert!(admission_limit_value(Some("100001")).is_err());
+    assert!(admission_limit_value(Some("-1")).is_err());
+    assert!(admission_limit_value(Some("fifty")).is_err());
+}
+
+/// The control gateway must be given its own Valkey credentials and instance,
+/// for the same reason it has its own NATS account and its own Postgres
+/// database -- and, concretely, because `event-ingest`'s Valkey key prefix is
+/// a fixed literal, so a shared instance is a shared keyspace under one ACL
+/// user.
+#[test]
+fn ingest_valkey_configuration_is_refused_on_the_control_gateway() {
+    assert_eq!(control_valkey_host_value(None, None).unwrap(), None);
+    assert_eq!(
+        control_valkey_host_value(Some("control-valkey"), None).unwrap(),
+        Some("control-valkey".to_owned())
+    );
+    assert!(control_valkey_host_value(None, Some("valkey")).is_err());
+    assert!(control_valkey_host_value(Some("control-valkey"), Some("valkey")).is_err());
+}
+
+#[test]
+fn bounded_seconds_values_fail_closed_outside_their_range() {
+    let message = "bad";
+    assert_eq!(
+        bounded_secs_value(None, 300, 30, 3600, message).unwrap(),
+        std::time::Duration::from_secs(300)
+    );
+    assert!(bounded_secs_value(Some("30"), 300, 30, 3600, message).is_ok());
+    assert!(bounded_secs_value(Some("3600"), 300, 30, 3600, message).is_ok());
+    assert!(bounded_secs_value(Some("29"), 300, 30, 3600, message).is_err());
+    assert!(bounded_secs_value(Some("3601"), 300, 30, 3600, message).is_err());
+    assert!(bounded_secs_value(Some("0"), 300, 30, 3600, message).is_err());
+    assert!(bounded_secs_value(Some("nope"), 300, 30, 3600, message).is_err());
 }
 
 #[test]

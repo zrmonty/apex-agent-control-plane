@@ -10,14 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apex_control_plane_api::{
-    ControlGatewayService, ControlOutboxBackend, OperatorTokenAuthenticator,
-    StaticOperatorTokenResolver, bounded_control_gateway_server, parse_operator_token_table,
+    BoxedOperatorCredentialResolver, ControlGatewayService, ControlOutboxBackend, KeycloakConfig,
+    KeycloakOperatorCredentialResolver, OperatorTokenAuthenticator, SharedEphemeralStore,
+    bounded_control_gateway_server, parse_operator_token_table,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
-    OperatorTokenSource, control_postgres_url, operator_token_source, path, required,
-    resolve_bind_addr,
+    OperatorTokenSource, admission_limits, control_postgres_url, control_valkey_env, keycloak_env,
+    operator_token_source, path, required, resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -90,14 +91,76 @@ fn load_server_tls(trusted_base: &Path) -> Result<ServerTlsConfig, io::Error> {
         .client_auth_optional(false))
 }
 
-/// Builds the operator credential table from a file secret (production) or an
-/// inline env var (local/lab and CI). See
-/// [`super::env::operator_token_source`] for why both exist and why setting
-/// both is refused.
+/// PEM ceiling for the Keycloak JWKS CA, matching the mTLS material bound.
+const MAX_KEYCLOAK_CA_BYTES: usize = 1024 * 1024;
+
+/// Selects the operator credential verifier.
+///
+/// Three paths, chosen by explicit configuration and never inferred from one
+/// another (see [`super::env::operator_token_source_value`]):
+///
+/// - **Keycloak** (`APEX_CONTROL_KEYCLOAK_ISSUER`) -- the production path.
+///   Verifies short-lived, scope-bound credentials Keycloak issued through
+///   RFC 8693 token exchange. This process is a resource server: it holds no
+///   client secret, performs no exchange, and only checks signatures and
+///   claims.
+/// - **File** (`APEX_CONTROL_OPERATOR_TOKENS_FILE`) and **inline**
+///   (`APEX_CONTROL_OPERATOR_TOKENS`) -- the static table, unchanged, still
+///   the local/lab and CI seam.
+///
+/// The return type is erased because the three implementations are different
+/// types; `ControlGatewayService` stays generic so in-process tests keep
+/// monomorphising over the resolver they actually construct.
 fn build_operator_resolver(
     trusted_base: &Path,
-) -> Result<StaticOperatorTokenResolver, Box<dyn std::error::Error>> {
+) -> Result<BoxedOperatorCredentialResolver, Box<dyn std::error::Error>> {
     let raw = match operator_token_source()? {
+        OperatorTokenSource::Keycloak(issuer) => {
+            let settings = keycloak_env(issuer)?;
+            let ca_path = trusted_secret_path(
+                &settings.ca_file,
+                trusted_base,
+                MAX_KEYCLOAK_CA_BYTES as u64,
+                // A CA certificate is public material, so it is not held to
+                // the private-key permission policy -- the same call the
+                // NATS/mTLS client CAs get.
+                false,
+                "APEX_CONTROL_KEYCLOAK_CA_FILE",
+            )?;
+            let jwks_ca_pem = read_bounded(
+                &ca_path,
+                MAX_KEYCLOAK_CA_BYTES,
+                "APEX_CONTROL_KEYCLOAK_CA_FILE",
+            )?;
+            let config = KeycloakConfig {
+                issuer: settings.issuer,
+                audience: settings.audience,
+                jwks_url: settings.jwks_url,
+                jwks_ca_pem,
+                jwks_refresh: settings.jwks_refresh,
+                jwks_max_age: settings.jwks_max_age,
+                scope_claim: settings.scope_claim,
+                role_claim: settings.role_claim,
+                global_role: settings.global_role,
+                global_subjects: settings.global_subjects,
+                max_token_lifetime: settings.max_token_lifetime,
+                expected_typ: settings.expected_typ,
+            };
+            let break_glass = if config.global_role.is_some() {
+                config.global_subjects.len()
+            } else {
+                0
+            };
+            // Constructed here, before the serving runtime exists: the JWKS
+            // client is `reqwest::blocking` and owns an internal runtime, so
+            // building it on a runtime thread panics -- the same hazard that
+            // made `run()` synchronous for `PostgresOutbox`.
+            let resolver = KeycloakOperatorCredentialResolver::start(config)?;
+            println!(
+                "apex-control-plane-api operator credentials: keycloak (break-glass subjects allow-listed: {break_glass})"
+            );
+            return Ok(Box::new(resolver));
+        }
         OperatorTokenSource::File(configured) => {
             let table_path = trusted_secret_path(
                 &configured,
@@ -120,16 +183,97 @@ fn build_operator_resolver(
             // nobody. Loud on stderr because a control gateway that accepts
             // no operator at all is almost never what was intended.
             eprintln!(
-                "control-plane-api: neither APEX_CONTROL_OPERATOR_TOKENS_FILE nor APEX_CONTROL_OPERATOR_TOKENS is set; no operator credential will authenticate"
+                "control-plane-api: none of APEX_CONTROL_KEYCLOAK_ISSUER, APEX_CONTROL_OPERATOR_TOKENS_FILE or APEX_CONTROL_OPERATOR_TOKENS is set; no operator credential will authenticate"
             );
-            return Ok(StaticOperatorTokenResolver::new());
+            return Ok(Box::new(
+                apex_control_plane_api::StaticOperatorTokenResolver::new(),
+            ));
         }
     };
     // A malformed credential table is a configuration failure, not something
     // to log past. Skipping a bad entry would leave the gateway running with
     // an operator silently unable to act -- or, worse, acting under a
     // mis-parsed scope.
-    Ok(parse_operator_token_table(&raw)?)
+    let resolver = parse_operator_token_table(&raw)?;
+    println!("apex-control-plane-api operator credentials: static table");
+    Ok(Box::new(resolver))
+}
+
+/// Builds the optional cross-replica admission accelerator.
+///
+/// Structurally `event-ingest`'s `build_ephemeral_store`, with one deliberate
+/// difference: an unreachable Valkey **does not stop this gateway starting**.
+///
+/// `event-ingest` refuses to come up if `ValkeyEphemeralStore::connect` fails,
+/// which is defensible for the ingest data path. Doing the same here would
+/// make an explicitly non-authoritative accelerator a hard startup dependency
+/// of the out-of-band control channel -- the exact coupling ADR-0006 exists to
+/// remove, and the same mistake the JetStream publisher already had to avoid.
+/// So the split is the same one used there: **configuration errors abort
+/// startup loudly, an unreachable instance does not.** A refused *config*
+/// (`EphemeralErrorCode::InvalidKey` -- a path outside the trusted base, a
+/// key readable beyond its owner, a malformed host) is a misconfiguration;
+/// `Unavailable` is an outage, and an outage means the process runs on its
+/// process-local ceiling, which is the hard floor either way.
+///
+/// The connection is also re-established lazily by [`LazyValkeyStore`] rather
+/// than only at startup, so a Valkey that was down when this process booted is
+/// picked up without a restart -- and `FallbackEphemeralStore`'s circuit
+/// breaker is what keeps that retry from becoming a per-request stall.
+fn build_ephemeral_store(
+    trusted_base: &Path,
+) -> Result<Option<SharedEphemeralStore>, Box<dyn std::error::Error>> {
+    let configured = control_valkey_env()?;
+    #[cfg(feature = "valkey")]
+    {
+        use apex_event_ingest::{EphemeralStore, FallbackEphemeralStore, InMemoryEphemeralStore};
+
+        if let Some(settings) = configured {
+            let config = apex_event_ingest::ValkeyConfig {
+                host: settings.host,
+                port: settings.port,
+                username: settings.username,
+                password_file: settings.password_file,
+                ca_file: settings.ca_file,
+                client_cert_file: settings.client_cert_file,
+                client_key_file: settings.client_key_file,
+                trusted_base: trusted_base.to_path_buf(),
+            };
+            // Eager *configuration* validation, deferred connection. Same
+            // split as `NatsTlsConfig::validate` in `startup/fanout.rs`, and
+            // for the same reason.
+            config.validate().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "APEX_CONTROL_VALKEY_* configuration was refused: {}",
+                        error.code.as_str()
+                    ),
+                )
+            })?;
+            let store: Box<dyn EphemeralStore> = Box::new(FallbackEphemeralStore::new(
+                super::valkey::LazyValkeyStore::new(config),
+                InMemoryEphemeralStore::new(),
+            ));
+            println!(
+                "apex-control-plane-api admission ceiling: shared (valkey), local ceiling retained as the floor"
+            );
+            return Ok(Some(std::sync::Mutex::new(store).into()));
+        }
+    }
+    #[cfg(not(feature = "valkey"))]
+    {
+        let _ = trusted_base;
+        if configured.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_CONTROL_VALKEY_HOST is set but this binary was not built with --features valkey",
+            )
+            .into());
+        }
+    }
+    println!("apex-control-plane-api admission ceiling: process-local only");
+    Ok(None)
 }
 
 /// Selects the durable outbox backend, mirroring `event-ingest`'s
@@ -216,7 +360,20 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // inside one. No socket is opened either way -- an unreachable broker
     // must never stop this gateway from starting (ADR-0006).
     let fanout = prepare_control_fanout(&trusted_base)?;
-    let service = ControlGatewayService::new(auth, Arc::clone(&outbox));
+    let (admission_limit, admission_window) = admission_limits()?;
+    // Built here, with no runtime entered: `ValkeyEphemeralStore::connect`
+    // is synchronous and the wrapper around it must not be constructed on a
+    // runtime thread any more than the Postgres client may be.
+    let ephemeral = build_ephemeral_store(&trusted_base)?;
+    let mut service = ControlGatewayService::new(auth, Arc::clone(&outbox))
+        .with_admission_limits(admission_limit, admission_window);
+    if let Some(store) = ephemeral {
+        service = service.with_ephemeral_store(store);
+    }
+    println!(
+        "apex-control-plane-api admission limit: {admission_limit} command(s) per operator per {}s",
+        admission_window.as_secs()
+    );
 
     // Everything above is built without a runtime entered. Same comment, same
     // reason, as `event-ingest`'s own `run()`.

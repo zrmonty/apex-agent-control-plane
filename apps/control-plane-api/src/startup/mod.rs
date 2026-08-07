@@ -7,6 +7,9 @@ mod fanout;
 mod secrets;
 mod service;
 
+#[cfg(feature = "valkey")]
+mod valkey;
+
 #[cfg(test)]
 mod tests;
 

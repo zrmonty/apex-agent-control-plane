@@ -8,6 +8,7 @@
 //! pattern as `apps/event-ingest/src/startup/env.rs`
 //! (`attempts` / `attempts_value`).
 
+use std::collections::BTreeSet;
 use std::env;
 use std::io;
 use std::net::SocketAddr;
@@ -108,6 +109,11 @@ pub(crate) fn resolve_bind_addr_value(
 pub(crate) enum OperatorTokenSource {
     File(PathBuf),
     Inline(String),
+    /// The production path: short-lived, scope-bound credentials issued by
+    /// Keycloak and verified here (`apex_control_plane_api::keycloak`). Carries
+    /// the configured issuer; the rest of the settings are read by
+    /// [`keycloak_env`].
+    Keycloak(String),
     Unset,
 }
 
@@ -115,22 +121,323 @@ pub(crate) fn operator_token_source() -> Result<OperatorTokenSource, io::Error> 
     operator_token_source_value(
         optional("APEX_CONTROL_OPERATOR_TOKENS_FILE").as_deref(),
         optional("APEX_CONTROL_OPERATOR_TOKENS").as_deref(),
+        optional("APEX_CONTROL_KEYCLOAK_ISSUER").as_deref(),
     )
 }
 
+/// Adds the Keycloak path to the same exclusivity rule the two static sources
+/// already had.
+///
+/// **Explicitly selected, never inferred.** `APEX_CONTROL_KEYCLOAK_ISSUER`
+/// being set is what chooses the production verifier; it is not derived from
+/// the absence of a token table, because "the operator table was not mounted"
+/// and "this deployment authenticates through Keycloak" are different
+/// situations with very different consequences, and the first silently
+/// becoming the second is how a lab configuration ends up in production.
+///
+/// Setting Keycloak alongside either static source is refused for exactly the
+/// reason the two static sources already refuse each other: two configured
+/// credential sources means one of them is being silently ignored, and this is
+/// the surface where "my operator token is not working" gets debugged by
+/// loosening something.
 pub(crate) fn operator_token_source_value(
     file: Option<&str>,
     inline: Option<&str>,
+    keycloak_issuer: Option<&str>,
 ) -> Result<OperatorTokenSource, io::Error> {
-    match (file, inline) {
-        (Some(_), Some(_)) => Err(io::Error::new(
+    let configured = usize::from(file.is_some())
+        + usize::from(inline.is_some())
+        + usize::from(keycloak_issuer.is_some());
+    if configured > 1 {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "set APEX_CONTROL_OPERATOR_TOKENS_FILE or APEX_CONTROL_OPERATOR_TOKENS, not both",
-        )),
-        (Some(file), None) => Ok(OperatorTokenSource::File(PathBuf::from(file))),
-        (None, Some(inline)) => Ok(OperatorTokenSource::Inline(inline.to_owned())),
-        (None, None) => Ok(OperatorTokenSource::Unset),
+            "set exactly one of APEX_CONTROL_KEYCLOAK_ISSUER, APEX_CONTROL_OPERATOR_TOKENS_FILE, or APEX_CONTROL_OPERATOR_TOKENS",
+        ));
     }
+    match (file, inline, keycloak_issuer) {
+        (Some(file), None, None) => Ok(OperatorTokenSource::File(PathBuf::from(file))),
+        (None, Some(inline), None) => Ok(OperatorTokenSource::Inline(inline.to_owned())),
+        (None, None, Some(issuer)) => Ok(OperatorTokenSource::Keycloak(issuer.to_owned())),
+        _ => Ok(OperatorTokenSource::Unset),
+    }
+}
+
+/// Everything the Keycloak resolver needs, read from the environment.
+///
+/// The CA arrives here as a *path*; `startup::service` resolves it through
+/// `trusted_secret_path` and hands `KeycloakConfig` the bytes, so the
+/// trusted-secret policy has exactly one implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeycloakEnv {
+    pub(crate) issuer: String,
+    pub(crate) audience: String,
+    pub(crate) ca_file: PathBuf,
+    pub(crate) jwks_url: String,
+    pub(crate) jwks_refresh: Duration,
+    pub(crate) jwks_max_age: Duration,
+    pub(crate) scope_claim: String,
+    pub(crate) role_claim: String,
+    pub(crate) global_role: Option<String>,
+    pub(crate) global_subjects: BTreeSet<String>,
+    pub(crate) max_token_lifetime: Duration,
+    pub(crate) expected_typ: Option<String>,
+}
+
+/// Default JWKS refresh interval, and therefore the upper bound on how long a
+/// key Keycloak has rotated away keeps verifying tokens here.
+///
+/// **Five minutes.** Not shorter, because the JWKS endpoint is on the identity
+/// provider's critical path for every service in the deployment and this
+/// process gains nothing from polling it harder -- Keycloak realm keys rotate
+/// on the order of months, and a *revocation* is handled by the same refresh
+/// either way. Not longer, because "how long does a compromised signing key
+/// keep working after we pull it" is the number this variable is, and an hour
+/// is a long time to be verifying with a key the realm has disowned.
+const DEFAULT_JWKS_REFRESH_SECS: u64 = 300;
+/// Default hard staleness ceiling: three refresh intervals. Long enough that
+/// two consecutive failed refreshes do not lock every operator out during a
+/// brief identity-provider blip; short enough that a sustained JWKS outage
+/// stops this process trusting keys of unknown age within fifteen minutes
+/// rather than indefinitely.
+const DEFAULT_JWKS_MAX_AGE_SECS: u64 = 900;
+/// Default ceiling on `exp - iat`. Keycloak's own default access-token
+/// lifespan is five minutes, so an hour is generous headroom for a deployment
+/// that has lengthened it, while still refusing the long-lived token a
+/// misconfigured client would otherwise get away with presenting here.
+const DEFAULT_MAX_TOKEN_LIFETIME_SECS: u64 = 3600;
+/// Keycloak stamps `typ: Bearer` on access tokens, `ID` on ID tokens and
+/// `Refresh` on refresh tokens -- all signed with the same realm keys.
+const DEFAULT_EXPECTED_TOKEN_TYP: &str = "Bearer";
+
+pub(crate) fn keycloak_env(issuer: String) -> Result<KeycloakEnv, io::Error> {
+    let jwks_url = optional("APEX_CONTROL_KEYCLOAK_JWKS_URL").unwrap_or_else(|| {
+        apex_control_plane_api::KeycloakConfig::default_jwks_url(&issuer)
+    });
+    let jwks_refresh = bounded_secs_value(
+        optional("APEX_CONTROL_KEYCLOAK_JWKS_REFRESH_SECS").as_deref(),
+        DEFAULT_JWKS_REFRESH_SECS,
+        30,
+        3600,
+        "APEX_CONTROL_KEYCLOAK_JWKS_REFRESH_SECS must be an integer from 30 through 3600",
+    )?;
+    let jwks_max_age = bounded_secs_value(
+        optional("APEX_CONTROL_KEYCLOAK_JWKS_MAX_AGE_SECS").as_deref(),
+        DEFAULT_JWKS_MAX_AGE_SECS,
+        30,
+        86_400,
+        "APEX_CONTROL_KEYCLOAK_JWKS_MAX_AGE_SECS must be an integer from 30 through 86400",
+    )?;
+    Ok(KeycloakEnv {
+        issuer,
+        audience: required("APEX_CONTROL_KEYCLOAK_AUDIENCE")?,
+        ca_file: path("APEX_CONTROL_KEYCLOAK_CA_FILE")?,
+        jwks_url,
+        jwks_refresh,
+        jwks_max_age,
+        scope_claim: optional("APEX_CONTROL_KEYCLOAK_SCOPE_CLAIM")
+            .unwrap_or_else(|| "apex_control_scopes".to_owned()),
+        role_claim: optional("APEX_CONTROL_KEYCLOAK_ROLE_CLAIM")
+            .unwrap_or_else(|| "realm_access.roles".to_owned()),
+        global_role: optional("APEX_CONTROL_KEYCLOAK_GLOBAL_ROLE"),
+        global_subjects: global_subjects_value(
+            optional("APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS").as_deref(),
+        ),
+        max_token_lifetime: bounded_secs_value(
+            optional("APEX_CONTROL_KEYCLOAK_MAX_TOKEN_LIFETIME_SECS").as_deref(),
+            DEFAULT_MAX_TOKEN_LIFETIME_SECS,
+            60,
+            86_400,
+            "APEX_CONTROL_KEYCLOAK_MAX_TOKEN_LIFETIME_SECS must be an integer from 60 through 86400",
+        )?,
+        expected_typ: expected_token_typ_value(
+            optional("APEX_CONTROL_KEYCLOAK_EXPECTED_TYP").as_deref(),
+            optional("APEX_CONTROL_KEYCLOAK_ALLOW_ANY_TOKEN_TYP").as_deref(),
+        )?,
+    })
+}
+
+/// The break-glass subject allow-list: exact `sub` values, comma-separated.
+///
+/// Deliberately *not* a pattern or prefix language. This list is the one part
+/// of the `*` grant that the identity provider does not control, so it has to
+/// be something an operator wrote down one identity at a time.
+pub(crate) fn global_subjects_value(raw: Option<&str>) -> BTreeSet<String> {
+    raw.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|subject| !subject.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Required payload `typ`, or `None` when the check has been explicitly waived.
+///
+/// The waiver is its own loudly-named variable rather than a magic value of
+/// the first one, and setting both is refused, for the same reason
+/// `APEX_CONTROL_ALLOW_NONLOCAL_BIND` is exact-match: turning off
+/// ID-token/refresh-token confusion protection should be something someone
+/// typed on purpose.
+pub(crate) fn expected_token_typ_value(
+    expected: Option<&str>,
+    waiver: Option<&str>,
+) -> Result<Option<String>, io::Error> {
+    let waived = waiver == Some("true");
+    if waiver.is_some() && !waived {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_KEYCLOAK_ALLOW_ANY_TOKEN_TYP must be exactly 'true' or be unset",
+        ));
+    }
+    if waived && expected.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "set APEX_CONTROL_KEYCLOAK_EXPECTED_TYP or APEX_CONTROL_KEYCLOAK_ALLOW_ANY_TOKEN_TYP, not both",
+        ));
+    }
+    if waived {
+        return Ok(None);
+    }
+    Ok(Some(
+        expected
+            .unwrap_or(DEFAULT_EXPECTED_TOKEN_TYP)
+            .to_owned(),
+    ))
+}
+
+/// Shared bounded-integer-seconds parser. Every duration this binary reads is
+/// range-checked rather than clamped, so a typo fails closed at startup
+/// instead of silently becoming a policy nobody chose.
+pub(crate) fn bounded_secs_value(
+    raw: Option<&str>,
+    default: u64,
+    min: u64,
+    max: u64,
+    message: &'static str,
+) -> Result<Duration, io::Error> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, message);
+    let seconds = raw
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<u64>().map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or(default);
+    if !(min..=max).contains(&seconds) {
+        return Err(invalid());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+/// Cross-replica admission ceiling: how many commands one operator subject may
+/// have accepted per window, **across every replica** when the shared store is
+/// configured.
+///
+/// Configurable rather than a bare constant because the ceiling has to be
+/// observable to be provable. The live two-replica test bursts past it and
+/// asserts the combined admission equals the ceiling instead of twice it,
+/// which is only deterministic when the window is long enough that a burst
+/// cannot straddle two windows -- so both are settings, both are range-checked,
+/// and both keep the shipped defaults (50 per second) when unset.
+pub(crate) fn admission_limits() -> Result<(u32, Duration), io::Error> {
+    let limit = admission_limit_value(optional("APEX_CONTROL_ADMISSION_LIMIT").as_deref())?;
+    let window = bounded_secs_value(
+        optional("APEX_CONTROL_ADMISSION_WINDOW_SECS").as_deref(),
+        1,
+        1,
+        3600,
+        "APEX_CONTROL_ADMISSION_WINDOW_SECS must be an integer from 1 through 3600",
+    )?;
+    Ok((limit, window))
+}
+
+pub(crate) fn admission_limit_value(raw: Option<&str>) -> Result<u32, io::Error> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_ADMISSION_LIMIT must be an integer from 1 through 100000",
+        )
+    };
+    let limit = raw
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<u32>().map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or(50);
+    // Zero is refused rather than treated as "unlimited": an admission ceiling
+    // of zero admits nothing, and an operator who meant to disable the control
+    // is far more likely to have fat-fingered a digit.
+    if !(1..=100_000).contains(&limit) {
+        return Err(invalid());
+    }
+    Ok(limit)
+}
+
+/// The control gateway's own Valkey accelerator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControlValkeyEnv {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) username: String,
+    pub(crate) password_file: PathBuf,
+    pub(crate) ca_file: PathBuf,
+    pub(crate) client_cert_file: PathBuf,
+    pub(crate) client_key_file: PathBuf,
+}
+
+/// `APEX_CONTROL_VALKEY_*` is this crate's own variable family, deliberately
+/// not `event-ingest`'s `APEX_VALKEY_*`.
+///
+/// Same rule and same reason as `APEX_CONTROL_POSTGRES_URL` and the separate
+/// NATS account: every shared infrastructure dependency this crate has gets
+/// its own distinct identity, because "independently authenticated"
+/// (ADR-0006) has to hold at each dependency or it stops at the gRPC edge. In
+/// the Valkey case there is a second, concrete reason -- `event-ingest`'s
+/// `ephemeral::types::KEY_PREFIX` is the fixed literal `apex:ingest`, so a
+/// shared instance would put both services' counters in one keyspace under one
+/// ACL user, and either service's credential would then be able to clear or
+/// inflate the other's rate-limit state.
+///
+/// Seeing `APEX_VALKEY_HOST` on this process is refused outright rather than
+/// honoured.
+pub(crate) fn control_valkey_env() -> Result<Option<ControlValkeyEnv>, io::Error> {
+    let Some(host) = control_valkey_host_value(
+        optional("APEX_CONTROL_VALKEY_HOST").as_deref(),
+        optional("APEX_VALKEY_HOST").as_deref(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let port = optional("APEX_CONTROL_VALKEY_PORT")
+        .unwrap_or_else(|| "6379".to_owned())
+        .parse::<u16>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_CONTROL_VALKEY_PORT must be a TCP port",
+            )
+        })?;
+    Ok(Some(ControlValkeyEnv {
+        host,
+        port,
+        username: optional("APEX_CONTROL_VALKEY_USERNAME")
+            .unwrap_or_else(|| "apex-control".to_owned()),
+        password_file: path("APEX_CONTROL_VALKEY_PASSWORD_FILE")?,
+        ca_file: path("APEX_CONTROL_VALKEY_CA_FILE")?,
+        client_cert_file: path("APEX_CONTROL_VALKEY_CLIENT_CERT_FILE")?,
+        client_key_file: path("APEX_CONTROL_VALKEY_CLIENT_KEY_FILE")?,
+    }))
+}
+
+pub(crate) fn control_valkey_host_value(
+    control: Option<&str>,
+    ingest: Option<&str>,
+) -> Result<Option<String>, io::Error> {
+    if ingest.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_VALKEY_HOST is event-ingest's variable; set APEX_CONTROL_VALKEY_HOST with the control gateway's own Valkey credentials and instance",
+        ));
+    }
+    Ok(control.map(str::to_owned))
 }
 
 /// How often the background fanout worker drains the durable outbox into
