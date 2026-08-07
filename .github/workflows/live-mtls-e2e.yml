@@ -38,7 +38,13 @@ jobs:
           # Compose on Linux ignores secret mode/uid/gid. Lab fixtures only.
           chmod 644 secrets/*.pem secrets/*.key 2>/dev/null || true
           chmod 644 secrets/nats.conf secrets/valkey.conf secrets/valkey.acl 2>/dev/null || true
-          chmod 644 secrets/nats-username 2>/dev/null || true
+          # generate_pki.py writes nats-username AND nats-password with the same
+          # runtime-secret helper, both restrictive by default; only nats-username
+          # was ever widened here. gateway-secrets-init (compose.gateway-ref.yaml)
+          # runs as uid 10001 and needs nats_password too -- unlike this Windows/WSL
+          # dev environment, a native Linux runner actually enforces chmod 0600, so
+          # this only ever failed on GitHub Actions, never reproduced locally.
+          chmod 644 secrets/nats-username secrets/nats-password 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
@@ -261,12 +267,22 @@ jobs:
           docker compose -f compose.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/live-mtls-logs.txt 2>&1 || true
           docker compose -f ../compose.e2e.yaml ps -a > /tmp/apex-ci-logs/e2e-ps.txt 2>&1 || true
           docker compose -f ../compose.e2e.yaml logs --no-color --tail 100 > /tmp/apex-ci-logs/e2e-logs.txt 2>&1 || true
+          # The gateway-ref profile's own init containers (gateway-secrets-init,
+          # jetstream-init) exit before "Build and smoke-start" prints anything
+          # beyond "didn't complete successfully: exit 1" -- without this, the
+          # actual stderr that would explain why is never captured anywhere.
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml ps -a > /tmp/apex-ci-logs/gateway-ref-ps.txt 2>&1 || true
+          docker compose -p apex-gateway-ref-ci -f ../compose.gateway-ref.yaml logs --no-color --tail 200 > /tmp/apex-ci-logs/gateway-ref-logs.txt 2>&1 || true
           docker ps -a > /tmp/apex-ci-logs/docker-ps.txt 2>&1 || true
           # Print to job log (public) so we can diagnose without admin log API.
           echo "===== live-mtls ps ====="
           cat /tmp/apex-ci-logs/live-mtls-ps.txt || true
           echo "===== live-mtls logs ====="
           cat /tmp/apex-ci-logs/live-mtls-logs.txt || true
+          echo "===== gateway-ref ps ====="
+          cat /tmp/apex-ci-logs/gateway-ref-ps.txt || true
+          echo "===== gateway-ref logs ====="
+          cat /tmp/apex-ci-logs/gateway-ref-logs.txt || true
           echo "===== docker ps ====="
           cat /tmp/apex-ci-logs/docker-ps.txt || true
 
