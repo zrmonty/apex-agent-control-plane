@@ -1,6 +1,7 @@
-# The event-ingest image builds from the repository root (build.rs needs
-# contracts/), so keep host build output, secrets, and unrelated trees out of
-# the build context.
+# The event-ingest and control-plane-api images both build from the repository
+# root (each crate's build.rs needs contracts/, and control-plane-api also
+# needs apps/event-ingest as a path dependency), so keep host build output,
+# secrets, and unrelated trees out of the build context.
 **/target/
 **/node_modules/
 **/__pycache__/

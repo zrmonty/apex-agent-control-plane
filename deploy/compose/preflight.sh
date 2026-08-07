@@ -31,7 +31,7 @@ require_value() {
   printf '%s' "$value"
 }
 
-image_keys=(APEX_INGEST_IMAGE NATS_IMAGE CLICKHOUSE_IMAGE MINIO_IMAGE MINIO_MC_IMAGE CLICKHOUSE_API_IMAGE ARCHIVE_API_IMAGE)
+image_keys=(APEX_INGEST_IMAGE APEX_CONTROL_IMAGE NATS_IMAGE CLICKHOUSE_IMAGE MINIO_IMAGE MINIO_MC_IMAGE CLICKHOUSE_API_IMAGE ARCHIVE_API_IMAGE)
 for key in "${image_keys[@]}"; do
   value="$(require_value "$key")"
   [[ "$value" =~ @sha256:[0-9a-fA-F]{64}$ ]] || fail "${key} must be pinned by a 64-hex SHA-256 digest"
@@ -39,6 +39,8 @@ done
 
 secret_keys=(
   GATEWAY_SERVER_CERT_FILE GATEWAY_SERVER_KEY_FILE GATEWAY_CLIENT_CA_FILE
+  CONTROL_SERVER_CERT_FILE CONTROL_SERVER_KEY_FILE CONTROL_CLIENT_CA_FILE
+  CONTROL_OPERATOR_TOKENS_FILE
   INGEST_BEARER_TOKEN_FILE NATS_USERNAME_FILE NATS_PASSWORD_FILE
   INGEST_NATS_CLIENT_CERT_FILE INGEST_NATS_CLIENT_KEY_FILE
   INGEST_CLICKHOUSE_CLIENT_CERT_FILE INGEST_CLICKHOUSE_CLIENT_KEY_FILE
@@ -53,28 +55,47 @@ secret_keys=(
   ARCHIVE_WRITER_CERT_FILE ARCHIVE_WRITER_KEY_FILE
   ARCHIVE_BACKEND_ACCESS_KEY_FILE ARCHIVE_BACKEND_SECRET_KEY_FILE
 )
-# Private material the ingest gateway loads directly. It refuses any of these
+# Private material a service loads directly. Each service refuses any of these
 # whose mode has a group or other bit set, and Compose cannot enforce that for
 # us: `mode:` is ignored for file-based secrets outside Swarm, so the HOST
 # file's mode and owner are what land in the container. Without this check the
-# gateway simply exits at startup with INVALID_NATS_CONFIGURATION and never
-# binds a listener -- a failure that looks like a code fault and is really a
-# file permission.
+# service simply exits at startup (INVALID_NATS_CONFIGURATION for the ingest
+# gateway, a "permissions are too broad" startup error for the control
+# gateway) and never binds a listener -- a failure that looks like a code
+# fault and is really a file permission.
+#
+# The two services run as different uids on purpose (ADR-0006: the control
+# channel is a separate trust boundary from the ingest data path, and that
+# separation is enforced at the OS layer, not just in application code). A
+# container cannot read a 0400 file owned by anyone else, so ownership is as
+# load-bearing as the mode -- and a file chowned to the *other* service's uid
+# is just as unreadable as one left owned by root.
+#
+# uid -> the private material that uid's container must be able to read.
+gateway_uid=10001   # apps/event-ingest/Dockerfile
+control_uid=10002   # apps/control-plane-api/Dockerfile
 gateway_private_keys=(
   GATEWAY_SERVER_KEY_FILE INGEST_BEARER_TOKEN_FILE
   NATS_USERNAME_FILE NATS_PASSWORD_FILE INGEST_NATS_CLIENT_KEY_FILE
   INGEST_CLICKHOUSE_CLIENT_KEY_FILE INGEST_ARCHIVE_CLIENT_KEY_FILE
 )
-# The uid apps/event-ingest/Dockerfile runs as. The container cannot read a
-# 0400 file owned by anyone else, so ownership is as load-bearing as the mode.
-gateway_uid=10001
+# The operator token table is a bearer credential, not merely config: it is
+# held to the same owner-only policy as a private key.
+control_private_keys=(
+  CONTROL_SERVER_KEY_FILE CONTROL_OPERATOR_TOKENS_FILE
+)
 
-is_gateway_private_key() {
+# Echoes the uid that must own this secret, or nothing if it is not private
+# material.
+private_key_uid() {
   local needle="$1" candidate
   for candidate in "${gateway_private_keys[@]}"; do
-    [[ "$candidate" == "$needle" ]] && return 0
+    [[ "$candidate" == "$needle" ]] && { printf '%s' "$gateway_uid"; return 0; }
   done
-  return 1
+  for candidate in "${control_private_keys[@]}"; do
+    [[ "$candidate" == "$needle" ]] && { printf '%s' "$control_uid"; return 0; }
+  done
+  return 0
 }
 
 for key in "${secret_keys[@]}"; do
@@ -86,7 +107,8 @@ for key in "${secret_keys[@]}"; do
   fi
   [[ -f "$resolved" ]] || fail "secret file for ${key} does not exist"
 
-  if is_gateway_private_key "$key"; then
+  required_uid="$(private_key_uid "$key")"
+  if [[ -n "$required_uid" ]]; then
     case "$(uname -s)" in
       Linux) mode="$(stat -c '%a' "$resolved")"; owner="$(stat -c '%u' "$resolved")" ;;
       Darwin) mode="$(stat -f '%Lp' "$resolved")"; owner="$(stat -f '%u' "$resolved")" ;;
@@ -96,10 +118,10 @@ for key in "${secret_keys[@]}"; do
       # Zero-pad so 400 and 0400 compare the same way.
       printf -v mode '%04d' "$((10#$mode))"
       if [[ "${mode: -2}" != "00" ]]; then
-        fail "secret file for ${key} is mode ${mode}; the ingest gateway refuses private material readable or writable by group or other. Run: chmod 0400 '${resolved}'"
+        fail "secret file for ${key} is mode ${mode}; this service refuses private material readable or writable by group or other. Run: chmod 0400 '${resolved}'"
       fi
-      if [[ "$owner" != "$gateway_uid" ]]; then
-        fail "secret file for ${key} is owned by uid ${owner}, but the ingest gateway container runs as uid ${gateway_uid} and could not read it. Run: chown ${gateway_uid} '${resolved}'"
+      if [[ "$owner" != "$required_uid" ]]; then
+        fail "secret file for ${key} is owned by uid ${owner}, but the container that reads it runs as uid ${required_uid} and could not open it. Run: chown ${required_uid} '${resolved}'"
       fi
     fi
   fi
@@ -125,6 +147,20 @@ if [[ "$bind" != 127.0.0.1 && "$bind" != ::1 && "$bind" != localhost && "$allow_
 fi
 if [[ "$allow_nonlocal" == true && ( "$bind" == 0.0.0.0 || "$bind" == :: ) ]]; then
   printf 'Compose preflight warning: ingest is exposed on every interface; verify firewalling and mTLS before continuing.\n' >&2
+fi
+
+# Same gate for the OOB control gateway's published port. Separate from the
+# ingest one on purpose: acknowledging that ingest may be reached off-host is
+# not the same decision as acknowledging it for the channel that can stop,
+# pause, or inject into a running agent.
+control_bind="$(env_value APEX_CONTROL_BIND)"
+control_bind="${control_bind:-127.0.0.1}"
+allow_nonlocal_control="$(env_value APEX_ALLOW_NONLOCAL_CONTROL_BIND)"
+if [[ "$control_bind" != 127.0.0.1 && "$control_bind" != ::1 && "$control_bind" != localhost && "$allow_nonlocal_control" != true ]]; then
+  fail 'APEX_CONTROL_BIND is non-local; set APEX_ALLOW_NONLOCAL_CONTROL_BIND=true only with an approved network policy and operator client certificates issued'
+fi
+if [[ "$allow_nonlocal_control" == true && ( "$control_bind" == 0.0.0.0 || "$control_bind" == :: ) ]]; then
+  printf 'Compose preflight warning: the out-of-band control channel is exposed on every interface; verify firewalling and operator certificate issuance before continuing.\n' >&2
 fi
 
 command -v docker >/dev/null 2>&1 || fail 'Docker CLI is not installed'

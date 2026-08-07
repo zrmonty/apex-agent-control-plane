@@ -14,7 +14,7 @@ foreach ($line in Get-Content -LiteralPath $envPath) {
     $values[$parts[0].Trim()] = $parts[1].Trim()
 }
 
-$imageKeys = @('APEX_INGEST_IMAGE', 'NATS_IMAGE', 'CLICKHOUSE_IMAGE', 'MINIO_IMAGE', 'MINIO_MC_IMAGE', 'CLICKHOUSE_API_IMAGE', 'ARCHIVE_API_IMAGE')
+$imageKeys = @('APEX_INGEST_IMAGE', 'APEX_CONTROL_IMAGE', 'NATS_IMAGE', 'CLICKHOUSE_IMAGE', 'MINIO_IMAGE', 'MINIO_MC_IMAGE', 'CLICKHOUSE_API_IMAGE', 'ARCHIVE_API_IMAGE')
 foreach ($key in $imageKeys) {
     $value = $values[$key]
     if ([string]::IsNullOrWhiteSpace($value) -or $value -match 'REPLACE_WITH' -or $value -notmatch '@sha256:[0-9a-fA-F]{64}$') {
@@ -24,6 +24,8 @@ foreach ($key in $imageKeys) {
 
 $secretKeys = @(
     'GATEWAY_SERVER_CERT_FILE', 'GATEWAY_SERVER_KEY_FILE', 'GATEWAY_CLIENT_CA_FILE',
+    'CONTROL_SERVER_CERT_FILE', 'CONTROL_SERVER_KEY_FILE', 'CONTROL_CLIENT_CA_FILE',
+    'CONTROL_OPERATOR_TOKENS_FILE',
     'INGEST_BEARER_TOKEN_FILE', 'NATS_USERNAME_FILE', 'NATS_PASSWORD_FILE',
     'INGEST_NATS_CLIENT_CERT_FILE', 'INGEST_NATS_CLIENT_KEY_FILE',
     'INGEST_CLICKHOUSE_CLIENT_CERT_FILE', 'INGEST_CLICKHOUSE_CLIENT_KEY_FILE',
@@ -77,6 +79,19 @@ if ($bind -notin @('127.0.0.1', '::1', 'localhost') -and -not $allowNonLocal) {
 }
 if ($allowNonLocal -and $bind -in @('0.0.0.0', '::')) {
     Write-Warning 'Compose preflight: ingest is exposed on every interface; verify firewalling and mTLS before continuing.'
+}
+
+# Separate gate for the OOB control gateway's published port. Acknowledging
+# that ingest may be reached off-host is not the same decision as
+# acknowledging it for the channel that can stop, pause, or inject into a
+# running agent.
+$controlBind = if ([string]::IsNullOrWhiteSpace($values['APEX_CONTROL_BIND'])) { '127.0.0.1' } else { $values['APEX_CONTROL_BIND'] }
+$allowNonLocalControl = $values['APEX_ALLOW_NONLOCAL_CONTROL_BIND'] -eq 'true'
+if ($controlBind -notin @('127.0.0.1', '::1', 'localhost') -and -not $allowNonLocalControl) {
+    throw 'Compose preflight: APEX_CONTROL_BIND is non-local; set APEX_ALLOW_NONLOCAL_CONTROL_BIND=true only with an approved network policy and operator client certificates issued.'
+}
+if ($allowNonLocalControl -and $controlBind -in @('0.0.0.0', '::')) {
+    Write-Warning 'Compose preflight: the out-of-band control channel is exposed on every interface; verify firewalling and operator certificate issuance before continuing.'
 }
 
 docker info --format '{{.ServerVersion}}' *> $null

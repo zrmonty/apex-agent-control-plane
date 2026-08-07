@@ -25,6 +25,22 @@ x-gateway-build: &gateway-build
       RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
       CARGO_FEATURES: ${GATEWAY_CARGO_FEATURES:-}
 
+# Same arrangement for the OOB control gateway: shared by control-plane-api
+# and control-secrets-init so both resolve to one image tag and BuildKit
+# builds it exactly once. A separate image from the ingest gateway's, running
+# as a separate uid (10002 vs 10001) -- see apps/control-plane-api/Dockerfile.
+x-control-build: &control-build
+  image: apex-control-plane-api-ref:latest
+  build:
+    # Repository root again: build.rs compiles contracts/proto/..., and the
+    # crate additionally has a path dependency on apps/event-ingest.
+    context: ../..
+    dockerfile: apps/control-plane-api/Dockerfile
+    args:
+      BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
+      RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
+      CARGO_FEATURES: ${CONTROL_CARGO_FEATURES:-}
+
 services:
   jetstream:
     image: nats@sha256:dd5152d5de4ce2a22b970cc553dd5b45ac9533bdddc440a79f970ac489ce2fa5
@@ -279,12 +295,88 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
 
+  # Same restaging problem as gateway-secrets-init, different uid: this image
+  # runs as 10002, so it cannot reuse the gateway's staged tree even if the
+  # file modes happened to line up. /var/lib/apex-control-secrets is created
+  # in the image owned by 10002, so a fresh named volume inherits that
+  # ownership and this unprivileged container can write to it.
+  control-secrets-init:
+    <<: *control-build
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        for name in ca control_server_cert control_server_key \
+                    control_operator_tokens; do
+          test -f "/run/secrets/$$name" || { echo "control-secrets-init: missing /run/secrets/$$name" >&2; exit 1; }
+          cp "/run/secrets/$$name" "/var/lib/apex-control-secrets/$$name"
+          chmod 0600 "/var/lib/apex-control-secrets/$$name"
+        done
+        # Fail closed rather than hand the gateway material it will reject.
+        for staged in /var/lib/apex-control-secrets/*; do
+          mode="$$(stat -c '%a' "$$staged")"
+          test "$$mode" = "600" || { echo "control-secrets-init: $$staged is mode $$mode, expected 600" >&2; exit 1; }
+        done
+        echo "control-secrets-init: staged $$(ls -1 /var/lib/apex-control-secrets | wc -l) secrets at 0600"
+    networks: [gateway-ref]
+    volumes:
+      - control-secrets:/var/lib/apex-control-secrets
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    restart: "no"
+    secrets:
+      - ca
+      - control_server_cert
+      - source: control_server_key
+        target: control_server_key
+      - source: control_operator_tokens
+        target: control_operator_tokens
+
+  # No depends_on for jetstream or the providers, unlike ingest-gateway. A
+  # control command is durable the moment its outbox row commits, so this
+  # gateway must come up and accept commands whether or not the primary data
+  # path is reachable -- that independence is the ADR-0006 requirement this
+  # profile is here to prove, and a dependency edge would quietly remove it.
+  control-plane-api:
+    <<: *control-build
+    environment:
+      APEX_CONTROL_TRUSTED_SECRET_BASE: /var/lib/apex-control-secrets
+      APEX_CONTROL_BIND_ADDR: 0.0.0.0:9443
+      APEX_CONTROL_ALLOW_NONLOCAL_BIND: "true"
+      APEX_CONTROL_SERVER_CERT_FILE: /var/lib/apex-control-secrets/control_server_cert
+      APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
+      APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
+      APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
+      APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
+      APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+    depends_on:
+      control-secrets-init:
+        condition: service_completed_successfully
+    networks: [gateway-ref]
+    ports:
+      - "${APEX_CONTROL_BIND:-127.0.0.1}:${APEX_CONTROL_PORT:-18446}:9443"
+    volumes:
+      - control-data:/var/lib/apex-control
+      # Read-only: the gateway reads staged material and never rewrites it.
+      - control-secrets:/var/lib/apex-control-secrets:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # Stricter than ingest-gateway's block above, which this profile leaves
+    # writable. This process writes nowhere but its outbox volume, so there is
+    # no reason to leave the rest of its filesystem writable.
+    read_only: true
+    tmpfs: [/tmp]
+
 networks:
   gateway-ref:
 
 volumes:
   gateway-data:
   gateway-secrets:
+  control-data:
+  control-secrets:
 
 secrets:
   ca:
@@ -322,3 +414,14 @@ secrets:
     file: ./live-mtls/secrets/nats-server.key
   ingest_bearer_token:
     file: ./live-mtls/secrets/ingest-bearer-token
+  # OOB control gateway: its own server leaf and its own operator credential
+  # table, both generated by live-mtls/generate_pki.py. The client CA is the
+  # shared lab `ca` above only because this profile has a single lab CA; a
+  # real deployment issues operator client certificates from a separate CA
+  # (CONTROL_CLIENT_CA_FILE in compose.yaml).
+  control_server_cert:
+    file: ./live-mtls/secrets/control-plane-server.pem
+  control_server_key:
+    file: ./live-mtls/secrets/control-plane-server.key
+  control_operator_tokens:
+    file: ./live-mtls/secrets/control-operator-tokens

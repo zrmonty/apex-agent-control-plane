@@ -72,6 +72,27 @@ def _write_runtime_secret(path: Path) -> None:
         pass
 
 
+def _write_operator_token_table(path: Path) -> None:
+    """Write a lab operator credential table for `apps/control-plane-api`.
+
+    The file is the whole `APEX_CONTROL_OPERATOR_TOKENS_FILE` value, not a
+    bare token: the format is `token|workspace/namespace[,...];...`, and the
+    gateway refuses any token shorter than 16 bytes. Scoped to `acme/prod`
+    rather than the `*` break-glass scope so the lab fixture exercises the
+    scope check instead of bypassing it.
+
+    Clients that need the raw token (tests, `grpcurl`) split on the last `|`.
+    """
+    _prepare_write(path)
+    path.write_text(
+        f"{secure_secrets.token_urlsafe(32)}|acme/prod\n", encoding="ascii"
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _is_private_secret_name(name: str) -> bool:
     """Names the host-side Rust secret policy treats as private material."""
     lower = name.lower()
@@ -305,6 +326,31 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # OOB control gateway (apps/control-plane-api). Its own server leaf and its
+    # own operator client leaf: per ADR-0006 the control channel is a separate
+    # trust boundary from ingest, so it does not reuse the ingest gateway's
+    # server certificate or the ingest workload's client certificate.
+    _issue(
+        out=out,
+        basename="control-plane-server",
+        common_name="control-plane-api",
+        san_dns=["control-plane-api", "localhost"],
+        # Include IPv6 loopback: Ubuntu CI often resolves "localhost" to ::1.
+        san_ips=["127.0.0.1", "::1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=True,
+    )
+    _issue(
+        out=out,
+        basename="control-operator-client",
+        common_name="apex-control-operator",
+        san_dns=["apex-control-operator"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
     # Shared secrets used by configs
     # Username is treated as private material by NATS host-side validation.
     _prepare_write(out / "nats-username")
@@ -316,6 +362,7 @@ def main() -> None:
         pass
     _write_runtime_secret(out / "nats-password")
     _write_runtime_secret(out / "valkey-ingest-password")
+    _write_operator_token_table(out / "control-operator-tokens")
     host_out = write_host_secrets(out)
     print(f"Wrote local-dev PKI under {out}")
     print(f"Wrote host-restricted client secrets under {host_out}")

@@ -18,8 +18,19 @@ name: apex-phase0
 # What an operator must actually do on the host, for every file referenced by a
 # `secrets:` entry marked `mode: "0400"` below:
 #
-#     chown 10001:10001 <file>     # the uid apps/event-ingest/Dockerfile runs as
+#     chown <uid>:<uid> <file>     # the uid of the container that reads it
 #     chmod 0400 <file>
+#
+# The two services run as different uids on purpose (ADR-0006: independent
+# trust boundaries, visible at the OS layer and not only in application code):
+#
+#     10001   ingest-gateway       (apps/event-ingest/Dockerfile)
+#     10002   control-plane-api    (apps/control-plane-api/Dockerfile)
+#
+# So control_server_key and control_operator_tokens must be owned by 10002,
+# and everything the ingest gateway reads by 10001. A file chowned to the
+# wrong one of those two is unreadable to the container that needs it, and the
+# process exits at startup rather than serving.
 #
 # `deploy/compose/preflight.sh` / `preflight.ps1` check for this before you
 # start the stack. `compose.gateway-ref.yaml` takes the other approach -- an
@@ -113,6 +124,60 @@ services:
     tmpfs: [/tmp]
     volumes:
       - ingest-outbox:/var/lib/apex
+
+  # Out-of-band control gateway (ADR-0006). Deployed as its own container, on
+  # its own port, with its own TLS material, its own operator credential
+  # table, and its own durable outbox volume. That separation is the whole
+  # point: "reachable independently of the ingest/data path" is only true once
+  # this is a service of its own, not code that happens to be authenticated
+  # differently inside somebody else's process.
+  #
+  # Note there is no depends_on for jetstream/clickhouse/archive here, unlike
+  # ingest-gateway. Deliberate: a command is durable the moment its outbox row
+  # commits, so this gateway must be able to start and accept commands while
+  # the primary data path is down. Adding a dependency edge would reintroduce
+  # exactly the coupling ADR-0006 exists to remove.
+  control-plane-api:
+    image: ${APEX_CONTROL_IMAGE:?set APEX_CONTROL_IMAGE to an approved, digest-pinned image}
+    command: ["/usr/local/bin/apex-control-plane-api"]
+    environment:
+      APEX_CONTROL_TRUSTED_SECRET_BASE: /run/secrets
+      APEX_CONTROL_BIND_ADDR: 0.0.0.0:9443
+      # Required because the listener above is not loopback. The process
+      # terminates mTLS itself and requires an operator client certificate;
+      # this stays an explicit acknowledgement that the control channel is
+      # reachable off-host at all. See apps/control-plane-api/src/startup/env.rs.
+      APEX_CONTROL_ALLOW_NONLOCAL_BIND: "true"
+      APEX_CONTROL_SERVER_CERT_FILE: /run/secrets/control_server_cert
+      APEX_CONTROL_SERVER_KEY_FILE: /run/secrets/control_server_key
+      APEX_CONTROL_CLIENT_CA_FILE: /run/secrets/control_client_ca
+      # A file, never an `environment:` value. Compose environment is visible
+      # to `docker inspect` and /proc/<pid>/environ; these are bearer
+      # credentials that authorize stop/pause/inject against live agents.
+      APEX_CONTROL_OPERATOR_TOKENS_FILE: /run/secrets/control_operator_tokens
+      # A distinct outbox file from event-ingest's, by design: the two
+      # services must not share a durability boundary any more than they
+      # share auth.
+      APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
+      APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+    networks: [apex-internal]
+    secrets:
+      - control_server_cert
+      - source: control_server_key
+        target: /run/secrets/control_server_key
+        mode: "0400"
+      - control_client_ca
+      - source: control_operator_tokens
+        target: /run/secrets/control_operator_tokens
+        mode: "0400"
+    ports:
+      - "${APEX_CONTROL_BIND:-127.0.0.1}:${APEX_CONTROL_PORT:-9443}:9443"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - control-outbox:/var/lib/apex-control
 
   jetstream:
     image: ${NATS_IMAGE:?set NATS_IMAGE to an approved, digest-pinned image}
@@ -320,11 +385,25 @@ networks:
 
 volumes:
   ingest-outbox:
+  # Separate from ingest-outbox on purpose: a control command must survive
+  # independently of the ingest path's durability state.
+  control-outbox:
   jetstream-data:
   clickhouse-data:
   archive-data:
 
 secrets:
+  # OOB control gateway material. Separate certificates and a separate client
+  # CA from the ingest gateway's, so an ingest workload certificate cannot
+  # open a control connection and vice versa.
+  control_server_cert:
+    file: ${CONTROL_SERVER_CERT_FILE:?set CONTROL_SERVER_CERT_FILE to a control gateway certificate}
+  control_server_key:
+    file: ${CONTROL_SERVER_KEY_FILE:?set CONTROL_SERVER_KEY_FILE to a control gateway private key}
+  control_client_ca:
+    file: ${CONTROL_CLIENT_CA_FILE:?set CONTROL_CLIENT_CA_FILE to the CA that issues operator client certificates}
+  control_operator_tokens:
+    file: ${CONTROL_OPERATOR_TOKENS_FILE:?set CONTROL_OPERATOR_TOKENS_FILE to an operator credential table file}
   gateway_server_cert:
     file: ${GATEWAY_SERVER_CERT_FILE:?set GATEWAY_SERVER_CERT_FILE to a gateway certificate}
   gateway_server_key:
