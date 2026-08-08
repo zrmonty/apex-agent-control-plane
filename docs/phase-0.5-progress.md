@@ -219,6 +219,8 @@ STOPPED     15:33:32.375  019fe202-07aa-7240-8b6a-448213949484
 
 Halted 1.005s after submission (one poll cadence), process exit code 0.
 
+Still true, and re-verified every run since: in CI run [31277901023](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/31277901023) the same test submitted `stop` `019fe32c-5b9f-7432-a459-109e12da7133` at 20:59:22.912 and the agent halted naming it at 20:59:23.909 -- 1.004s, after two completed iterations and none after.
+
 **Why this is causation and not coincidence**, in the order the test asserts it:
 
 - The `command_id` the agent printed is the UUIDv7 **the gateway minted during that submission**. The agent could not have produced it by timing out, crashing, or finishing early.
@@ -236,27 +238,21 @@ Two further live tests run against the same container:
 
 `an_operator_pause_and_resume_gate_a_real_agents_tool_calls`, in the same file, against the same container and the same real Python agent process. It runs under **its own agent identity** (`reference-agent-pause`, its own client certificate and its own credential-table entry), deliberately: the inbox is at-least-once with a 30-second redelivery window, so the `stop` from the test above would otherwise become visible again mid-run and halt this agent -- which would look exactly like a pause bug. Separate identities make the proofs independent by construction rather than by test ordering.
 
-Observed on the recorded run (all timestamps from the agent's own transcript):
+Observed in **GitHub Actions run [31277901023](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/31277901023)**, step *Live proof -- operator commands change what a real agent process does*. Timestamps are from the agent's own transcript, and the whole sequence is re-derivable from that step's log:
 
 ```
-READY       20:16:34.240  agent authenticated and completed its first poll
-COMPLETED 1 20:16:34.294  a whole turn ran, tool included
-COMPLETED 2 20:16:35.348  and another -- the agent is running under its own power
-            ~20:16:35.35  operator submits pause -> command_id 019fe305-2f48-7a50-99d6-303e90f23fb7
-ITERATION 3 20:16:36.353
-PAUSED      20:16:36.353  019fe305-2f48-7a50-99d6-303e90f23fb7   (+1.005s)
-ITERATION 4 20:16:37.35   ... PAUSED, same command_id
-ITERATION 5 20:16:38.35   ... PAUSED, same command_id
-ITERATION 6 20:16:39.35   ... PAUSED, same command_id
-ITERATION 7 20:16:40.35   ... PAUSED, same command_id
-ITERATION 8 20:16:41.35   ... PAUSED, same command_id
-            ~20:16:41.36  operator submits resume -> command_id 019fe305-46c8-7f92-9916-d7ddca26bb4c
-ITERATION 9 20:16:42.42
-RESUMED     20:16:42.423  019fe305-46c8-7f92-9916-d7ddca26bb4c   (+1.064s)
-COMPLETED 9 20:16:42.423  the resuming turn ran its tool
+READY       20:59:14.286  agent authenticated and completed its first poll
+COMPLETED 1 20:59:14.340  a whole turn ran, tool included
+COMPLETED 2 20:59:15.395  and another -- the agent is running under its own power
+            20:59:15.402  operator submits pause -> 019fe32c-3e49-7930-8b16-f2ae89ab226c
+PAUSED      20:59:16.399  019fe32c-3e49-7930-8b16-f2ae89ab226c  turn 3   (+1.004s)
+            ... turns 4-7, PAUSED, same command_id, no tool calls
+            20:59:21.406  operator submits resume -> 019fe32c-55bd-7ba1-aa07-0c24b573e26a
+RESUMED     20:59:21.467  019fe32c-55bd-7ba1-aa07-0c24b573e26a  turn 8   (+0.068s)
+COMPLETED 8 20:59:21.467  the resuming turn ran its tool
 ```
 
-Paused 1.005s after submission and resumed 1.064s after submission -- one poll cadence each, the same latency shape the `stop` proof showed.
+Paused 1.004s after submission -- one poll cadence, the same latency shape the `stop` proof showed. The resume landed in 0.068s because the agent happened to be entering its poll when it was submitted, which is the *other* end of the same one-cadence window.
 
 **Why this is causation and not coincidence**, in the order the test asserts it:
 
@@ -271,18 +267,16 @@ Paused 1.005s after submission and resumed 1.064s after submission -- one poll c
 
 `an_operator_budget_halts_a_real_agent_at_the_predicted_turn`, same file, same container, same real Python agent process, under its own agent identity (`reference-agent-budget`) for the same reason. The harness runs with `--synthetic-cost-per-turn 100`; the operator submits a ceiling of 250. The test derives the expected halt turn as `floor(250/100) + 1 = 3` **in code**, so the assertion is arithmetic rather than a number that could be quietly adjusted to match whatever happened.
 
-Observed on the recorded run:
+Observed in the same CI run and the same step:
 
 ```
-READY       20:28:46.834  agent authenticated and completed its first poll
-COMPLETED 1 20:28:46.887  a whole turn ran; running total 100
-            ~20:28:46.89  operator submits set_budget -> 019fe310-58e2-7a63-a183-525ae303308d
+READY       20:59:07.362  agent authenticated and completed its first poll
+COMPLETED 1 20:59:07.427  a whole turn ran; running total 100
+            20:59:07.436  operator submits set_budget -> 019fe32c-1f2a-7e51-bcd9-94836a433c53
                           budget_kind=cost, limit=250
-ITERATION 2 20:28:47.94
-BUDGET_SET  20:28:47.943  019fe310-58e2-7a63-a183-525ae303308d cost 250.0 (turn 2)
-COMPLETED 2 20:28:47.943  running total 200, under the ceiling, so the tool ran
-ITERATION 3 20:28:48.94
-BUDGET_EXCEEDED 20:28:48.946  019fe310-58e2-7a63-a183-525ae303308d turn 3
+BUDGET_SET  20:59:08.483  019fe32c-1f2a-7e51-bcd9-94836a433c53 cost 250.0  turn 2
+COMPLETED 2 20:59:08.483  running total 200, under the ceiling, so the tool ran
+BUDGET_EXCEEDED 20:59:09.486  019fe32c-1f2a-7e51-bcd9-94836a433c53  turn 3
                               cost used=300.0 limit=250.0
 ```
 
@@ -309,22 +303,19 @@ action=stop status=stopped
 control_command_id=00000000-0000-7000-8000-000000000000
 ```
 
-Observed on the recorded run:
+Observed in the same CI run and the same step:
 
 ```
-READY       20:40:44.156  agent authenticated and completed its first poll
-COMPLETED 1 20:40:44.211
-            ~20:40:44.21  operator submits inject -> 019fe31b-4af0-7880-8531-d7c6c9c92710
-ITERATION 2 20:40:45.212
-INJECTED    20:40:45.269  019fe31b-4af0-7880-8531-d7c6c9c92710 turn 2
+READY       20:59:09.680  agent authenticated and completed its first poll
+COMPLETED 1 20:59:09.734
+            20:59:09.742  operator submits inject -> 019fe32c-282c-7d40-b16b-18acde371381
+INJECTED    20:59:10.790  019fe32c-282c-7d40-b16b-18acde371381  turn 2
                           sha256 ed381a44eeb5fa1fbe97eb8fc0fda9147e016345cd3ed05b1b19a983fc1b51d3
-COMPLETED 2 20:40:45.269  the same turn ran its tool and finished
-COMPLETED 3 20:40:46.323  ... and the agent kept working
-COMPLETED 4 20:40:47.377
-COMPLETED 5 20:40:48.431
+COMPLETED 2 20:59:10.790  the same turn ran its tool and finished
+COMPLETED 3..5            ... and the agent kept working
 ```
 
-Surfaced 1.057s after submission -- one poll cadence, the same shape as the other proofs.
+Surfaced 1.056s after submission -- one poll cadence, the same shape as the other proofs.
 
 **Why this shows the security property and not just delivery**, in the order the test asserts it:
 
