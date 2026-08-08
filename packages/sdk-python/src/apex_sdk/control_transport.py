@@ -30,9 +30,14 @@ so the two messages are encoded and decoded here directly. The decoder skips
 unknown fields the way any protobuf implementation must, so a gateway that
 starts sending new fields does not break an older client.
 
-**Flagged for the owner:** if a second RPC ever needs a Python client, generate
-the stubs instead. One hand-rolled message pair is defensible; three is a
-maintenance liability.
+**Flagged for the owner, and now more sharply than when this module was
+written:** the codec has grown a ``google.protobuf.Struct`` decoder, because
+``set_budget`` and ``inject`` carry their whole meaning in ``parameters`` and a
+client that skips that field cannot enact either. That is a well-specified,
+closed piece of the protobuf JSON mapping rather than a third ad-hoc message,
+and it is bounded on depth and entry count -- but it is the point at which
+"generate the stubs instead" stops being a preference and becomes the right
+answer for the next addition.
 """
 
 from __future__ import annotations
@@ -40,7 +45,8 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import struct as _struct
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -143,6 +149,15 @@ class PendingControlCommand:
     reason_code: str | None
     issued_at: str
     delivery_attempt: int
+    #: The operator-submitted action parameters, decoded from
+    #: ``google.protobuf.Struct``. Empty for actions that take none.
+    #:
+    #: **This is data, never instructions.** ``inject.content`` in particular
+    #: is explicitly untrusted operator-supplied text (ADR-0005), and nothing
+    #: in this SDK parses it, dispatches on it, or lets it influence a control
+    #: decision. Defaulted last so existing positional construction is
+    #: unaffected.
+    parameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -272,6 +287,115 @@ def _decode_text(value: Any, field: str) -> str:
         raise _malformed(f"{field} was not valid UTF-8") from exc
 
 
+#: Ceilings on a decoded ``google.protobuf.Struct``.
+#:
+#: The gateway validates command parameters on the way in and the response is
+#: already size-bounded, so neither of these should ever bind against a
+#: cooperative gateway. They exist because the decoder is recursive and its
+#: input arrives over the network: a nesting bound is what keeps a malformed or
+#: hostile response from turning into a stack overflow in the agent process,
+#: and an entry bound keeps one message from deciding how many objects this
+#: client allocates. Refusing is correct here where skipping is correct for an
+#: unknown *field*: an unknown field is a newer contract, an over-deep Struct
+#: is not.
+MAX_STRUCT_DEPTH = 8
+MAX_STRUCT_ENTRIES = 128
+
+
+def _decode_struct_value(buffer: bytes, depth: int) -> Any:
+    """Decodes one ``google.protobuf.Value``.
+
+    A `Value` is a oneof; proto3 encodes exactly one of its fields. Later
+    fields win if a malformed message sets several, which is ordinary protobuf
+    last-one-wins behaviour rather than a decision made here.
+    """
+    value: Any = None
+    offset = 0
+    while offset < len(buffer):
+        field_number, wire_type, raw, offset = _read_field(buffer, offset)
+        # The wire type is checked against the one the field is *declared*
+        # with, not merely against what happens to be decodable. A
+        # varint-encoded `number_value` would otherwise be reinterpreted as
+        # the double with those bits -- a silently wrong budget limit rather
+        # than a refused message.
+        if field_number == 1:  # null_value, an enum
+            _require_wire(wire_type, _WIRE_VARINT, "a Struct null value")
+            value = None
+        elif field_number == 2:  # number_value, a double
+            _require_wire(wire_type, _WIRE_FIXED64, "a Struct number value")
+            value = _struct.unpack("<d", int(raw).to_bytes(8, "little"))[0]
+        elif field_number == 3:  # string_value
+            _require_wire(wire_type, _WIRE_LENGTH, "a Struct string value")
+            value = _decode_text(raw, "a Struct string value")
+        elif field_number == 4:  # bool_value
+            _require_wire(wire_type, _WIRE_VARINT, "a Struct bool value")
+            value = raw != 0
+        elif field_number == 5:  # struct_value
+            _require_wire(wire_type, _WIRE_LENGTH, "a nested Struct")
+            value = _decode_struct(bytes(raw), depth + 1)
+        elif field_number == 6:  # list_value
+            _require_wire(wire_type, _WIRE_LENGTH, "a Struct list")
+            value = _decode_struct_list(bytes(raw), depth + 1)
+        # Anything else is an unknown field; skipping is required protobuf
+        # behaviour.
+    return value
+
+
+def _require_wire(actual: int, expected: int, field: str) -> None:
+    if actual != expected:
+        raise _malformed(f"{field} used the wrong wire type")
+
+
+def _decode_struct_list(buffer: bytes, depth: int) -> list[Any]:
+    if depth > MAX_STRUCT_DEPTH:
+        raise _malformed("a Struct nested deeper than this client accepts")
+    values: list[Any] = []
+    offset = 0
+    while offset < len(buffer):
+        field_number, wire_type, raw, offset = _read_field(buffer, offset)
+        if field_number != 1:
+            continue
+        _require_wire(wire_type, _WIRE_LENGTH, "a Struct list entry")
+        if len(values) >= MAX_STRUCT_ENTRIES:
+            raise _malformed("a Struct carried more entries than this client accepts")
+        values.append(_decode_struct_value(bytes(raw), depth))
+    return values
+
+
+def _decode_struct(buffer: bytes, depth: int = 0) -> dict[str, Any]:
+    """Decodes ``google.protobuf.Struct`` into a plain ``dict``."""
+    if depth > MAX_STRUCT_DEPTH:
+        raise _malformed("a Struct nested deeper than this client accepts")
+    fields: dict[str, Any] = {}
+    offset = 0
+    while offset < len(buffer):
+        field_number, wire_type, raw, offset = _read_field(buffer, offset)
+        if field_number != 1:  # `fields`, the map
+            continue
+        _require_wire(wire_type, _WIRE_LENGTH, "a Struct field entry")
+        key: str | None = None
+        entry_value: Any = None
+        entry_offset = 0
+        entry = bytes(raw)
+        while entry_offset < len(entry):
+            entry_field, entry_wire, entry_raw, entry_offset = _read_field(entry, entry_offset)
+            if entry_field == 1:
+                _require_wire(entry_wire, _WIRE_LENGTH, "a Struct field key")
+                key = _decode_text(entry_raw, "a Struct field key")
+            elif entry_field == 2:
+                _require_wire(entry_wire, _WIRE_LENGTH, "a Struct field value")
+                entry_value = _decode_struct_value(bytes(entry_raw), depth)
+        if key is None:
+            # proto3 omits an empty map key, and "" is a legal key. Treat a
+            # missing one as the empty string exactly as a generated decoder
+            # would, rather than dropping the entry.
+            key = ""
+        if key not in fields and len(fields) >= MAX_STRUCT_ENTRIES:
+            raise _malformed("a Struct carried more entries than this client accepts")
+        fields[key] = entry_value
+    return fields
+
+
 def encode_poll_request(max_commands: int = 0) -> bytes:
     """Encodes ``apex.v1.PollCommandsRequest``.
 
@@ -288,14 +412,18 @@ def encode_poll_request(max_commands: int = 0) -> bytes:
 
 def _decode_pending_command(buffer: bytes) -> PendingControlCommand:
     fields: dict[int, Any] = {}
+    parameters: dict[str, Any] = {}
     offset = 0
     while offset < len(buffer):
         field_number, _wire_type, value, offset = _read_field(buffer, offset)
-        # Field 9 is `parameters` (google.protobuf.Struct). This first-pass
-        # client does not decode it: `stop` carries none, and skipping is the
-        # ordinary unknown-field behaviour, so adding a decoder later is purely
-        # additive rather than a contract change.
+        # Field 9 is `parameters` (google.protobuf.Struct), where `set_budget`
+        # and `inject` carry their entire meaning. A client that skipped it --
+        # as the first-pass client did, when only `stop` was enacted -- cannot
+        # enact either.
         if field_number == 9:
+            if not isinstance(value, (bytes, bytearray)):
+                raise _malformed("parameters was not length-delimited")
+            parameters = _decode_struct(bytes(value))
             continue
         fields[field_number] = value
     action_value = fields.get(7, 0)
@@ -315,6 +443,7 @@ def _decode_pending_command(buffer: bytes) -> PendingControlCommand:
         reason_code=_decode_text(fields[8], "reason_code") if 8 in fields else None,
         issued_at=_decode_text(fields.get(10, b""), "issued_at"),
         delivery_attempt=fields.get(11, 0) if isinstance(fields.get(11, 0), int) else 0,
+        parameters=parameters,
     )
 
 

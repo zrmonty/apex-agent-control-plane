@@ -431,6 +431,7 @@ def main() -> None:
     # identity" rule the credential table has no wildcard form for.
     for basename, common in (
         ("agent-workload-pause-client", "apex-agent-workload-pause"),
+        ("agent-workload-budget-client", "apex-agent-workload-budget"),
     ):
         _issue(
             out=out,
@@ -554,6 +555,11 @@ def main() -> None:
             "control-agent-tokens-pause",
             "agent-workload-pause-client.pem",
             "reference-agent-pause",
+        ),
+        (
+            "control-agent-tokens-budget",
+            "agent-workload-budget-client.pem",
+            "reference-agent-budget",
         ),
     )
     for table, certificate, agent_id in agents:

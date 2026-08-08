@@ -24,6 +24,11 @@ the ordering of real events rather than on this script's own opinion:
     STOPPED <command_id> <iso8601>      a stop was retrieved and enacted
     PAUSED <command_id> <n> <iso8601>   the turn did not run its tool
     RESUMED <command_id> <n> <iso8601>  a resume was enacted; the tool then ran
+    BUDGET_SET <command_id> <kind> <limit> <n> <iso8601>
+                                        a ceiling took effect on turn n
+    BUDGET_EXCEEDED <command_id> <n> <kind> <used> <limit> <iso8601>
+                                        the ceiling was reached; the tool did
+                                        not run and this process exits 0
     NO_STOP <iso8601>                   ran out of iterations; proof failed
 
 Nothing here is production code. It is the harness that makes the claim
@@ -87,6 +92,14 @@ def main() -> int:
     parser.add_argument("--namespace-id", default="prod")
     parser.add_argument("--max-iterations", type=int, default=120)
     parser.add_argument("--interval-seconds", type=float, default=1.0)
+    # Synthetic per-turn usage. Zero by default, which is what the stop and
+    # pause proofs use. A budget proof needs a non-zero value or the ceiling
+    # can never be reached and "the agent halted on its budget" is
+    # unfalsifiable -- the loop's synthetic `llm` event otherwise reports
+    # `input_tokens: 0, output_tokens: 0`.
+    parser.add_argument("--synthetic-input-tokens", type=int, default=0)
+    parser.add_argument("--synthetic-output-tokens", type=int, default=0)
+    parser.add_argument("--synthetic-cost-per-turn", type=float, default=0.0)
     parser.add_argument("--trace", type=Path, required=True, help="JSONL trace output path")
     args = parser.parse_args()
 
@@ -118,6 +131,9 @@ def main() -> int:
         },
         version={"agent_code": "live-proof", "prompt": "p1", "model": "reference"},
         control=transport,
+        synthetic_input_tokens=args.synthetic_input_tokens,
+        synthetic_output_tokens=args.synthetic_output_tokens,
+        synthetic_cost_per_turn=args.synthetic_cost_per_turn,
     )
 
     exit_code = 3
@@ -131,6 +147,7 @@ def main() -> int:
             return 4
         _say(f"READY {_now()}")
 
+        budget_command_id: str | None = None
         for iteration in range(1, args.max_iterations + 1):
             _say(f"ITERATION {iteration} {_now()}")
             events = loop.run(
@@ -144,8 +161,30 @@ def main() -> int:
             data = terminal.get("data", {}) if isinstance(terminal, dict) else {}
             status = data.get("status")
             command_id = data.get("control_command_id", "")
+            # Announce a newly-installed ceiling *before* reporting the turn,
+            # so a transcript shows which turn the budget took effect on. That
+            # is what makes "halted exactly at turn N" checkable arithmetic
+            # rather than a claim about eventual behaviour.
+            if loop.budget_command_id != budget_command_id:
+                budget_command_id = loop.budget_command_id
+                _say(
+                    f"BUDGET_SET {budget_command_id} {loop.budget_kind} "
+                    f"{loop.budget_limit} {iteration} {_now()}"
+                )
             if status == "stopped":
                 _say(f"STOPPED {command_id} {_now()}")
+                exit_code = 0
+                break
+            if status == "budget_exceeded":
+                # Terminal like `stopped`: the ceiling is a property of the
+                # run, so every later turn would breach it too. The used/limit
+                # figures are in the line so the arithmetic is checkable from
+                # the transcript alone.
+                used = loop.used_tokens if loop.budget_kind == "tokens" else loop.used_cost
+                _say(
+                    f"BUDGET_EXCEEDED {command_id} {iteration} {loop.budget_kind} "
+                    f"{used} {loop.budget_limit} {_now()}"
+                )
                 exit_code = 0
                 break
             if status == "paused":

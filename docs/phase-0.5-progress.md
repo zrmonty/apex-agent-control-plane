@@ -1,12 +1,12 @@
 # Phase 0.5 progress
 
-**Status: `stop`, `pause` and `resume` now work end to end. `inject`/`set_budget` still do not.**
+**Status: `stop`, `pause`, `resume` and `set_budget` now work end to end. `inject` still does not.**
 
 A 2026-08-08 investigation found that no code path anywhere in this repository let an agent receive a command an operator submitted: [`control.proto`](../contracts/proto/apex/v1/control.proto) defined only `SubmitCommand`, one direction, operator to gateway, and nothing on the SDK side polled, subscribed, or otherwise consumed one. Full evidence and analysis: [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md).
 
 A fifth pass closed the retrieval half **for `stop` only**, deliberately scoped narrow and proven live: a new `PollCommands` RPC, a new agent-workload credential space, durable per-command delivery state, a real Python gRPC+mTLS client in the product SDK, and a minimal enactment hook in `ReferenceReasonActLoop`. See "Command retrieval and stop enactment" below, and "Live proof" for the run.
 
-A sixth pass is closing the remaining four actions one at a time, each committed and proven live before the next is started. `pause`/`resume` are done; see "`pause` and `resume` enactment" and "Live proof -- pause and resume" below.
+A sixth pass is closing the remaining four actions one at a time, each committed and proven live before the next is started. `pause`/`resume` and `set_budget` are done; see "`pause` and `resume` enactment", "`set_budget` enactment", and the two live-proof sections below.
 
 **Read this precisely, because the distinction is the whole point:**
 
@@ -14,7 +14,8 @@ A sixth pass is closing the remaining four actions one at a time, each committed
 |---|---|
 | Does an operator's `stop` halt a running instrumented agent? | **Yes**, for a runtime that polls the control channel. Proven live against a real container and a real agent process, gated in CI. |
 | Does an operator's `pause` stop a running agent from taking further actions, and does `resume` start it again? | **Yes**, for the same runtime. Proven live the same way -- the agent takes no tool call for the whole paused window, keeps polling throughout, and resumes on the specific `command_id` the operator submitted. |
-| Does `inject` or `set_budget` change what a running agent does? | **No.** They are accepted, recorded, retrievable through `PollCommands` -- and the reference runtime deliberately leaves them inert rather than half-enacting them. Each gets its own pass. |
+| Does an operator's `set_budget` stop a running agent that goes over the ceiling? | **Yes**, for the same runtime, checked at the same pre-tool-call checkpoint against a running total that persists across turns. Proven live at the *specific* turn the arithmetic predicts, not "eventually". |
+| Does `inject` change what a running agent does? | **No.** It is accepted, recorded, retrievable through `PollCommands` -- and the reference runtime deliberately leaves it inert rather than half-enacting it. It gets its own pass. |
 | Does the SDK have a real event-ingest transport? | **No, and this pass did not fix it.** See "Flagged, not fixed" below. |
 
 Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true.
@@ -143,6 +144,36 @@ That last one is not a second acknowledgement protocol and does not replace `inb
 
 `turn_end` gains two statuses: `paused` (tool not executed) and `resumed` (the turn that came out of a pause -- it *did* execute its tool, and the `tool`/`message` events precede it in the trace). Both carry `control_command_id`, the same field and the same purpose as `stopped`'s: an operator can answer "did my pause actually stop it" and "did my resume actually restart it" from the trace alone.
 
+## `set_budget` enactment
+
+The open item said this needs "a running-total hook into every LLM/tool call, or an honest decision that it is checked only at turn boundaries". It is the second one, stated plainly: **the ceiling is checked at the same single pre-tool-call checkpoint as everything else**, against a running total advanced where the `llm` event is emitted. A turn that breaches it emits `turn_end` with `status: "budget_exceeded"` and the ceiling's `command_id`, and does not execute its tool.
+
+### The wire-format gap this had to close first
+
+`set_budget` carries its entire meaning in `parameters` (a `google.protobuf.Struct`), and the SDK's hand-rolled codec **skipped field 9 by design** -- correct when only `stop` was enacted, since `stop` carries none. A client that skips it receives a budget command with no ceiling in it and can never enforce anything, which is the most dangerous shape of failure available here: an operator sets a cost ceiling, the gateway accepts and records it, the agent retrieves it, and nothing happens. So `control_transport.py` gained a `Struct` decoder.
+
+It is bounded and strict, because it is recursive and its input arrives over the network:
+
+- **Depth** (`MAX_STRUCT_DEPTH`, 8) and **entry count** (`MAX_STRUCT_ENTRIES`, 128) ceilings, on maps and lists alike. Neither should ever bind against a cooperative gateway; they exist so a malformed or hostile response cannot overflow the agent's stack or decide how many objects it allocates.
+- **Wire types are checked against the declared ones**, not merely against what happens to be decodable. A varint-encoded `number_value` would otherwise be reinterpreted as the double with those bits -- a silently wrong budget limit rather than a refused message.
+- **Over-deep or malformed is refused, where an unknown field is skipped.** Those are different situations: an unknown field is a newer contract and must not brick an older agent; a Struct that violates its own encoding is not.
+
+*Flagged for the owner, more sharply than before:* the "generate the stubs if a second RPC needs a Python client" note in `control_transport.py` now reads on a codec that also decodes `Struct`. That is a well-specified closed piece of the protobuf spec rather than a third ad-hoc message, but it is the point at which generating stubs stops being a preference.
+
+### The rules, stated because they are choices
+
+- **The ceiling is on the run, not the turn.** `ReferenceReasonActLoop` is constructed once and `run()` is called many times on it (verified against `agent_under_control.py`'s own loop), so the total lives on the instance. A per-turn ceiling would be a rate limit, not a budget.
+- **The check is against the total *including this turn*,** because the turn's `llm` event has already been emitted and counted when the checkpoint runs. That is the same quantity as "accumulated usage plus this turn's projected cost", and it is why the halt lands on the first turn whose completion would put the run over rather than on the turn after it.
+- **Usage accumulated before the ceiling arrived counts against it.** An operator capping an already-expensive agent halts it at once rather than granting it a fresh allowance. That is the conservative reading and the one a cost control exists for. *Flagged for the owner:* "from here on" is a defensible alternative and this pass did not pick it silently.
+- **An invalid ceiling is refused, not approximated.** The parameters are re-validated in the runtime even though the gateway validated them, for two real reasons: version skew between the two, and `NaN` -- a limit that reached an enforcement comparison as `NaN` makes every comparison false, producing a budget that silently never triggers, which is worse than no budget because it looks like one. A refused command leaves the previous ceiling in force and emits an `error` event saying so.
+- **A later `set_budget` replaces the ceiling in force**, wider or narrower, and is applied before the check so it governs its own turn.
+- **Precedence: `stop` > `pause` > budget.** All three halt the turn, so the only observable difference is which reason the trace records. A `pause` is the operator's most recent explicit instruction about whether to act at all; the budget is a standing ceiling. A `set_budget` delivered to a *paused* agent is still installed (state updates run before the pause halt), so nothing is lost.
+- **Usage accrues on halted turns too**, because the `llm` event precedes the checkpoint. A production runtime would want the check before the model call as well. *Flagged for the owner* as a limitation of this synthetic loop.
+
+### Making the enforcement falsifiable
+
+The loop's synthetic `llm` event reported `input_tokens: 0, output_tokens: 0`, against which no ceiling can ever trigger -- so "the budget works" would have been unfalsifiable. `synthetic_input_tokens`, `synthetic_output_tokens` and `synthetic_cost_per_turn` (all zero by default, so every existing caller is unaffected) give the turn a real cost, and `agent_under_control.py` exposes them as flags. That is what turns the live proof from "it eventually stopped" into "budget 250, cost 100 per turn, halted exactly at turn 3 with used 300".
+
 ## Live proof
 
 The deliverable of this pass is not the unit tests. `apps/control-plane-api/tests/live_control_poll.rs` drives:
@@ -211,6 +242,36 @@ Paused 1.005s after submission and resumed 1.064s after submission -- one poll c
 - The process was still alive at the end of that window (`try_wait()` returns `None`). A pause that exits the process would satisfy "ran no tools" and be useless.
 - The iteration number on the `RESUMED` line is the same iteration number on the `COMPLETED` line that follows it, so the resuming turn is the turn that ran the tool -- not a later one.
 - The agent's own JSONL trace, read independently of its stdout, contains **exactly two** `control` events (`pause` then `resume`, both `enforcement: cooperative`, both under actor type `agent`) despite six paused turns -- the collapse rule, asserted rather than described. Every paused `turn_end` names the pause's `command_id`, no `run_id` belonging to a paused turn has a `tool` event, and the `resumed` `turn_end` names the resume's `command_id` and does have one.
+
+## Live proof -- set_budget
+
+`an_operator_budget_halts_a_real_agent_at_the_predicted_turn`, same file, same container, same real Python agent process, under its own agent identity (`reference-agent-budget`) for the same reason. The harness runs with `--synthetic-cost-per-turn 100`; the operator submits a ceiling of 250. The test derives the expected halt turn as `floor(250/100) + 1 = 3` **in code**, so the assertion is arithmetic rather than a number that could be quietly adjusted to match whatever happened.
+
+Observed on the recorded run:
+
+```
+READY       20:28:46.834  agent authenticated and completed its first poll
+COMPLETED 1 20:28:46.887  a whole turn ran; running total 100
+            ~20:28:46.89  operator submits set_budget -> 019fe310-58e2-7a63-a183-525ae303308d
+                          budget_kind=cost, limit=250
+ITERATION 2 20:28:47.94
+BUDGET_SET  20:28:47.943  019fe310-58e2-7a63-a183-525ae303308d cost 250.0 (turn 2)
+COMPLETED 2 20:28:47.943  running total 200, under the ceiling, so the tool ran
+ITERATION 3 20:28:48.94
+BUDGET_EXCEEDED 20:28:48.946  019fe310-58e2-7a63-a183-525ae303308d turn 3
+                              cost used=300.0 limit=250.0
+```
+
+Process exit code 0.
+
+**Why this is enforcement and not a coincidence**, in the order the test asserts it:
+
+- The `command_id` on both the `BUDGET_SET` and `BUDGET_EXCEEDED` lines is the UUIDv7 **the gateway minted during that submission**.
+- The `BUDGET_SET` line proves the ceiling's *parameters* survived the gateway's Struct encoding and the SDK's decoder: `cost` and `250.0`, not an empty parameters object. Before the `Struct` decoder existed this line could not have been produced at all.
+- The halt turn is **exactly** the derived `predicted_halt_turn`. A budget that halted on turn 2 or turn 5 fails here even though both look like "the budget worked".
+- The reported usage is asserted to equal `cost_per_turn * halt_turn`, so the arithmetic in the transcript is checked rather than trusted.
+- The completed turns are asserted to be *exactly* `[1, 2]` -- every turn below the ceiling and no turn on or after it.
+- The trace, read independently of stdout: a `control` event with `action: set_budget`, `parameters: {budget_kind: "cost", limit: 250.0}`, `reason_code: operator.cost_control`, actor type `agent`; a final `turn_end` of `status: "budget_exceeded"` naming that `command_id`; **no** `tool` event under the halting turn's `run_id`; and exactly three `llm` events, because the checkpoint is before the tool call and after the model call.
 
 `.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- an operator stop halts a real agent process** step running exactly this, placed after the JetStream fanout verification (that step reads the last message on the subject, so a command submitted before it would displace the one it looks for).
 
@@ -412,6 +473,15 @@ Found during the `pause`/`resume` enactment pass:
 - **One agent identity per live proof, not one shared between them.** Reusing `reference-agent` for the pause proof would have let the previous test's `stop` reappear inside it through the ordinary redelivery window. That is a test-isolation issue rather than a product defect, but the failure mode -- a proof that passes or fails depending on how long the previous test took -- is exactly the kind of "green means nothing" result these gates exist to avoid. `generate_pki.py` issues a separate leaf and credential-table entry per proof.
 - Reviewed for: cross-tenant isolation regressions (none -- the new workload is a separate certificate and a separate credential-table entry with the same `acme/prod` scope, and both live isolation tests still pass against the same container in the same run); denial of service via a paused agent (a paused turn is *shorter* than a working one and its poll cadence is unchanged, so pausing cannot be used to increase load on the gateway); secrets and command content in logs (the enactment path logs nothing; the transcript carries only `command_id`s, iteration numbers and timestamps); and unbounded growth (the enactment memory is the only new process-lifetime structure and is explicitly capped, asserted by `test_the_remembered_command_set_is_bounded`).
 
+Found during the `set_budget` enactment pass:
+
+- **The SDK could not read a budget at all, and would have failed silently.** `_decode_pending_command` skipped field 9 (`parameters`) by design -- correct when only `stop` was enacted. Left alone, `set_budget` enactment would have produced the worst available failure shape: an operator sets a cost ceiling, the gateway accepts, records and delivers it, the agent retrieves it, and nothing whatsoever happens, with no error anywhere. Closed by decoding `google.protobuf.Struct`; the live proof asserts the decoded `budget_kind` and `limit` explicitly so a regression to skipping is a failure rather than a quiet no-op.
+- **A `NaN` limit would have been a budget that never triggers.** Every comparison against `NaN` is false, so an accepted `NaN` ceiling silently permits unlimited spend while the trace shows a budget in force -- worse than no budget, because it looks like one. The runtime re-validates `budget_kind` and `limit` (finite, positive, bounded) even though the gateway already did, and refuses rather than approximating. Asserted alongside negative, zero, boolean, string, unknown-kind and missing-field shapes.
+- **A wrong wire type inside a `Struct` must be refused, not reinterpreted.** A `number_value` encoded as a varint decodes "successfully" into the double with those bits -- a silently wrong ceiling. The decoder checks each field against its *declared* wire type. This is the one place where the codec is deliberately stricter than its unknown-field behaviour, and the reason is stated in the module: an unknown field is a newer contract, a mis-encoded known field is not.
+- **A recursive decoder fed by the network needs bounds.** `MAX_STRUCT_DEPTH` (8) and `MAX_STRUCT_ENTRIES` (128), applied to maps and lists alike, so a malformed or hostile response cannot overflow the agent process's stack or dictate its allocation count. Both are asserted with responses one past the ceiling.
+- **Precedence between two halting reasons had to be decided rather than emerge.** `pause` and a breached budget both stop the turn; the trace records only one reason. `pause` wins as the operator's most recent explicit instruction, with the budget as the standing ceiling -- and a `set_budget` delivered to a paused agent is still installed, so pausing cannot be used to discard a ceiling.
+- Reviewed for: cross-tenant isolation (unchanged; the budget proof runs under its own workload identity and both live isolation tests still pass in the same run), operator-supplied values reaching a comparison unchecked (they do not -- the ceiling is re-validated at the runtime boundary), command content in logs (the transcript carries `budget_kind`, the limit and the running total, which are the operator's own control values and contain no content or credential), and unbounded growth (the running total is two scalars on the loop instance).
+
 - Reviewed for: auth bypass (none found -- every RPC path requires `authenticate` before any outbox interaction), injection via `inject.content` (content flows untouched into the `control` event's `parameters.content` field and is never interpreted, matching ADR-0005's "content is untrusted data" requirement; `validation/control.rs` already enforces `content_classification: "untrusted"` and a 32 KiB ceiling), budget overflow/negative/NaN/infinity/zero (all rejected by the existing `validate_control_data` finite/positive/bounded check, exercised here via `submit_command_rejects_a_negative_budget_limit`), replay/duplicate attacks (idempotency semantics above), secrets in logs (the fanout worker and auth paths only ever log static `GatewayErrorCode`/summary strings, never tokens or payload content), and TOCTOU on outbox claim (`ControlOutboxBackend` serializes every outbox operation, including the fanout worker's `pending`/`mark_complete`, behind a single `Mutex` -- verified under the concurrency test below).
 
 ## Edge cases covered (tests)
@@ -471,6 +541,25 @@ Found during the `pause`/`resume` enactment pass:
 - A command with no `command_id` is not enacted
 - The enactment memory is bounded, evicting oldest-first
 - Synthetic per-turn usage accumulates across `run()` calls and is reported on the `llm` event; its configuration is range-checked
+
+`test_reference_runtime.py`, `set_budget` half:
+
+- A cost ceiling halts on the turn the arithmetic predicts (250 against 100 a turn: turns 1 and 2 run, turn 3 does not), and the tool ran on exactly the turns below it
+- A token ceiling counts input *and* output tokens
+- A ceiling below what the run has already spent halts it immediately
+- A later `set_budget` replaces the ceiling in force and governs its own turn
+- Every invalid parameter shape -- `NaN`, negative, zero, boolean, string, unknown `budget_kind`, missing `limit`, empty -- is refused, leaves the previous ceiling in force, and emits `REFERENCE_BUDGET_PARAMETERS_INVALID`
+- A redelivered budget does not re-announce itself
+- A `pause` takes precedence over a breached budget; a `stop` takes precedence over both; a budget delivered to a paused agent is installed rather than lost
+- A run with no ceiling never breaches one, at any cost per turn
+
+`test_control_transport.py`, `google.protobuf.Struct` half:
+
+- A `set_budget`'s parameters round-trip; every `Value` kind decodes (string, number, bool, null, nested struct, list, and the empty-string map key)
+- An unknown field *inside* a Struct is skipped, as protobuf requires
+- A Struct deeper than `MAX_STRUCT_DEPTH`, or wider than `MAX_STRUCT_ENTRIES` (as a map and as a list), is refused
+- Eight malformed Struct shapes are refused rather than guessed at, including every wire-type mismatch
+- Injected content shaped like a control directive decodes as an inert string, leaving the command's own `action` and `command_id` untouched
 
 `apps/control-plane-api/src/{auth,envelope,outbox,replay,service}.rs` unit/integration tests (run with `--features test-support`):
 
@@ -553,7 +642,7 @@ cargo deny check
 cargo audit
 ```
 
-All pass clean (112 unit + 20 startup + 14 Keycloak + 5 mTLS + 3 Postgres + 4 poll + 2 Valkey live tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
+All pass clean (112 unit + 20 startup + 14 Keycloak + 5 mTLS + 3 Postgres + 5 poll + 2 Valkey live tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
 
 The Python SDK's own gate:
 
@@ -562,7 +651,7 @@ cd packages/sdk-python
 python -m pytest --cov=apex_sdk --cov-fail-under=95
 ```
 
-283 passed, 2 skipped, 96.16% coverage (`control_transport.py` 97%, `reference_runtime.py` 98%), with `bandit -r src --severity-level medium` clean.
+308 passed, 2 skipped, 96.15% coverage (`control_transport.py` 96%, `reference_runtime.py` 98%), with `bandit -r src --severity-level medium` clean.
 
 `.github/workflows/live-mtls-e2e.yml` additionally builds the real images, starts the real containers, and drives real traffic at them. This exists for the same reason the equivalent gateway step does: `docker compose config` parses YAML, and never catches a Dockerfile that cannot build, a binary that panics before binding, or a container that cannot write its data volume. All three of those reached `master` for `event-ingest` before it had such a gate. The control-side steps, in order:
 
@@ -574,7 +663,7 @@ python -m pytest --cov=apex_sdk --cov-fail-under=95
 | Postgres-backed control gateway (two replicas) + live tests + "landed in Postgres, not a file" | `--features postgres` selecting nothing, and double-claimed outbox rows |
 | **Cross-replica admission ceiling (two replicas + Valkey) + live tests** | An accelerator that is configured but not working -- which looks exactly like no accelerator at all, and which this gate caught on its first run |
 | **Keycloak-backed operator credentials + live tests** | `build_operator_resolver` not selecting the Keycloak path in a real container, and every verification rule against real Keycloak-issued material |
-| **Live proof -- an operator stop halts a real agent process** (and, in the same step, that a pause stops it acting while leaving it alive and polling, and a resume restarts it) | The whole retrieval path: a contract mismatch between the SDK client and the Rust service, an agent credential the deployed container rejects, delivery state that never marks a command delivered, and an enactment hook that logs a stop without acting on it. Nothing else in CI can catch any of these -- every other test either drives the service in process or speaks to it from Rust |
+| **Live proof -- an operator stop halts a real agent process** (and, in the same step, that a pause stops it acting while leaving it alive and polling, a resume restarts it, and a cost ceiling halts it at the predicted turn) | The whole retrieval path: a contract mismatch between the SDK client and the Rust service, an agent credential the deployed container rejects, delivery state that never marks a command delivered, and an enactment hook that logs a stop without acting on it. Nothing else in CI can catch any of these -- every other test either drives the service in process or speaks to it from Rust |
 
 Both new gates assert a startup log line (`admission ceiling: shared (valkey)`, `operator credentials: keycloak`) *before* sending any traffic, so a container that fell back to a different code path fails with that as the diagnosis rather than with a downstream assertion that could have failed for a dozen reasons.
 
@@ -586,9 +675,9 @@ That is a narrower claim than it reads at first, and narrower than this document
 
 **Closed for `stop`** by the command-retrieval pass (see "Command retrieval and stop enactment" and "Live proof" above). What is left of it, stated precisely:
 
-**0a. `inject` and `set_budget` are retrievable but not enacted.** They flow through `PollCommands` exactly as `stop`/`pause`/`resume` do; the reference runtime deliberately leaves them inert rather than half-implementing them. Each needs a genuine answer: `set_budget` needs a running-total hook into every LLM/tool call, or an honest decision that it is checked only at turn boundaries (the running total now exists -- see "`pause` and `resume` enactment" -- but nothing checks it); `inject` needs a safe way to surface explicitly-untrusted content into a live agent's trace without it ever being reinterpretable as an instruction. **The remaining piece of ADR-0005.**
+**0a. `inject` is retrievable but not enacted.** It flows through `PollCommands` exactly as the other four do; the reference runtime deliberately leaves it inert rather than half-implementing it. It needs a safe way to surface explicitly-untrusted content into a live agent's trace without it ever being reinterpretable as an instruction. **The last remaining piece of ADR-0005.**
 
-*Closed for `pause`/`resume`* by the sixth pass: the suspension point turned out to be the checkpoint that already existed, and the resumption signal the outer loop that already existed. See "`pause` and `resume` enactment" and "Live proof -- pause and resume" above.
+*Closed for `pause`/`resume`* by the sixth pass: the suspension point turned out to be the checkpoint that already existed, and the resumption signal the outer loop that already existed. *Closed for `set_budget`* by the same pass, with the "checked only at turn boundaries" answer taken explicitly rather than by omission. See the enactment and live-proof sections above.
 
 **0b. The delivery mechanism is polling only, and the ack state is per-gateway-process.** A JetStream per-agent subject or a long-poll remains open (see the unary-vs-streaming reasoning above), and [[Human-in-the-Loop Approvals]]'s blocking mode likely wants the same infrastructure -- whoever designs it should design it once for both. Concretely, the command inbox has no Postgres backend, so a multi-replica deployment must route each agent to the replica that accepted its commands, and the binary refuses to start otherwise rather than degrade silently.
 
@@ -610,11 +699,11 @@ What follows are the other, genuinely lower-stakes follow-ups surfaced by this w
 
 Against the Phase 0.5 Plan's definition of done, every requirement now holds *operationally* -- deployed, in containers, against real infrastructure, gated in CI -- rather than structurally. The five cooperative controls, the durable outbox, the independent auth boundary, the separate transport, actual delivery into the queryable trace, a multi-writer outbox across replicas, production operator identity, and an admission ceiling that means the same thing at two replicas as at one.
 
-And, since the command-retrieval pass, one thing that was previously false: an operator's `stop` halts a running agent, proven against a real container and a real agent process rather than inferred from component tests. Since the sixth pass, `pause` and `resume` hold to the same standard: the agent takes no action for the whole paused window, stays alive and polling throughout, and resumes on the operator's specific command.
+And, since the command-retrieval pass, one thing that was previously false: an operator's `stop` halts a running agent, proven against a real container and a real agent process rather than inferred from component tests. Since the sixth pass, `pause`, `resume` and `set_budget` hold to the same standard: the agent takes no action for the whole paused window, stays alive and polling throughout, resumes on the operator's specific command, and halts on a cost ceiling at the exact turn the arithmetic predicts.
 
 Four things are deliberately **not** claimed:
 
-- **`inject` and `set_budget` are not enacted.** They are accepted, recorded, and retrievable, and change nothing about a running agent. Anywhere those two are described to an operator, that needs to be stated plainly until the runtime side exists -- the same correction the original gap note called for, now narrowed to two actions instead of five.
+- **`inject` is not enacted.** It is accepted, recorded, and retrievable, and changes nothing about a running agent. Anywhere it is described to an operator, that needs to be stated plainly until the runtime side exists -- the same correction the original gap note called for, now narrowed to one action instead of five.
 - **Enactment requires a cooperating runtime.** These are cooperative controls (ADR-0005): the gateway never reaches into a process. An agent that does not poll, or whose poll fails, is not stopped -- and the reference runtime deliberately fails open on an unreachable control channel, which is a policy choice the owner should confirm.
 - **The break-glass policy is a choice this pass made, not one the product specified.** The conservative shape (default-unreachable, two independent conditions, one of them local configuration the identity provider does not control) is defensible and documented in code, but the owner should confirm it is the rule they want before it is depended on in an incident.
 - **The Keycloak resolver defends against a mis-mapped identity provider, not a compromised one.** A Keycloak that can mint arbitrary tokens can mint an arbitrary `sub`, so the local break-glass allow-list stops an over-broad group-to-role mapping and nothing more. That is the ceiling of what any OIDC resource server can do, and it is worth stating plainly rather than letting "explicit allow-listed claim rules" imply more than it delivers.

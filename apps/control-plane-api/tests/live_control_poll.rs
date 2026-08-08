@@ -219,6 +219,17 @@ struct AgentProcess {
 
 impl AgentProcess {
     fn spawn(agent_id: &str, certificate_basename: &str, token_table: &str) -> Self {
+        Self::spawn_with(agent_id, certificate_basename, token_table, &[])
+    }
+
+    /// `extra` is appended verbatim, for proofs that need the harness
+    /// configured (a non-zero synthetic per-turn cost, for instance).
+    fn spawn_with(
+        agent_id: &str,
+        certificate_basename: &str,
+        token_table: &str,
+        extra: &[&str],
+    ) -> Self {
         let root = repo_root();
         let trace = std::env::temp_dir().join(format!(
             "apex-live-poll-{agent_id}-{}.jsonl",
@@ -243,6 +254,7 @@ impl AgentProcess {
             .arg("60")
             .arg("--interval-seconds")
             .arg("1")
+            .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -663,6 +675,182 @@ async fn an_operator_pause_and_resume_gate_a_real_agents_tool_calls() {
             .iter()
             .any(|event| event["type"] == "tool" && event["run_id"] == resumed_run),
         "the resuming turn must have emitted its tool event"
+    );
+}
+
+/// **The live proof of `set_budget`**: an operator's ceiling halts a real
+/// agent process at the turn the arithmetic predicts.
+///
+/// "It eventually stopped" is not the claim. The harness is configured with a
+/// synthetic cost of 100 per turn and the operator submits a ceiling of 250,
+/// so the run must halt on turn 3 -- the first turn whose completion would put
+/// the running total (300) over the ceiling -- and the transcript must say so
+/// with the used and limit figures in it. A budget that halted on turn 5, or
+/// on turn 2, would fail here even though both look like "the budget worked".
+#[tokio::test]
+async fn an_operator_budget_halts_a_real_agent_at_the_predicted_turn() {
+    if !live_enabled() {
+        eprintln!("skip live control poll: set APEX_CONTROL_LIVE_POLL=1");
+        return;
+    }
+    apex_control_plane_api::install_rustls_provider();
+
+    const COST_PER_TURN: f64 = 100.0;
+    const LIMIT: f64 = 250.0;
+    // The first turn whose running total exceeds the ceiling. Derived here
+    // rather than written as `3`, so the assertion is arithmetic rather than a
+    // number that could be quietly adjusted to match whatever happened.
+    let predicted_halt_turn = (LIMIT / COST_PER_TURN).floor() as u32 + 1;
+
+    let agent_id = "reference-agent-budget";
+    let mut agent = AgentProcess::spawn_with(
+        agent_id,
+        "agent-workload-budget-client",
+        "control-agent-tokens-budget",
+        &["--synthetic-cost-per-turn", "100"],
+    );
+
+    let ready = agent.wait_for("READY", Duration::from_secs(60));
+    if ready.is_none() {
+        agent.drain();
+        agent.print_transcript("agent");
+        panic!("the agent never became ready; it could not poll the control gateway");
+    }
+    eprintln!("live proof: agent ready at {}", ready.unwrap());
+
+    // One completed turn before the ceiling exists, so the halt cannot be
+    // "this agent never worked".
+    let completed = agent.wait_for("COMPLETED 1 ", Duration::from_secs(60));
+    if completed.is_none() {
+        agent.drain();
+        agent.print_transcript("agent");
+        panic!("the agent did not complete iteration 1 before any command was submitted");
+    }
+    eprintln!("live proof: {}", completed.unwrap());
+
+    // A real operator submits a real ceiling, with real parameters.
+    let mut request = control_command(agent_id, proto::ControlAction::SetBudget, Some("operator.cost_control"));
+    request.parameters = Some(prost_types::Struct {
+        fields: [
+            (
+                "budget_kind".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue("cost".to_owned())),
+                },
+            ),
+            (
+                "limit".to_owned(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(LIMIT)),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let response = submit(request).await;
+    assert!(!response.duplicate, "this must be a first acceptance");
+    let command_id = response.command_id;
+    eprintln!("live proof: operator submitted set_budget command_id={command_id} limit={LIMIT}");
+
+    // The ceiling reached the agent, with its parameters intact across the
+    // gateway's Struct encoding and the SDK's hand-rolled decoder. Without
+    // that decoder the command arrives with no limit at all and can never
+    // trigger -- which is exactly the shape of failure this asserts away.
+    let installed = agent.wait_for("BUDGET_SET ", Duration::from_secs(120));
+    let Some(installed) = installed else {
+        agent.drain();
+        agent.print_transcript("agent");
+        panic!("the agent never installed the budget");
+    };
+    eprintln!("live proof: {installed}");
+    let installed_fields: Vec<&str> = installed.split_whitespace().collect();
+    assert_eq!(installed_fields[1], command_id, "some other command set the ceiling");
+    assert_eq!(installed_fields[2], "cost");
+    assert_eq!(
+        installed_fields[3].parse::<f64>().expect("limit must parse"),
+        LIMIT
+    );
+    let installed_turn: u32 = installed_fields[4].parse().expect("turn must parse");
+    assert!(
+        installed_turn <= predicted_halt_turn,
+        "the ceiling arrived on turn {installed_turn}, after the turn it was supposed to bind on"
+    );
+
+    // The halt, on the turn the arithmetic predicts.
+    let exceeded = agent.wait_for("BUDGET_EXCEEDED ", Duration::from_secs(120));
+    let Some(exceeded) = exceeded else {
+        agent.drain();
+        agent.print_transcript("agent");
+        panic!("the agent never halted on its budget");
+    };
+    agent.drain();
+    agent.print_transcript("agent");
+    eprintln!("live proof: {exceeded}");
+    let fields: Vec<&str> = exceeded.split_whitespace().collect();
+    assert_eq!(
+        fields[1], command_id,
+        "the agent halted on some other command; this proves nothing about the submitted budget"
+    );
+    let halt_turn: u32 = fields[2].parse().expect("turn must parse");
+    assert_eq!(
+        halt_turn, predicted_halt_turn,
+        "the budget halted on turn {halt_turn}, not the turn the arithmetic predicts"
+    );
+    assert_eq!(fields[3], "cost");
+    assert_eq!(
+        fields[4].parse::<f64>().expect("used must parse"),
+        COST_PER_TURN * f64::from(predicted_halt_turn),
+        "the reported usage is not what {predicted_halt_turn} turns at {COST_PER_TURN} costs"
+    );
+    assert_eq!(fields[5].parse::<f64>().expect("limit must parse"), LIMIT);
+
+    // It really halted: exit 0 (exit 3 is "ran out of iterations"), and no
+    // turn completed on or after the halting turn.
+    let status = agent.child.wait().expect("the agent process must be reapable");
+    assert_eq!(status.code(), Some(0), "the agent must exit 0 after enacting the budget");
+    let completed_turns: Vec<u32> = agent
+        .transcript
+        .iter()
+        .filter_map(|line| line.strip_prefix("COMPLETED "))
+        .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+        .collect();
+    assert_eq!(
+        completed_turns,
+        (1..predicted_halt_turn).collect::<Vec<u32>>(),
+        "exactly the turns below the ceiling may complete"
+    );
+
+    // And the agent's own trace says the same thing independently of stdout.
+    let events = agent.trace_events();
+    let budget = events
+        .iter()
+        .find(|event| event["type"] == "control" && event["data"]["action"] == "set_budget")
+        .expect("the trace must contain the enacted set_budget");
+    assert_eq!(budget["data"]["parameters"]["budget_kind"], "cost");
+    assert_eq!(budget["data"]["parameters"]["limit"], LIMIT);
+    assert_eq!(budget["data"]["reason_code"], "operator.cost_control");
+    assert_eq!(budget["actor"]["type"], "agent");
+    let turn_end = events.last().expect("the trace must end with a terminal event");
+    assert_eq!(turn_end["type"], "turn_end");
+    assert_eq!(turn_end["data"]["status"], "budget_exceeded");
+    assert_eq!(turn_end["data"]["control_command_id"], command_id);
+    // The halting turn ran its model call and *not* its tool: the checkpoint
+    // is before the side effect, which is the whole reason it is there.
+    let halting_run = turn_end["run_id"].as_str().expect("run_id must be text");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "tool" && event["run_id"] == halting_run),
+        "the halting turn executed its tool"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "llm")
+            .count() as u32,
+        predicted_halt_turn,
+        "every turn up to and including the halting one made its model call"
     );
 }
 

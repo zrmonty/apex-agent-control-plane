@@ -14,6 +14,7 @@ from uuid import UUID
 from .control import ControlAction, ControlCommand, ControlValidationError
 from .event import EventBuilder
 from .observer import BoundedObserver
+from .validation import MAX_CONTROL_BUDGET_LIMIT
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 
@@ -84,9 +85,9 @@ class ReferenceReasonActLoop:
 
     - **Paused-ness.** A ``pause`` is not a property of the turn that received
       it; it holds until a ``resume`` arrives.
-    - **Running-total usage**, so a ceiling can eventually be a ceiling on the
-      *run* rather than on a single turn, which is what would make it a budget
-      at all.
+    - **Running-total usage and the ceiling in force**, so ``set_budget`` is a
+      ceiling on the *run* rather than on a single turn, which is what makes
+      it a budget at all.
     - **Which commands have already been enacted**, so at-least-once
       redelivery does not re-enact anything (see
       :data:`MAX_REMEMBERED_COMMANDS`).
@@ -97,12 +98,18 @@ class ReferenceReasonActLoop:
        including a ``pause`` delivered in the same batch; nothing else in the
        batch is applied, because there is no later turn for any of it to
        affect.
-    2. ``pause``/``resume`` -- if the result is "paused", the turn ends here
+    2. ``set_budget`` -- a state update, never a halt of its own. Applied
+       before the budget check so a ceiling arriving on this poll governs this
+       turn, and before the pause halt so a ceiling delivered to a paused
+       agent is not lost.
+    3. ``pause``/``resume`` -- if the result is "paused", the turn ends here
        without executing the tool.
+    4. The budget check -- if accumulated usage has passed the ceiling, the
+       turn ends here without executing the tool.
 
-    ``set_budget`` and ``inject`` are retrieved and deliberately left inert
-    until their own passes land. An agent that silently ignores a budget is
-    honest; one that pretends to enforce it is not.
+    ``inject`` is retrieved and deliberately left inert until its own pass
+    lands. An agent that silently ignores it is honest; one that pretends to
+    have consumed it is not.
 
     Within one poll, ``pause`` and ``resume`` are folded in delivery order.
     The gateway returns commands oldest-first (``inbox.rs`` preserves
@@ -150,6 +157,9 @@ class ReferenceReasonActLoop:
             synthetic_cost_per_turn, "synthetic_cost_per_turn"
         )
         self._paused_by: str | None = None
+        self._budget_kind: str | None = None
+        self._budget_limit: float | None = None
+        self._budget_command_id: str | None = None
         self._used_tokens = 0
         self._used_cost = 0.0
         # Insertion-ordered set. `dict` rather than `set` because eviction has
@@ -162,6 +172,20 @@ class ReferenceReasonActLoop:
     def paused_by(self) -> str | None:
         """The ``command_id`` of the ``pause`` in force, or ``None``."""
         return self._paused_by
+
+    @property
+    def budget_kind(self) -> str | None:
+        """``"tokens"`` or ``"cost"``, or ``None`` when no ceiling is set."""
+        return self._budget_kind
+
+    @property
+    def budget_limit(self) -> float | None:
+        return self._budget_limit
+
+    @property
+    def budget_command_id(self) -> str | None:
+        """The ``command_id`` of the ``set_budget`` currently in force."""
+        return self._budget_command_id
 
     @property
     def used_tokens(self) -> int:
@@ -264,6 +288,7 @@ class ReferenceReasonActLoop:
         """
         stop: Any | None = None
         pause_intent: Any | None = None
+        budgets: list[Any] = []
         for command in self._poll(emit):
             action = getattr(command, "action", None)
             if action == "stop":
@@ -282,12 +307,14 @@ class ReferenceReasonActLoop:
                 continue
             if action in ("pause", "resume"):
                 pause_intent = command
-            # `set_budget` and `inject` are retrieved and deliberately left
-            # inert until their own passes land, rather than half-implemented:
-            # an agent that silently ignores a budget is honest, an agent that
-            # pretends to enforce one is not. Any other action -- including one
-            # this SDK decodes as "unspecified" because the gateway is newer
-            # than the client -- is inert for the same reason.
+            elif action == "set_budget":
+                budgets.append(command)
+            # `inject` is retrieved and deliberately left inert until its own
+            # pass lands, rather than half-implemented: an agent that silently
+            # ignores it is honest, an agent that pretends to have consumed it
+            # is not. Any other action -- including one this SDK decodes as
+            # "unspecified" because the gateway is newer than the client -- is
+            # inert for the same reason.
 
         if stop is not None:
             emit(
@@ -309,6 +336,8 @@ class ReferenceReasonActLoop:
             )
 
         extra: dict[str, Any] = {}
+        for command in budgets:
+            self._apply_budget(command, emit)
         resumed_by = self._apply_pause_intent(pause_intent, emit)
         if self._paused_by is not None:
             # Every turn a paused agent starts still has to *end*, or the
@@ -324,6 +353,11 @@ class ReferenceReasonActLoop:
                 {},
                 None,
             )
+        exceeded = self._budget_exceeded()
+        if exceeded is not None:
+            # The budget is why this turn ended, so it owns the terminal
+            # event's `control_command_id` even on a turn that also resumed.
+            return ({"status": "budget_exceeded", **extra, "control_command_id": exceeded}, {}, None)
         if resumed_by is not None:
             extra["control_command_id"] = resumed_by
         return (None, extra, resumed_by)
@@ -367,6 +401,85 @@ class ReferenceReasonActLoop:
             ControlCommand.create(ControlAction.RESUME).to_event_data(),
         )
         return command_id
+
+    def _apply_budget(
+        self, command: Any, emit: Callable[[str, dict[str, Any]], None]
+    ) -> None:
+        """Installs a ``set_budget`` ceiling. Never halts a turn by itself.
+
+        The parameters are **re-validated here** rather than trusted because
+        they were validated at the gateway. Two different reasons, both real:
+        the gateway and this SDK could disagree after a version skew, and a
+        value that reached an enforcement comparison as ``NaN`` would make
+        every comparison false -- a budget that silently never triggers, which
+        is worse than no budget because it looks like one.
+
+        An invalid ceiling is **refused, not approximated**: the previous
+        ceiling stays in force and an `error` event records that this command
+        did nothing. Guessing at what an operator meant is not available to a
+        cost control.
+        """
+        parameters = getattr(command, "parameters", None) or {}
+        kind = parameters.get("budget_kind") if isinstance(parameters, dict) else None
+        limit = parameters.get("limit") if isinstance(parameters, dict) else None
+        if (
+            kind not in ("tokens", "cost")
+            or isinstance(limit, bool)
+            or not isinstance(limit, (int, float))
+            or not math.isfinite(limit)
+            or limit <= 0
+            or limit > MAX_CONTROL_BUDGET_LIMIT
+        ):
+            emit(
+                "error",
+                {
+                    "code": "REFERENCE_BUDGET_PARAMETERS_INVALID",
+                    "summary": "A budget command was retrieved but could not be enforced.",
+                    "cause": "The command's budget_kind or limit did not satisfy the control contract.",
+                    "retryable": False,
+                    "recommended_next_steps": [
+                        "Resubmit the budget with budget_kind of tokens or cost and a positive finite limit.",
+                        "Treat this agent as running under its previous ceiling, not the requested one.",
+                    ],
+                },
+            )
+            return
+        self._budget_kind = kind
+        self._budget_limit = float(limit)
+        self._budget_command_id = str(getattr(command, "command_id", ""))
+        emit(
+            "control",
+            ControlCommand.create(
+                ControlAction.SET_BUDGET,
+                reason_code=self._reason_code(command),
+                budget_kind=kind,
+                limit=limit,
+            ).to_event_data(),
+        )
+
+    def _budget_exceeded(self) -> str | None:
+        """The ``command_id`` of the ceiling this turn would breach, if any.
+
+        The comparison is against the running total *including this turn*,
+        because the turn's `llm` event has already been emitted and counted by
+        the time the checkpoint runs. That is the same thing as "accumulated
+        usage plus this turn's projected cost", and it is why the halt lands
+        on the first turn whose completion would put the run over rather than
+        on the turn after it.
+
+        **Usage accumulated before the ceiling arrived counts against it.** A
+        `set_budget` is a statement about the run, so an operator capping an
+        already-expensive agent halts it at once rather than granting it a
+        fresh allowance. That is the conservative reading and the one a cost
+        control is for; *flagged for the owner* as a choice, since "from here
+        on" is a defensible alternative.
+        """
+        if self._budget_limit is None:
+            return None
+        used = self._used_tokens if self._budget_kind == "tokens" else self._used_cost
+        if used <= self._budget_limit:
+            return None
+        return self._budget_command_id or ""
 
     def run(
         self,
