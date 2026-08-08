@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A real agent process that stops when an operator tells it to.
+"""A real agent process that obeys the operator commands an operator sends it.
 
 This is the *agent* half of the live end-to-end proof. It is a genuine Python
 process using the product SDK -- ``apex_sdk.GrpcControlTransport`` over real
@@ -7,11 +7,13 @@ mTLS and ``apex_sdk.ReferenceReasonActLoop`` -- not a stand-in client written
 in Rust for the occasion, and not a mock returning a canned response.
 
 It loops: each iteration runs one reason-act turn, and the loop polls the
-control gateway immediately before the turn's tool call. When a ``stop`` is
-pending it emits a terminal ``control`` + ``turn_end`` pair and this process
-exits 0. If it completes ``--max-iterations`` without ever seeing a ``stop`` it
-exits 3, which is a *failure* of the proof: an agent that halts on its own
-schedule proves nothing about the kill switch.
+control gateway immediately before the turn's tool call. A ``stop`` ends the
+turn *and* this process (exit 0). A ``pause`` ends the turn without running its
+tool and leaves this loop iterating -- which is the whole point: a paused agent
+keeps polling, so a later ``resume`` can reach it. If it completes
+``--max-iterations`` without ever halting it exits 3, which is a *failure* of a
+stop or budget proof: an agent that halts on its own schedule proves nothing
+about the kill switch. A pause/resume proof does not wait for exit at all.
 
 Stdout is a machine-readable transcript so the orchestrating test can assert on
 the ordering of real events rather than on this script's own opinion:
@@ -20,10 +22,12 @@ the ordering of real events rather than on this script's own opinion:
     ITERATION <n> <iso8601>             a turn is starting
     COMPLETED <n> <iso8601>             the turn ran its tool and finished
     STOPPED <command_id> <iso8601>      a stop was retrieved and enacted
+    PAUSED <command_id> <n> <iso8601>   the turn did not run its tool
+    RESUMED <command_id> <n> <iso8601>  a resume was enacted; the tool then ran
     NO_STOP <iso8601>                   ran out of iterations; proof failed
 
 Nothing here is production code. It is the harness that makes the claim
-"an operator's stop halts the agent" checkable.
+"an operator's command changes what the agent does" checkable.
 """
 
 from __future__ import annotations
@@ -138,10 +142,23 @@ def main() -> int:
             )
             terminal = events[-1] if events else {}
             data = terminal.get("data", {}) if isinstance(terminal, dict) else {}
-            if data.get("status") == "stopped":
-                _say(f"STOPPED {data.get('control_command_id', '')} {_now()}")
+            status = data.get("status")
+            command_id = data.get("control_command_id", "")
+            if status == "stopped":
+                _say(f"STOPPED {command_id} {_now()}")
                 exit_code = 0
                 break
+            if status == "paused":
+                # Deliberately no COMPLETED line and no break: the turn ran no
+                # tool, and the process keeps polling so a later `resume` can
+                # reach it. The outer loop needed no new machinery for this --
+                # a paused turn is just a turn that ended early.
+                _say(f"PAUSED {command_id} {iteration} {_now()}")
+                time.sleep(args.interval_seconds)
+                continue
+            if status == "resumed":
+                # The turn *did* run its tool, so a COMPLETED line follows.
+                _say(f"RESUMED {command_id} {iteration} {_now()}")
             _say(f"COMPLETED {iteration} {_now()}")
             time.sleep(args.interval_seconds)
         else:

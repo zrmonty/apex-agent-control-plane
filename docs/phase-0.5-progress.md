@@ -1,17 +1,20 @@
 # Phase 0.5 progress
 
-**Status: `stop` now works end to end. `pause`/`resume`/`inject`/`set_budget` still do not.**
+**Status: `stop`, `pause` and `resume` now work end to end. `inject`/`set_budget` still do not.**
 
 A 2026-08-08 investigation found that no code path anywhere in this repository let an agent receive a command an operator submitted: [`control.proto`](../contracts/proto/apex/v1/control.proto) defined only `SubmitCommand`, one direction, operator to gateway, and nothing on the SDK side polled, subscribed, or otherwise consumed one. Full evidence and analysis: [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md).
 
 A fifth pass closed the retrieval half **for `stop` only**, deliberately scoped narrow and proven live: a new `PollCommands` RPC, a new agent-workload credential space, durable per-command delivery state, a real Python gRPC+mTLS client in the product SDK, and a minimal enactment hook in `ReferenceReasonActLoop`. See "Command retrieval and stop enactment" below, and "Live proof" for the run.
+
+A sixth pass is closing the remaining four actions one at a time, each committed and proven live before the next is started. `pause`/`resume` are done; see "`pause` and `resume` enactment" and "Live proof -- pause and resume" below.
 
 **Read this precisely, because the distinction is the whole point:**
 
 | Question | Answer |
 |---|---|
 | Does an operator's `stop` halt a running instrumented agent? | **Yes**, for a runtime that polls the control channel. Proven live against a real container and a real agent process, gated in CI. |
-| Does `pause`, `resume`, `inject` or `set_budget` change what a running agent does? | **No.** They are accepted, recorded, retrievable through `PollCommands` -- and the reference runtime deliberately leaves them inert rather than half-enacting them. Explicitly out of scope for this pass. |
+| Does an operator's `pause` stop a running agent from taking further actions, and does `resume` start it again? | **Yes**, for the same runtime. Proven live the same way -- the agent takes no tool call for the whole paused window, keeps polling throughout, and resumes on the specific `command_id` the operator submitted. |
+| Does `inject` or `set_budget` change what a running agent does? | **No.** They are accepted, recorded, retrievable through `PollCommands` -- and the reference runtime deliberately leaves them inert rather than half-enacting them. Each gets its own pass. |
 | Does the SDK have a real event-ingest transport? | **No, and this pass did not fix it.** See "Flagged, not fixed" below. |
 
 Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true.
@@ -37,7 +40,7 @@ A new crate, `apps/control-plane-api` (`apex-control-plane-api`), exposes the fi
 | Its own transport boundary | Native mTLS via `tonic::transport::ServerTlsConfig` in `src/startup/service.rs`, client certificate mandatory. See "Transport security" below. |
 | Production operator identity | `src/keycloak.rs`: `KeycloakOperatorCredentialResolver` verifies short-lived, scope-bound credentials Keycloak issued via RFC 8693 token exchange, per [[Authentication and Identity]]. Selected by `APEX_CONTROL_KEYCLOAK_ISSUER`; `StaticOperatorTokenResolver` is unchanged and remains the local/lab and CI seam. See "Keycloak operator credentials" below. |
 | Admission control that means the same at N replicas as at one | `src/service.rs` takes an optional `apex_event_ingest::EphemeralStore` (reused, not forked) behind `APEX_CONTROL_VALKEY_*`, with the process-local ceiling retained as the hard floor. See "Cross-replica admission" below. |
-| An agent can retrieve the commands issued against it (ADR-0005's premise) | `ControlGateway.PollCommands`, a second RPC in a second credential space, plus `src/inbox.rs` for durable delivery state and `apex_sdk.control_transport` for the client. `stop` only. See "Command retrieval and stop enactment" below. |
+| An agent can retrieve the commands issued against it (ADR-0005's premise) | `ControlGateway.PollCommands`, a second RPC in a second credential space, plus `src/inbox.rs` for durable delivery state and `apex_sdk.control_transport` for the client. Enacted for `stop`, `pause` and `resume`. See "Command retrieval and stop enactment" below. |
 
 ## Command retrieval and stop enactment
 
@@ -103,11 +106,42 @@ One checkpoint, in one place: immediately **before** the tool call, because a `s
 
 Retrieval *is* the acknowledgement: the gateway durably records the delivery attempt before returning a command.
 
-Actions other than `stop` are retrieved and deliberately left **inert**. An agent that silently ignores `pause` is honest; an agent that pretends to pause is not.
+Actions with no enactment yet (`inject`, `set_budget`) are retrieved and deliberately left **inert**. An agent that silently ignores a budget is honest; an agent that pretends to enforce one is not.
 
 **A poll failure does not halt the run.** *Flagged for the owner as a policy choice, not a bug.* Halting whenever the out-of-band channel is unreachable would turn a gateway blip into a fleet-wide outage and invert the property ADR-0006 keeps this channel independent for. The failure is emitted as an `error` event so the trace shows the check did not happen rather than showing nothing and implying it passed. A deployment that would rather fail closed needs a policy switch in the control-integration API, which is out of scope here.
 
 This is intentionally small. `ReferenceReasonActLoop` is a synthetic single-turn loop for exercising the event contract, not a production runtime, so there is no general "checkpoint" abstraction — generalising this into a control-integration API surface is explicitly a later pass.
+
+## `pause` and `resume` enactment
+
+`pause` needed "a suspension point and a resumption signal in a runtime that has neither". It turned out to need **neither a new wait loop nor a new signal**, and that is the design point worth recording rather than the code.
+
+The checkpoint that already existed is a suspension point: a turn that returns before its tool call has taken no action. And the process driving `run()` in a loop is already a resumption mechanism: it polls again on the next iteration. So a `pause` is a turn that ends early, and a `resume` is a turn that does not. No thread parking, no condition variable, no blocking wait inside `run()` — which also means a paused agent cannot become an agent that is *stuck*, because there is nothing for it to be stuck in. `deploy/compose/gateway-ref/agent_under_control.py` needed exactly one change: recognise a `paused` status as "do not print COMPLETED, keep looping" rather than falling through to its stop branch.
+
+**A paused agent keeps polling, and that is load-bearing.** If it stopped polling, `resume` could never reach it and `pause` would be `stop` with a friendlier name. The live proof asserts it directly: across a five-second window (five poll cadences) the agent emits paused turns and zero tool calls, and its process is still alive.
+
+### State that outlives one turn
+
+Three things moved onto the loop instance, because a turn is the wrong lifetime for them:
+
+- **Paused-ness** (`_paused_by`), holding the `command_id` of the pause in force.
+- **A running usage total**, advanced where the `llm` event is emitted. Not used by anything yet; it is the state a later `set_budget` needs, and `synthetic_input_tokens` / `synthetic_output_tokens` / `synthetic_cost_per_turn` make it non-zero so that ceiling can eventually be *proven* rather than asserted. The loop's synthetic `llm` event previously reported `input_tokens: 0, output_tokens: 0`, against which no budget could ever trigger.
+- **Which `command_id`s have already been enacted** (`_enacted`, bounded at `MAX_REMEMBERED_COMMANDS` = 512, oldest evicted).
+
+That last one is not a second acknowledgement protocol and does not replace `inbox.rs`. The gateway owns delivery state and is deliberately at-least-once; the consequence is that a cooperating runtime *will* see the same `command_id` again after the redelivery window. For `stop` that was trivially safe. For a stateful pair it is not, and the concrete failure is in "Security review findings" below.
+
+### The rules, stated because they are choices
+
+- **Idempotency.** A second `pause` while already paused is a no-op (the agent stays attributed to the pause that actually paused it, and one `resume` still releases it). A `resume` for an agent that was never paused is a no-op, not an error -- an operator who is unsure whether an agent is paused has to be able to send `resume` safely. Neither emits a `control` event, because neither enacted anything.
+- **Repeated identical pauses are collapsed; terminal events are not.** The `control` event announcing a pause is emitted **once**, on the transition, so a paused agent does not re-announce itself every turn forever. The `turn_end` of `status: "paused"` *is* emitted every turn, naming the pause in force, because every turn that starts has to end -- a turn that begins and never terminates is indistinguishable from a crash, which is the ambiguity this whole work item exists to remove.
+- **`stop` wins outright.** A `stop` in the same batch as a `pause` halts the run and nothing else in the batch is applied; there is no later turn for any of it to affect.
+- **`pause` and `resume` in one batch are folded in delivery order.** `inbox.rs` returns commands oldest-first, so "the operator's last instruction holds" is well-defined rather than a race. *Flagged for the owner:* "a `pause` anywhere in the batch always wins" is marginally more conservative but ignores an explicit later `resume`, which is its own failure mode. Both orderings are asserted so the rule cannot drift into "whichever the loop happened to see last".
+- **A poll failure does not clear paused-ness.** Fail-open governs *discovering* commands; it does not mean forgetting the ones already enacted. An unreachable gateway is not a reason to start acting again.
+- **Usage accrues on a paused turn**, because this loop emits its `llm` event before the checkpoint and that event is its record of the model call. A production runtime would want the check before the model call too. *Flagged for the owner* as a limitation of the synthetic loop rather than a semantic choice about budgets.
+
+### The terminal event
+
+`turn_end` gains two statuses: `paused` (tool not executed) and `resumed` (the turn that came out of a pause -- it *did* execute its tool, and the `tool`/`message` events precede it in the trace). Both carry `control_command_id`, the same field and the same purpose as `stopped`'s: an operator can answer "did my pause actually stop it" and "did my resume actually restart it" from the trace alone.
 
 ## Live proof
 
@@ -142,6 +176,41 @@ Two further live tests run against the same container:
 
 - `a_second_agent_workload_cannot_retrieve_the_first_ones_commands`: two real workloads with two real client certificates in the same workspace/namespace. Agent B authenticates, resolves as itself, and sees nothing of agent A's -- including when asking for `max_commands: u32::MAX`. Agent A's token presented over agent B's connection is refused outright.
 - `the_operator_and_agent_credential_spaces_do_not_overlap`: an operator credential cannot poll, an agent credential cannot submit.
+
+## Live proof -- pause and resume
+
+`an_operator_pause_and_resume_gate_a_real_agents_tool_calls`, in the same file, against the same container and the same real Python agent process. It runs under **its own agent identity** (`reference-agent-pause`, its own client certificate and its own credential-table entry), deliberately: the inbox is at-least-once with a 30-second redelivery window, so the `stop` from the test above would otherwise become visible again mid-run and halt this agent -- which would look exactly like a pause bug. Separate identities make the proofs independent by construction rather than by test ordering.
+
+Observed on the recorded run (all timestamps from the agent's own transcript):
+
+```
+READY       20:16:34.240  agent authenticated and completed its first poll
+COMPLETED 1 20:16:34.294  a whole turn ran, tool included
+COMPLETED 2 20:16:35.348  and another -- the agent is running under its own power
+            ~20:16:35.35  operator submits pause -> command_id 019fe305-2f48-7a50-99d6-303e90f23fb7
+ITERATION 3 20:16:36.353
+PAUSED      20:16:36.353  019fe305-2f48-7a50-99d6-303e90f23fb7   (+1.005s)
+ITERATION 4 20:16:37.35   ... PAUSED, same command_id
+ITERATION 5 20:16:38.35   ... PAUSED, same command_id
+ITERATION 6 20:16:39.35   ... PAUSED, same command_id
+ITERATION 7 20:16:40.35   ... PAUSED, same command_id
+ITERATION 8 20:16:41.35   ... PAUSED, same command_id
+            ~20:16:41.36  operator submits resume -> command_id 019fe305-46c8-7f92-9916-d7ddca26bb4c
+ITERATION 9 20:16:42.42
+RESUMED     20:16:42.423  019fe305-46c8-7f92-9916-d7ddca26bb4c   (+1.064s)
+COMPLETED 9 20:16:42.423  the resuming turn ran its tool
+```
+
+Paused 1.005s after submission and resumed 1.064s after submission -- one poll cadence each, the same latency shape the `stop` proof showed.
+
+**Why this is causation and not coincidence**, in the order the test asserts it:
+
+- Both `command_id`s are UUIDv7s **the gateway minted during those submissions**. The agent could not have produced either by coincidence.
+- Two whole iterations completed *before* the pause existed, so the loop was demonstrably running under its own power.
+- Across the five-second observation window between pause and resume: **zero** `COMPLETED` or `RESUMED` lines, at least two `PAUSED` lines, and every one of them naming the pause's `command_id`. Waiting for a line proves something happened; only watching a whole window proves something did not.
+- The process was still alive at the end of that window (`try_wait()` returns `None`). A pause that exits the process would satisfy "ran no tools" and be useless.
+- The iteration number on the `RESUMED` line is the same iteration number on the `COMPLETED` line that follows it, so the resuming turn is the turn that ran the tool -- not a later one.
+- The agent's own JSONL trace, read independently of its stdout, contains **exactly two** `control` events (`pause` then `resume`, both `enforcement: cooperative`, both under actor type `agent`) despite six paused turns -- the collapse rule, asserted rather than described. Every paused `turn_end` names the pause's `command_id`, no `run_id` belonging to a paused turn has a `tool` event, and the `resumed` `turn_end` names the resume's `command_id` and does have one.
 
 `.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- an operator stop halts a real agent process** step running exactly this, placed after the JetStream fanout verification (that step reads the last message on the subject, so a command submitted before it would displace the one it looks for).
 
@@ -334,6 +403,15 @@ Found during the command-retrieval pass:
 - **A `test-support`-gated peer-identity seam.** `TlsConnectInfo` cannot be constructed by a test, so the in-process scoping assertions would otherwise have had no way to present a client certificate. The injection branch is compiled out of the released binary and is unreachable from the wire in any case (request extensions are set by the transport, never by a client), and the live tests exercise the real extraction path.
 - Reviewed for: cross-tenant isolation (proven, not assumed -- in process and live, with both agents holding the same workspace/namespace scope so only the server-derived bound identity separates them); poll-frequency abuse (per-agent ceiling, separate from the operator one, local floor never liftable by the shared store); secrets and command content in logs (the poll path logs nothing at all -- no token, no `command_id`, no parameters; the inbox journal is a durability artefact on the service's own volume, not a log); replay and idempotency of ack state under concurrent polls (one mutex, asserted with eight concurrent callers racing for one command, and delivery state survives a restart with its window intact); a stolen agent bearer token (useless without the pinned client certificate, asserted live).
 
+Found during the `pause`/`resume` enactment pass:
+
+- **A redelivered `resume` could silently un-pause an agent that had been paused again since.** This is the first *stateful* action pair on this channel, and it is where "at-least-once delivery with idempotent consumers" stops being trivially true. The sequence is entirely ordinary: `resume` R is enacted, the operator issues `pause` P afterwards, and the gateway's 30-second redelivery window then re-serves R -- because the inbox tracks whether a command was *delivered*, which is a different question from whether it is still what the operator wants. The agent would have resumed with no operator action and no trace of anything wrong. Fixed with per-`command_id` enactment memory in the loop (`_enacted`, bounded at 512, oldest evicted), which complements the gateway's ack state rather than duplicating it. Asserted by `test_a_redelivered_resume_cannot_undo_a_later_pause`.
+- **Operator-supplied text could have crashed the agent it was aimed at.** `ControlCommand.create` refuses a `reason_code` on `resume`; `event-ingest`'s `validation/control.rs` does **not** -- it validates `reason_code` uniformly for every action -- so an operator can submit `resume` with one and it reaches the runtime. Passing it through would have raised `ControlValidationError` *inside* the enactment path, which propagates out of `run()` and kills the agent process. A field the operator is allowed to send must never be able to do that. The enactment record therefore omits it (the operator's own `control` event in the trace, actor type `user`, retains it); asserted by `test_a_resume_carrying_a_reason_code_still_resumes_the_run`, alongside the pre-existing out-of-grammar-`reason_code` case now covered for `pause` too.
+- **A command with no `command_id` is not enacted at all.** `command_id` is what makes enactment idempotent; a command lacking one would be enacted afresh on every redelivery. Refusing it is the fail-closed direction, and the gateway's own grammar means a legitimate command always has one.
+- **A poll failure must not clear enacted state.** The existing fail-open policy is about *discovering* commands. Read carelessly it could have been implemented as "no commands pending -> not paused", which would make an unreachable control channel a way to resume every paused agent in a fleet. Paused-ness is state the agent already holds; asserted by `test_a_pause_survives_a_control_channel_failure`.
+- **One agent identity per live proof, not one shared between them.** Reusing `reference-agent` for the pause proof would have let the previous test's `stop` reappear inside it through the ordinary redelivery window. That is a test-isolation issue rather than a product defect, but the failure mode -- a proof that passes or fails depending on how long the previous test took -- is exactly the kind of "green means nothing" result these gates exist to avoid. `generate_pki.py` issues a separate leaf and credential-table entry per proof.
+- Reviewed for: cross-tenant isolation regressions (none -- the new workload is a separate certificate and a separate credential-table entry with the same `acme/prod` scope, and both live isolation tests still pass against the same container in the same run); denial of service via a paused agent (a paused turn is *shorter* than a working one and its poll cadence is unchanged, so pausing cannot be used to increase load on the gateway); secrets and command content in logs (the enactment path logs nothing; the transcript carries only `command_id`s, iteration numbers and timestamps); and unbounded growth (the enactment memory is the only new process-lifetime structure and is explicitly capped, asserted by `test_the_remembered_command_set_is_bounded`).
+
 - Reviewed for: auth bypass (none found -- every RPC path requires `authenticate` before any outbox interaction), injection via `inject.content` (content flows untouched into the `control` event's `parameters.content` field and is never interpreted, matching ADR-0005's "content is untrusted data" requirement; `validation/control.rs` already enforces `content_classification: "untrusted"` and a 32 KiB ceiling), budget overflow/negative/NaN/infinity/zero (all rejected by the existing `validate_control_data` finite/positive/bounded check, exercised here via `submit_command_rejects_a_negative_budget_limit`), replay/duplicate attacks (idempotency semantics above), secrets in logs (the fanout worker and auth paths only ever log static `GatewayErrorCode`/summary strings, never tokens or payload content), and TOCTOU on outbox claim (`ControlOutboxBackend` serializes every outbox operation, including the fanout worker's `pending`/`mark_complete`, behind a single `Mutex` -- verified under the concurrency test below).
 
 ## Edge cases covered (tests)
@@ -377,7 +455,22 @@ Found during the command-retrieval pass:
 - The credential table refuses every malformed entry shape, preserves a token containing the separator, and has no wildcard form
 - The file inbox refuses a path outside its base and a command with an out-of-grammar identifier or action
 
-`packages/sdk-python/tests/test_control_transport.py` (58 tests): the hand-rolled wire codec exhaustively (every action value, unknown-field skipping, eight malformed-response shapes, oversize refusal), credential loading (missing/empty/oversized/symlinked/directory/world-readable, both-or-neither token sources), endpoint and timeout validation, the missing-`grpcio` path, gRPC status classification, and **a real in-process gRPC server over real mTLS** with a throwaway CA and mandatory client auth -- which is what makes "the transport works" a claim about handshakes and HTTP/2 framing rather than about a mock. `test_reference_runtime.py` adds the enactment cases: the tool never executes, the terminal events are emitted, a non-`stop` action stays inert, an out-of-grammar reason code still halts the run, a poll failure records an error and does not halt, and a run with no tool step does not poll at all.
+`packages/sdk-python/tests/test_control_transport.py` (58 tests): the hand-rolled wire codec exhaustively (every action value, unknown-field skipping, eight malformed-response shapes, oversize refusal), credential loading (missing/empty/oversized/symlinked/directory/world-readable, both-or-neither token sources), endpoint and timeout validation, the missing-`grpcio` path, gRPC status classification, and **a real in-process gRPC server over real mTLS** with a throwaway CA and mandatory client auth -- which is what makes "the transport works" a claim about handshakes and HTTP/2 framing rather than about a mock. `test_reference_runtime.py` adds the enactment cases: the tool never executes, the terminal events are emitted, an action with no enactment yet stays inert, an out-of-grammar reason code still halts the run, a poll failure records an error and does not halt, and a run with no tool step does not poll at all.
+
+`packages/sdk-python/tests/test_reference_runtime.py`, `pause`/`resume` half (new this pass, driven through a `ScriptedPoller` that returns one batch *per poll* -- a runtime's real experience of the channel across many turns, which `InMemoryControlPoller` cannot model because it drains):
+
+- A pause halts the tool, later turns stay paused, a resume restores the tool **on the same turn**, and the tool ran on exactly the un-paused turns
+- A paused turn emits no `tool` and no `message` event
+- A redelivered pause does not re-announce itself: one `control` event across three paused turns, terminal events on all three
+- A second pause while already paused is a no-op and does not require a second resume; a resume for an agent that was never paused is a no-op with no trace entry
+- A redelivered resume cannot undo a later pause
+- A `stop` in the same batch as a `pause` wins outright
+- `pause`+`resume` in one batch apply in delivery order, asserted in **both** orderings
+- A pause survives a control-channel failure on the following turn
+- An out-of-grammar `reason_code` on `pause`, and a `reason_code` on `resume`, still enact
+- A command with no `command_id` is not enacted
+- The enactment memory is bounded, evicting oldest-first
+- Synthetic per-turn usage accumulates across `run()` calls and is reported on the `llm` event; its configuration is range-checked
 
 `apps/control-plane-api/src/{auth,envelope,outbox,replay,service}.rs` unit/integration tests (run with `--features test-support`):
 
@@ -460,7 +553,7 @@ cargo deny check
 cargo audit
 ```
 
-All pass clean (112 unit + 20 startup + 14 + 5 + 3 + 3 + 2 tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
+All pass clean (112 unit + 20 startup + 14 Keycloak + 5 mTLS + 3 Postgres + 4 poll + 2 Valkey live tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
 
 The Python SDK's own gate:
 
@@ -469,7 +562,7 @@ cd packages/sdk-python
 python -m pytest --cov=apex_sdk --cov-fail-under=95
 ```
 
-268 passed, 96.05% coverage (`control_transport.py` 97%), with `bandit -r src --severity-level medium` clean.
+283 passed, 2 skipped, 96.16% coverage (`control_transport.py` 97%, `reference_runtime.py` 98%), with `bandit -r src --severity-level medium` clean.
 
 `.github/workflows/live-mtls-e2e.yml` additionally builds the real images, starts the real containers, and drives real traffic at them. This exists for the same reason the equivalent gateway step does: `docker compose config` parses YAML, and never catches a Dockerfile that cannot build, a binary that panics before binding, or a container that cannot write its data volume. All three of those reached `master` for `event-ingest` before it had such a gate. The control-side steps, in order:
 
@@ -481,7 +574,7 @@ python -m pytest --cov=apex_sdk --cov-fail-under=95
 | Postgres-backed control gateway (two replicas) + live tests + "landed in Postgres, not a file" | `--features postgres` selecting nothing, and double-claimed outbox rows |
 | **Cross-replica admission ceiling (two replicas + Valkey) + live tests** | An accelerator that is configured but not working -- which looks exactly like no accelerator at all, and which this gate caught on its first run |
 | **Keycloak-backed operator credentials + live tests** | `build_operator_resolver` not selecting the Keycloak path in a real container, and every verification rule against real Keycloak-issued material |
-| **Live proof -- an operator stop halts a real agent process** | The whole retrieval path: a contract mismatch between the SDK client and the Rust service, an agent credential the deployed container rejects, delivery state that never marks a command delivered, and an enactment hook that logs a stop without acting on it. Nothing else in CI can catch any of these -- every other test either drives the service in process or speaks to it from Rust |
+| **Live proof -- an operator stop halts a real agent process** (and, in the same step, that a pause stops it acting while leaving it alive and polling, and a resume restarts it) | The whole retrieval path: a contract mismatch between the SDK client and the Rust service, an agent credential the deployed container rejects, delivery state that never marks a command delivered, and an enactment hook that logs a stop without acting on it. Nothing else in CI can catch any of these -- every other test either drives the service in process or speaks to it from Rust |
 
 Both new gates assert a startup log line (`admission ceiling: shared (valkey)`, `operator credentials: keycloak`) *before* sending any traffic, so a container that fell back to a different code path fails with that as the diagnosis rather than with a downstream assertion that could have failed for a dozen reasons.
 
@@ -493,7 +586,9 @@ That is a narrower claim than it reads at first, and narrower than this document
 
 **Closed for `stop`** by the command-retrieval pass (see "Command retrieval and stop enactment" and "Live proof" above). What is left of it, stated precisely:
 
-**0a. `pause`, `resume`, `inject` and `set_budget` are retrievable but not enacted.** They flow through `PollCommands` exactly as `stop` does; the reference runtime deliberately leaves them inert rather than half-implementing them. Each needs a genuine answer that this pass did not attempt: `pause`/`resume` need a suspension point and a resumption signal in a runtime that has neither; `set_budget` needs a running-total hook into every LLM/tool call, or an honest decision that it is checked only at turn boundaries; `inject` needs a safe way to thread explicitly-untrusted content into a live agent's context, possibly mid-turn. **Explicitly out of scope for this pass, and the largest remaining piece of ADR-0005.**
+**0a. `inject` and `set_budget` are retrievable but not enacted.** They flow through `PollCommands` exactly as `stop`/`pause`/`resume` do; the reference runtime deliberately leaves them inert rather than half-implementing them. Each needs a genuine answer: `set_budget` needs a running-total hook into every LLM/tool call, or an honest decision that it is checked only at turn boundaries (the running total now exists -- see "`pause` and `resume` enactment" -- but nothing checks it); `inject` needs a safe way to surface explicitly-untrusted content into a live agent's trace without it ever being reinterpretable as an instruction. **The remaining piece of ADR-0005.**
+
+*Closed for `pause`/`resume`* by the sixth pass: the suspension point turned out to be the checkpoint that already existed, and the resumption signal the outer loop that already existed. See "`pause` and `resume` enactment" and "Live proof -- pause and resume" above.
 
 **0b. The delivery mechanism is polling only, and the ack state is per-gateway-process.** A JetStream per-agent subject or a long-poll remains open (see the unary-vs-streaming reasoning above), and [[Human-in-the-Loop Approvals]]'s blocking mode likely wants the same infrastructure -- whoever designs it should design it once for both. Concretely, the command inbox has no Postgres backend, so a multi-replica deployment must route each agent to the replica that accepted its commands, and the binary refuses to start otherwise rather than degrade silently.
 
@@ -501,7 +596,7 @@ That is a narrower claim than it reads at first, and narrower than this document
 
 **0d. The reference runtime has one checkpoint, not a control-integration API.** `ReferenceReasonActLoop` checks before its tool call and nowhere else, which is right for a synthetic single-turn loop and is not a general instrumentation surface. Generalising it -- and deciding the fail-open/fail-closed policy on an unreachable control channel -- is a later pass.
 
-**0e. A `stop` is enacted per agent, not per run.** Delivery is scoped to the agent identity the credential binds, because that is what the credential can prove; the command's `run_id` is recorded and carried to the runtime but the reference loop does not filter on it. An operator stopping agent X stops agent X's current run whichever run they named. *Flagged for the owner* as a defensible default rather than an obviously correct one.
+**0e. A `stop` or `pause` is enacted per agent, not per run.** Delivery is scoped to the agent identity the credential binds, because that is what the credential can prove; the command's `run_id` is recorded and carried to the runtime but the reference loop does not filter on it. An operator stopping agent X stops agent X's current run whichever run they named. *Flagged for the owner* as a defensible default rather than an obviously correct one. It matters more for `pause` than it did for `stop`: paused-ness lives on the loop instance, so it holds across every subsequent turn of that agent, not just the run named on the command.
 
 What follows are the other, genuinely lower-stakes follow-ups surfaced by this work rather than required by it:
 
@@ -515,11 +610,11 @@ What follows are the other, genuinely lower-stakes follow-ups surfaced by this w
 
 Against the Phase 0.5 Plan's definition of done, every requirement now holds *operationally* -- deployed, in containers, against real infrastructure, gated in CI -- rather than structurally. The five cooperative controls, the durable outbox, the independent auth boundary, the separate transport, actual delivery into the queryable trace, a multi-writer outbox across replicas, production operator identity, and an admission ceiling that means the same thing at two replicas as at one.
 
-And, since the command-retrieval pass, one thing that was previously false: an operator's `stop` halts a running agent, proven against a real container and a real agent process rather than inferred from component tests.
+And, since the command-retrieval pass, one thing that was previously false: an operator's `stop` halts a running agent, proven against a real container and a real agent process rather than inferred from component tests. Since the sixth pass, `pause` and `resume` hold to the same standard: the agent takes no action for the whole paused window, stays alive and polling throughout, and resumes on the operator's specific command.
 
 Four things are deliberately **not** claimed:
 
-- **Only `stop` is enacted.** `pause`, `resume`, `inject` and `set_budget` are accepted, recorded, and retrievable, and change nothing about a running agent. Anywhere those four are described to an operator, that needs to be stated plainly until the runtime side exists -- the same correction the original gap note called for, now narrowed to four actions instead of five.
+- **`inject` and `set_budget` are not enacted.** They are accepted, recorded, and retrievable, and change nothing about a running agent. Anywhere those two are described to an operator, that needs to be stated plainly until the runtime side exists -- the same correction the original gap note called for, now narrowed to two actions instead of five.
 - **Enactment requires a cooperating runtime.** These are cooperative controls (ADR-0005): the gateway never reaches into a process. An agent that does not poll, or whose poll fails, is not stopped -- and the reference runtime deliberately fails open on an unreachable control channel, which is a policy choice the owner should confirm.
 - **The break-glass policy is a choice this pass made, not one the product specified.** The conservative shape (default-unreachable, two independent conditions, one of them local configuration the identity provider does not control) is defensible and documented in code, but the owner should confirm it is the rule they want before it is depended on in an incident.
 - **The Keycloak resolver defends against a mis-mapped identity provider, not a compromised one.** A Keycloak that can mint arbitrary tokens can mint an arbitrary `sub`, so the local break-glass allow-list stops an over-broad group-to-role mapping and nothing more. That is the ceiling of what any OIDC resource server can do, and it is worth stating plainly rather than letting "explicit allow-listed claim rules" imply more than it delivers.

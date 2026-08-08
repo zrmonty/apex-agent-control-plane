@@ -421,6 +421,27 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # One leaf and one credential per *live proof*, not one shared between
+    # them. The gateway's inbox is at-least-once with a redelivery window, so a
+    # command left over from an earlier test against the same agent identity
+    # becomes visible again minutes later -- and a `stop` redelivered into the
+    # middle of a pause proof would halt the agent and look like a pause
+    # failure. Separate identities make the proofs independent by construction
+    # rather than by test ordering, and they also keep the "one workload, one
+    # identity" rule the credential table has no wildcard form for.
+    for basename, common in (
+        ("agent-workload-pause-client", "apex-agent-workload-pause"),
+    ):
+        _issue(
+            out=out,
+            basename=basename,
+            common_name=common,
+            san_dns=[common],
+            san_ips=["127.0.0.1"],
+            ca_key=ca_key,
+            ca_cert=ca_cert,
+            server=False,
+        )
     # The control gateway's own NATS client identity for fanout, distinct from
     # `ingest-nats-client`. It publishes into the same `apex.events.>` stream
     # -- a control event belongs in the same trace as everything else -- but
@@ -521,23 +542,26 @@ def main() -> None:
     # workload's -- same rule as the separate NATS account above.
     _write_runtime_secret(out / "valkey-control-password")
     _write_operator_token_table(out / "control-operator-tokens")
-    # Two entries in one table: the agent the live proof drives, and a second
-    # workload used only to show it cannot read the first one's commands.
+    # One entry per agent workload in one table: the agent the stop proof
+    # drives, a second workload used only to show it cannot read the first
+    # one's commands, and one workload per additional live proof (see the
+    # comment on their leaves above for why they are not shared).
     _prepare_write(out / "control-agent-tokens")
-    _write_agent_token_table(
-        out / "control-agent-tokens-a",
-        out / "agent-workload-client.pem",
-        "reference-agent",
+    agents = (
+        ("control-agent-tokens-a", "agent-workload-client.pem", "reference-agent"),
+        ("control-agent-tokens-b", "agent-workload-b-client.pem", "reference-agent-b"),
+        (
+            "control-agent-tokens-pause",
+            "agent-workload-pause-client.pem",
+            "reference-agent-pause",
+        ),
     )
-    _write_agent_token_table(
-        out / "control-agent-tokens-b",
-        out / "agent-workload-b-client.pem",
-        "reference-agent-b",
-    )
+    for table, certificate, agent_id in agents:
+        _write_agent_token_table(out / table, out / certificate, agent_id)
     (out / "control-agent-tokens").write_text(
-        (out / "control-agent-tokens-a").read_text(encoding="ascii").strip()
-        + ";\n"
-        + (out / "control-agent-tokens-b").read_text(encoding="ascii").strip()
+        ";\n".join(
+            (out / table).read_text(encoding="ascii").strip() for table, _, _ in agents
+        )
         + "\n",
         encoding="ascii",
     )

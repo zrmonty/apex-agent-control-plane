@@ -363,12 +363,14 @@ jobs:
       # tests.
       #
       # It starts a real Python agent process using the product SDK's own
-      # mTLS transport, submits a real `stop` through the already-working
-      # SubmitCommand RPC, and asserts the agent halted naming *that*
-      # command_id. Run after the fanout verification above, deliberately:
-      # that step reads the last message on the subject, so a command
-      # submitted here first would displace the one it looks for.
-      - name: Live proof -- an operator stop halts a real agent process
+      # mTLS transport, submits real commands through the already-working
+      # SubmitCommand RPC, and asserts the agent acted on *those* command_ids:
+      # a `stop` halts it, a `pause` stops it taking any action while leaving
+      # it alive and polling, and a `resume` starts it acting again. Run after
+      # the fanout verification above, deliberately: that step reads the last
+      # message on the subject, so a command submitted here first would
+      # displace the one it looks for.
+      - name: Live proof -- operator commands change what a real agent process does
         working-directory: apps/control-plane-api
         timeout-minutes: 15
         env:
