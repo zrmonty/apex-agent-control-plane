@@ -24,11 +24,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # grpcio: the live stop-enactment proof runs a real Python agent process
-      # using the product SDK's own mTLS PollCommands transport
-      # (packages/sdk-python/src/apex_sdk/control_transport.py).
       - name: Install Python tools
-        run: python -m pip install -U pip cryptography boto3 "grpcio>=1.60"
+        run: python -m pip install -U pip cryptography boto3
+
+      # The live stop-enactment proof runs a real Python agent process using
+      # the product SDK itself, so the SDK and its dependencies have to be
+      # installed here -- `agent_under_control.py` puts the source tree on
+      # sys.path, which finds the package but not `rfc8785` or `grpcio`. The
+      # first CI run of that gate failed on exactly that, which is the gate
+      # doing its job: the whole point of running the real client is that it
+      # has to actually work in an environment nobody hand-tuned for it.
+      #
+      # `[control]` is the extra that carries grpcio; the transport imports it
+      # lazily so the rest of the SDK stays usable without a gRPC stack.
+      - name: Install the Apex SDK (for the live stop-enactment proof)
+        run: python -m pip install -e "packages/sdk-python[control]"
 
       # Mirrors deploy/compose/e2e/run_gates.py (Linux path for GitHub-hosted runners).
       - name: Generate live-mTLS PKI and configs

@@ -313,7 +313,12 @@ async fn an_operator_stop_halts_a_real_agent_process() {
     if ready.is_none() {
         agent.drain();
         agent.print_transcript("agent");
-        panic!("the agent never became ready; it could not poll the control gateway");
+        panic!(
+            "the agent never became ready; it could not poll the control gateway. \
+             Its stderr is inherited above -- a ModuleNotFoundError there means the \
+             SDK and its dependencies are not installed in this environment \
+             (pip install -e 'packages/sdk-python[control]')."
+        );
     }
     eprintln!("live proof: agent ready at {}", ready.unwrap());
 
