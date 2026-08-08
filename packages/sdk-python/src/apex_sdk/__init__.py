@@ -19,6 +19,15 @@ from .bundle import (
 )
 from .connect import Apex, PreflightError, PreflightResult, assert_tool_policy
 from .control import ControlAction, ControlCommand, ControlValidationError
+from .control_transport import (
+    AgentControlCredentials,
+    ControlPollError,
+    ControlPoller,
+    GrpcControlTransport,
+    InMemoryControlPoller,
+    PendingControlCommand,
+    PollResult,
+)
 from .errors import ConfigurationError, EventIntegrityError, TelemetryMappingError
 from .execution import build_execution, validate_execution
 from .exporter import BoundedGrpcExporter, ExportDeliveryError
@@ -62,6 +71,13 @@ __all__ = [
     "ControlCommand",
     "ControlSpec",
     "ControlValidationError",
+    "AgentControlCredentials",
+    "ControlPollError",
+    "ControlPoller",
+    "GrpcControlTransport",
+    "InMemoryControlPoller",
+    "PendingControlCommand",
+    "PollResult",
     "EventBuilder",
     "EventIntegrityError",
     "EventValidationError",

@@ -12,8 +12,12 @@ dependencies = ["rfc8785==0.1.4"]
 [project.optional-dependencies]
 # cryptography: Ed25519 sign/verify for staging/production agent bundles
 signing = ["cryptography>=42"]
-test = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42"]
-dev = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42"]
+# control: the mTLS PollCommands client (apex_sdk.control_transport). Optional
+# so importing apex_sdk never requires a gRPC stack -- the event-building,
+# validation and bundle surfaces are useful without a control channel.
+control = ["grpcio>=1.60"]
+test = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42", "grpcio>=1.60"]
+dev = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42", "grpcio>=1.60"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
