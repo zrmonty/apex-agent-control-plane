@@ -13,8 +13,51 @@ import "google/protobuf/struct.proto";
 // Cooperative v1 semantics only (ADR-0005): this issues commands for the
 // instrumented runtime to observe and act on. It never forcibly terminates
 // or suspends a process.
+//
+// Two RPCs, two *different* credential spaces, and they must never be
+// confused:
+//
+//   SubmitCommand  operator -> gateway. Authenticated with an operator
+//                  credential (static table or Keycloak-issued, see
+//                  control-plane-api/src/auth.rs and keycloak.rs).
+//   PollCommands   agent workload -> gateway. Authenticated with the
+//                  workload-identity model event-ingest already trusts for
+//                  agent connections: mTLS client certificate pinned to a
+//                  bearer credential bound to exactly one agent_id
+//                  (control-plane-api/src/agent_auth.rs).
+//
+// An operator credential cannot poll and an agent credential cannot submit.
+// That is ADR-0006's independence requirement carried inward: the authority
+// to *issue* a stop and the authority to *retrieve* one are different
+// authorities held by different principals.
 service ControlGateway {
   rpc SubmitCommand(ControlCommandRequest) returns (ControlCommandResponse);
+
+  // Retrieves the commands pending for the *calling agent*.
+  //
+  // Unary, deliberately, rather than server-streaming. Three reasons, all
+  // about the property ADR-0006 exists to protect -- this channel staying
+  // reachable when the rest of the platform is degraded:
+  //
+  //   1. A streaming RPC pins one gateway task, one HTTP/2 stream and one
+  //      idle connection per agent for the lifetime of the run. A unary poll
+  //      costs a bounded amount of work per call and nothing between calls,
+  //      so a fleet of agents cannot exhaust the control channel simply by
+  //      existing.
+  //   2. A poll is trivially rate-limitable per caller. A long-lived stream
+  //      is not: the cost is in holding it open, which no per-request ceiling
+  //      sees.
+  //   3. Idle long-lived streams are exactly what intermediaries (LBs, egress
+  //      proxies, NAT) silently reap, and a control channel whose failure
+  //      mode is "looks connected, delivers nothing" is the failure this
+  //      whole work item exists to close.
+  //
+  // Delivery is at-least-once with idempotent consumers, the same
+  // non-negotiable the event pipeline already holds: a command returned by a
+  // poll whose response never reached the agent becomes visible again after
+  // the gateway's redelivery window, so enactment must be idempotent
+  // (stopping an already-stopped loop is a no-op, not an error).
+  rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
 }
 
 message ControlCommandRequest {
@@ -47,6 +90,63 @@ message ControlCommandResponse {
   // durably accepted but fanout is still pending -- for example while the
   // primary data path is degraded. The command is not lost either way.
   bool delivered = 3;
+}
+
+// A poll carries **no** target selector.
+//
+// There is deliberately no `agent_id`, `run_id`, `workspace_id` or
+// `namespace_id` field here, and adding one later would be a security change,
+// not a feature. The gateway derives the caller's agent identity and its
+// permitted workspace/namespace scopes entirely from the authenticated
+// workload credential, and returns only commands matching it. The server
+// derives and enforces caller scope; client-supplied filters never expand
+// access.
+message PollCommandsRequest {
+  // Client hint for the maximum number of commands to return in this
+  // response. The gateway clamps it into its own bounds and applies its own
+  // default when zero. It can only ever *narrow* a result set the caller was
+  // already entitled to; it is not, and must never become, a selector.
+  uint32 max_commands = 1;
+}
+
+message PollCommandsResponse {
+  // Commands pending for the calling agent, oldest first. Empty is the normal
+  // case and is not an error.
+  repeated PendingControlCommand commands = 1;
+  // The agent identity the gateway resolved from the caller's own credential.
+  // Echoed so a client can assert it is polling as the workload it believes
+  // it is, and so a misconfigured credential is a loud mismatch rather than a
+  // silent stream of somebody else's commands. It is derived from the
+  // credential, never from the request.
+  string agent_id = 2;
+  // The minimum interval, in seconds, the gateway wants between polls from
+  // this caller. A cooperative client that honours it will not be
+  // rate-limited; the gateway enforces its own ceiling regardless.
+  uint32 min_poll_interval_seconds = 3;
+}
+
+message PendingControlCommand {
+  string command_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string agent_id = 4;
+  string run_id = 5;
+  string trace_id = 6;
+  ControlAction action = 7;
+  optional string reason_code = 8;
+  // Action-specific object, byte-identical to what the operator submitted.
+  // `inject.content` remains untrusted data and must never be promoted into
+  // instructions or authorization decisions by the receiving runtime.
+  google.protobuf.Struct parameters = 9;
+  // RFC 3339 UTC timestamp the gateway recorded for this command, derived
+  // from the command_id's own UUIDv7 clock (see envelope.rs) so it matches
+  // the `control` event in the queryable trace exactly.
+  string issued_at = 10;
+  // 1 on first delivery, incremented on every redelivery. A value above 1
+  // means a previous poll response for this command was not observed to have
+  // been acted on -- useful for the receiving runtime's own diagnostics, and
+  // never a reason to treat the command differently.
+  uint32 delivery_attempt = 11;
 }
 
 enum ControlAction {

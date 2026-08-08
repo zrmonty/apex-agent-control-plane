@@ -10,15 +10,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apex_control_plane_api::{
-    BoxedOperatorCredentialResolver, ControlGatewayService, ControlOutboxBackend, KeycloakConfig,
+    BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver, ControlGatewayService,
+    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, KeycloakConfig,
     KeycloakOperatorCredentialResolver, OperatorTokenAuthenticator, SharedEphemeralStore,
-    bounded_control_gateway_server, parse_operator_token_table,
+    StaticAgentWorkloadResolver, bounded_control_gateway_server, parse_agent_token_table,
+    parse_operator_token_table,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
-    OperatorTokenSource, admission_limits, control_postgres_url, control_valkey_env, keycloak_env,
-    operator_token_source, path, required, resolve_bind_addr,
+    AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source,
+    control_postgres_url, control_valkey_env, keycloak_env, operator_token_source, path, required,
+    require_shared_inbox_acknowledgement, resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -199,6 +202,86 @@ fn build_operator_resolver(
     Ok(Box::new(resolver))
 }
 
+/// The agent workload credential table is the same shape and the same size
+/// class as the operator one: `token|cert_sha256|agent_id|scopes`, up to 1024
+/// entries.
+const MAX_AGENT_TABLE_BYTES: usize = 256 * 1024;
+
+/// Selects the **agent workload** credential verifier for `PollCommands`.
+///
+/// Deliberately its own function, its own variables, and its own fail-closed
+/// default, rather than a branch inside `build_operator_resolver`. Sharing that
+/// function would be the first step toward sharing the credential space, which
+/// is the boundary ADR-0006 draws between issuing a command and receiving one.
+///
+/// Unset is a *supported* configuration: a deployment that has not yet issued
+/// agent workload credentials still runs a perfectly good command gateway, it
+/// simply has no agent that can retrieve them. It is announced loudly on
+/// stderr, because a control channel where nothing can receive a `stop` is the
+/// exact situation this work item exists to make visible rather than silent.
+fn build_agent_resolver(
+    trusted_base: &Path,
+) -> Result<BoxedAgentWorkloadResolver, Box<dyn std::error::Error>> {
+    let raw = match agent_token_source()? {
+        AgentTokenSource::File(configured) => {
+            let table_path = trusted_secret_path(
+                &configured,
+                trusted_base,
+                MAX_AGENT_TABLE_BYTES as u64,
+                // Bearer credentials, held to the same owner-only permission
+                // policy as a private key and as the operator table.
+                true,
+                "APEX_CONTROL_AGENT_TOKENS_FILE",
+            )?;
+            read_credential_table(
+                &table_path,
+                MAX_AGENT_TABLE_BYTES,
+                "APEX_CONTROL_AGENT_TOKENS_FILE",
+            )?
+        }
+        AgentTokenSource::Inline(raw) => raw,
+        AgentTokenSource::Unset => {
+            eprintln!(
+                "control-plane-api: neither APEX_CONTROL_AGENT_TOKENS_FILE nor APEX_CONTROL_AGENT_TOKENS is set; no agent will be able to retrieve commands through PollCommands"
+            );
+            println!("apex-control-plane-api agent credentials: none configured");
+            return Ok(BoxedAgentWorkloadResolver::new(
+                StaticAgentWorkloadResolver::new(),
+            ));
+        }
+    };
+    let resolver = parse_agent_token_table(&raw)?;
+    println!("apex-control-plane-api agent credentials: static table");
+    Ok(BoxedAgentWorkloadResolver::new(resolver))
+}
+
+/// Opens the durable command inbox -- the delivery-state store `PollCommands`
+/// reads and the accept path writes.
+///
+/// File-backed, alongside the file outbox and under the same operator-owned
+/// base. There is deliberately **no** Postgres backend yet; see
+/// `env::require_shared_inbox_acknowledgement` for why a shared outbox without
+/// a shared inbox is refused rather than quietly accepted.
+fn open_inbox(outbox_base: &Path) -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(outbox_base)?;
+    let inbox_file = outbox_base.join(
+        std::env::var("APEX_CONTROL_INBOX_FILE").unwrap_or_else(|_| "inbox.jsonl".to_owned()),
+    );
+    let inbox = FileCommandInbox::open(&inbox_file, outbox_base, OUTBOX_CAPACITY)
+        .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
+    println!("apex-control-plane-api inbox backend: file");
+    Ok(ControlInboxBackend::new(Box::new(inbox)))
+}
+
+/// Where the file-backed durability artefacts live. One reader so the outbox
+/// and the inbox cannot end up under different bases.
+fn outbox_base() -> PathBuf {
+    PathBuf::from(
+        std::env::var("APEX_CONTROL_OUTBOX_BASE")
+            .unwrap_or_else(|_| "./data/control-outbox".to_owned()),
+    )
+}
+
 /// Builds the optional cross-replica admission accelerator.
 ///
 /// Structurally `event-ingest`'s `build_ephemeral_store`, with one deliberate
@@ -316,10 +399,7 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
             .into());
         }
     }
-    let outbox_base = PathBuf::from(
-        std::env::var("APEX_CONTROL_OUTBOX_BASE")
-            .unwrap_or_else(|_| "./data/control-outbox".to_owned()),
-    );
+    let outbox_base = outbox_base();
     std::fs::create_dir_all(&outbox_base)?;
     let outbox_file = outbox_base.join(
         std::env::var("APEX_CONTROL_OUTBOX_FILE").unwrap_or_else(|_| "commands.jsonl".to_owned()),
@@ -353,8 +433,14 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // trust boundaries and, in Compose, separate mounts.
     let trusted_base = PathBuf::from(required("APEX_CONTROL_TRUSTED_SECRET_BASE")?);
     let tls = load_server_tls(&trusted_base)?;
+    // Checked before anything is opened, so a deployment that would silently
+    // deliver commands to only one of its replicas fails at startup rather
+    // than during the incident that needed the kill switch.
+    require_shared_inbox_acknowledgement(control_postgres_url()?.is_some())?;
     let outbox = Arc::new(open_outbox()?);
+    let inbox = Arc::new(open_inbox(&outbox_base())?);
     let resolver = build_operator_resolver(&trusted_base)?;
+    let agent_resolver = build_agent_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
     // Resolved and validated here, with no runtime entered; spawned below,
     // inside one. No socket is opened either way -- an unreachable broker
@@ -365,7 +451,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // is synchronous and the wrapper around it must not be constructed on a
     // runtime thread any more than the Postgres client may be.
     let ephemeral = build_ephemeral_store(&trusted_base)?;
-    let mut service = ControlGatewayService::new(auth, Arc::clone(&outbox))
+    let mut service = ControlGatewayService::with_inbox(auth, Arc::clone(&outbox), inbox)
+        .with_agent_resolver(agent_resolver)
         .with_admission_limits(admission_limit, admission_window);
     if let Some(store) = ephemeral {
         service = service.with_ephemeral_store(store);

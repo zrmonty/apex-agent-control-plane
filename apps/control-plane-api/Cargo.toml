@@ -20,6 +20,11 @@ path = "src/main.rs"
 # them. The OOB control gateway is a distinct authentication boundary and
 # transport, not a distinct durability or event-contract story.
 apex-event-ingest = { path = "../event-ingest" }
+# Exclusive writer lock on the durable command-inbox journal, the same
+# primitive and the same version `event-ingest`'s `FileOutbox` uses for its own
+# journal. A second process appending to one journal would interleave delivery
+# records and silently corrupt the "has this agent been told" state.
+fs2 = "0.4"
 # Operator credential verification for the production (Keycloak) resolver.
 # Pinned to the 9.x line deliberately: it verifies through `ring`, which this
 # dependency tree already carries for rustls, so no second crypto stack enters
@@ -36,6 +41,7 @@ prost-types = "0.14"
 # through `apex-event-ingest`; declared directly because this crate now uses
 # it in its own right.
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }

@@ -18,21 +18,34 @@ pub mod proto {
     tonic::include_proto!("apex.v1");
 }
 
+mod agent_auth;
 mod auth;
 mod envelope;
 mod errors;
+mod inbox;
 mod keycloak;
 mod outbox;
 mod replay;
 mod service;
 
+pub use agent_auth::{
+    AgentTokenTableError, AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver,
+    StaticAgentWorkloadResolver, agent_workload_subject, parse_agent_token_table,
+    peer_identity_from_request,
+};
 pub use auth::{
     BoxedOperatorCredentialResolver, OperatorCaller, OperatorCredentialResolver,
     OperatorTokenAuthenticator, OperatorTokenTableError, StaticOperatorTokenResolver,
     parse_operator_token_table,
 };
-pub use envelope::{ControlCommandInput, build_control_request};
+pub use envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
 pub use errors::{CommandError, CommandErrorCode};
+pub use inbox::{
+    CommandInbox, ControlInboxBackend, DEFAULT_INBOX_CAPACITY, DEFAULT_MAX_COMMANDS_PER_POLL,
+    DEFAULT_MAX_DELIVERY_ATTEMPTS, DEFAULT_REDELIVERY_AFTER, DeliveryPolicy, ExactScope,
+    FileCommandInbox, InMemoryCommandInbox, InboxKey, MAX_COMMANDS_PER_POLL, PendingCommand,
+    PollTarget, RecordResult, ScopeAuthorizer,
+};
 pub use keycloak::{
     KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
 };
@@ -40,7 +53,7 @@ pub use outbox::{ControlOutboxBackend, submit_command};
 pub use replay::spawn_fanout_worker;
 pub use service::{
     ControlGatewayService, SharedEphemeralStore, bounded_control_gateway_server,
-    control_admission_rate_limit_key,
+    control_admission_rate_limit_key, control_poll_rate_limit_key,
 };
 
 /// Maximum admitted `ControlCommandRequest` size, matching the ingest

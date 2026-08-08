@@ -9,12 +9,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use apex_event_ingest::{EphemeralStore, RateLimitKey};
+use apex_event_ingest::{Caller, EphemeralStore, RateLimitKey};
 use sha2::{Digest, Sha256};
 
+use crate::agent_auth::{
+    AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver, StaticAgentWorkloadResolver,
+    peer_identity_from_request,
+};
 use crate::auth::{OperatorCredentialResolver, OperatorTokenAuthenticator};
-use crate::envelope::{ControlCommandInput, build_control_request};
+use crate::envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
 use crate::errors::CommandError;
+use crate::inbox::{
+    ControlInboxBackend, DeliveryPolicy, InMemoryCommandInbox, PendingCommand, PollTarget,
+    ScopeAuthorizer,
+};
 use crate::outbox::{ControlOutboxBackend, submit_command};
 use crate::proto;
 
@@ -27,6 +35,25 @@ use crate::proto;
 pub(crate) const DEFAULT_MAX_COMMANDS_PER_WINDOW: u32 = 50;
 pub(crate) const DEFAULT_ADMISSION_WINDOW: Duration = Duration::from_secs(1);
 const MAX_TRACKED_OPERATORS: usize = 4096;
+
+/// Poll ceiling applied per authenticated *agent* identity, after auth
+/// succeeds and independently of the operator ceiling above.
+///
+/// A separate control for a separate principal. Without it, one agent -- or
+/// anything holding one agent's credential -- could poll in a tight loop and
+/// spend the gateway's outbox mutex, its inbox mutex and its CPU on behalf of
+/// every other agent on the same process. That is a denial of the one channel
+/// ADR-0006 requires to stay reachable when everything else is degraded, which
+/// makes it a security control rather than a capacity nicety.
+///
+/// **Flagged for the owner as a number this pass chose conservatively.** Five
+/// polls per second per agent is roughly five times a sane 1-second cadence,
+/// so a cooperative client with jitter and a retry never approaches it, while
+/// a runaway client is bounded to something the gateway can absorb. The
+/// response also carries `min_poll_interval_seconds` so a client does not have
+/// to guess.
+pub(crate) const DEFAULT_MAX_POLLS_PER_WINDOW: u32 = 5;
+const MAX_TRACKED_AGENTS: usize = 8192;
 
 /// The `RateLimitKey.namespace` every control-gateway admission counter lives
 /// under.
@@ -63,6 +90,37 @@ pub fn control_admission_rate_limit_key(subject: &str) -> RateLimitKey {
     }
 }
 
+/// The shared-store poll ceiling key for one agent workload subject.
+///
+/// Same namespace as the operator key above, a different bucket prefix.
+/// Deliberately not a *new* namespace: `live-mtls/render_configs.py` derives
+/// the control gateway's Valkey ACL key pattern from
+/// [`CONTROL_ADMISSION_NAMESPACE`], and a second namespace would land outside
+/// that pattern -- where every `check_rate_limit` call errors and the shared
+/// ceiling silently stops applying, which is precisely the failure mode the
+/// cross-replica pass already had to find the hard way. The `op-`/`poll-`
+/// prefixes keep the two principals' counters disjoint within the one
+/// namespace, and the subject is hashed for the same reasons it is above.
+pub fn control_poll_rate_limit_key(subject: &str) -> RateLimitKey {
+    RateLimitKey {
+        namespace: CONTROL_ADMISSION_NAMESPACE.to_owned(),
+        bucket: format!("poll-{:x}", Sha256::digest(subject.as_bytes())),
+    }
+}
+
+/// Adapts an authenticated [`Caller`] to the inbox's scope question.
+///
+/// The only `ScopeAuthorizer` on the serving path. It holds no scope list of
+/// its own: it forwards to `Caller::allows_scope`, so what an agent may read
+/// is decided by the credential it presented and by nothing in the request.
+struct CallerScopes<'caller>(&'caller Caller);
+
+impl ScopeAuthorizer for CallerScopes<'_> {
+    fn allows(&self, workspace_id: &str, namespace_id: &str) -> bool {
+        self.0.allows_scope(&format!("{workspace_id}/{namespace_id}"))
+    }
+}
+
 /// The optional cross-replica accelerator, in the shape `event-ingest`'s own
 /// `AuthenticatedGrpcService` holds it.
 pub type SharedEphemeralStore = Arc<Mutex<Box<dyn EphemeralStore>>>;
@@ -75,26 +133,84 @@ struct AdmissionBucket {
 
 pub struct ControlGatewayService<R: OperatorCredentialResolver> {
     auth: Arc<OperatorTokenAuthenticator<R>>,
+    /// The *agent workload* credential boundary, entirely separate from
+    /// `auth` above. Erased rather than a second generic parameter: a
+    /// deployment picks one implementation at startup, and one dyn dispatch on
+    /// the poll path is not worth propagating a type parameter through every
+    /// caller and test.
+    agent_auth: Arc<AgentWorkloadAuthenticator<BoxedAgentWorkloadResolver>>,
     outbox: Arc<ControlOutboxBackend>,
+    /// Delivery state, the dimension the outbox structurally cannot track.
+    inbox: Arc<ControlInboxBackend>,
     admission: Mutex<HashMap<String, AdmissionBucket>>,
+    polls: Mutex<HashMap<String, AdmissionBucket>>,
     /// Optional, non-authoritative, cross-replica admission counter. The
     /// process-local `admission` map above stays the hard floor whatever this
     /// does -- see [`ControlGatewayService::admit`].
     ephemeral: Option<SharedEphemeralStore>,
     limit: u32,
     window: Duration,
+    poll_limit: u32,
+    delivery_policy: DeliveryPolicy,
 }
 
 impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     pub fn new(auth: OperatorTokenAuthenticator<R>, outbox: Arc<ControlOutboxBackend>) -> Self {
+        Self::with_inbox(
+            auth,
+            outbox,
+            Arc::new(ControlInboxBackend::new(Box::new(
+                InMemoryCommandInbox::default(),
+            ))),
+        )
+    }
+
+    /// Constructs the service with an explicit durable inbox.
+    ///
+    /// [`Self::new`] defaults to an in-memory one so every existing embedding
+    /// and test keeps working unchanged; the runnable binary always passes a
+    /// durable backend, and `startup::service::run` is the only caller that
+    /// matters for that guarantee.
+    pub fn with_inbox(
+        auth: OperatorTokenAuthenticator<R>,
+        outbox: Arc<ControlOutboxBackend>,
+        inbox: Arc<ControlInboxBackend>,
+    ) -> Self {
         Self {
             auth: Arc::new(auth),
+            // Fail-closed default: an empty static table authenticates no
+            // agent at all, so a deployment that never configures agent
+            // credentials serves `PollCommands` to nobody rather than to
+            // everybody.
+            agent_auth: Arc::new(AgentWorkloadAuthenticator::new(
+                BoxedAgentWorkloadResolver::new(StaticAgentWorkloadResolver::new()),
+            )),
             outbox,
+            inbox,
             admission: Mutex::new(HashMap::new()),
+            polls: Mutex::new(HashMap::new()),
             ephemeral: None,
             limit: DEFAULT_MAX_COMMANDS_PER_WINDOW,
             window: DEFAULT_ADMISSION_WINDOW,
+            poll_limit: DEFAULT_MAX_POLLS_PER_WINDOW,
+            delivery_policy: DeliveryPolicy::default(),
         }
+    }
+
+    /// Installs the agent workload credential resolver used by
+    /// `PollCommands`.
+    pub fn with_agent_resolver(mut self, resolver: BoxedAgentWorkloadResolver) -> Self {
+        self.agent_auth = Arc::new(AgentWorkloadAuthenticator::new(resolver));
+        self
+    }
+
+    /// Overrides the per-agent poll ceiling and the delivery policy. Exists
+    /// for the same reason `with_admission_limits` does: a ceiling and a
+    /// redelivery window have to be observable to be provable.
+    pub fn with_poll_limits(mut self, poll_limit: u32, policy: DeliveryPolicy) -> Self {
+        self.poll_limit = poll_limit;
+        self.delivery_policy = policy;
+        self
     }
 
     /// Attaches the cross-replica admission counter.
@@ -170,29 +286,101 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     }
 
     fn admit_locally(&self, subject: &str) -> Result<(), CommandError> {
-        let Ok(mut buckets) = self.admission.lock() else {
-            return Err(CommandError::internal());
-        };
-        let now = Instant::now();
-        if !buckets.contains_key(subject) && buckets.len() >= MAX_TRACKED_OPERATORS {
-            return Err(CommandError::rate_limited());
+        admit_in(
+            &self.admission,
+            subject,
+            self.limit,
+            self.window,
+            MAX_TRACKED_OPERATORS,
+        )
+    }
+
+    /// The `PollCommands` equivalent of [`Self::admit`], keyed on the
+    /// authenticated *agent* subject.
+    ///
+    /// Same two-ceiling shape and the same contract: the shared store may only
+    /// ever deny, the process-local bucket is the hard floor, and an
+    /// unreachable accelerator degrades to the local ceiling rather than
+    /// failing open or shut. Keeping the structure identical is deliberate --
+    /// a poll ceiling that behaved differently under an accelerator outage
+    /// would be a second set of failure modes to reason about on the one
+    /// channel that has to keep working when things are already bad.
+    async fn admit_poll(&self, subject: &str) -> Result<(), CommandError> {
+        if let Some(store) = &self.ephemeral {
+            let store = Arc::clone(store);
+            let key = control_poll_rate_limit_key(subject);
+            let limit = self.poll_limit;
+            let window = self.window;
+            let shared = tokio::task::spawn_blocking(move || {
+                let Ok(mut guard) = store.lock() else {
+                    return None;
+                };
+                guard.check_rate_limit(&key, limit, window).ok()
+            })
+            .await
+            .map_err(|_| CommandError::internal())?;
+            if let Some(decision) = shared
+                && !decision.allowed
+            {
+                return Err(CommandError::rate_limited());
+            }
         }
-        let bucket = buckets.entry(subject.to_owned()).or_insert(AdmissionBucket {
+        admit_in(
+            &self.polls,
+            subject,
+            self.poll_limit,
+            self.window,
+            MAX_TRACKED_AGENTS,
+        )
+    }
+
+    /// The interval a cooperative client should leave between polls, derived
+    /// from the ceiling actually configured rather than hard-coded, so the two
+    /// cannot drift.
+    fn min_poll_interval_seconds(&self) -> u32 {
+        let window = self.window.as_secs().max(1);
+        let limit = u64::from(self.poll_limit.max(1));
+        u32::try_from(window.div_ceil(limit)).unwrap_or(u32::MAX)
+    }
+}
+
+/// One process-local fixed-window bucket map, shared by the operator
+/// admission ceiling and the agent poll ceiling.
+///
+/// Factored out rather than duplicated because the two ceilings must agree on
+/// the awkward parts: a poisoned lock fails closed rather than into an
+/// unthrottled path, and a new identity is refused once the map is full rather
+/// than evicting selectively -- selective eviction would let an attacker choose
+/// whose bucket survives.
+fn admit_in(
+    buckets: &Mutex<HashMap<String, AdmissionBucket>>,
+    subject: &str,
+    limit: u32,
+    window: Duration,
+    max_tracked: usize,
+) -> Result<(), CommandError> {
+    let Ok(mut buckets) = buckets.lock() else {
+        return Err(CommandError::internal());
+    };
+    let now = Instant::now();
+    if !buckets.contains_key(subject) && buckets.len() >= max_tracked {
+        return Err(CommandError::rate_limited());
+    }
+    let bucket = buckets.entry(subject.to_owned()).or_insert(AdmissionBucket {
+        window_started: now,
+        count: 0,
+    });
+    if bucket.window_started.elapsed() >= window {
+        *bucket = AdmissionBucket {
             window_started: now,
             count: 0,
-        });
-        if bucket.window_started.elapsed() >= self.window {
-            *bucket = AdmissionBucket {
-                window_started: now,
-                count: 0,
-            };
-        }
-        if bucket.count >= self.limit {
-            return Err(CommandError::rate_limited());
-        }
-        bucket.count += 1;
-        Ok(())
+        };
     }
+    if bucket.count >= limit {
+        return Err(CommandError::rate_limited());
+    }
+    bucket.count += 1;
+    Ok(())
 }
 
 pub fn bounded_control_gateway_server<R>(
@@ -225,8 +413,11 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             .map_err(CommandError::into_status)?;
 
         let input = ControlCommandInput::from_request(request.into_inner());
-        let (command_id, ingest_request) =
-            build_control_request(input, &operator).map_err(CommandError::into_status)?;
+        let AcceptedCommand {
+            command_id,
+            request: ingest_request,
+            delivery,
+        } = build_control_request(input, &operator).map_err(CommandError::into_status)?;
 
         let outbox = self.outbox.clone();
         let outcome = tokio::task::spawn_blocking(move || submit_command(&outbox, &ingest_request))
@@ -234,11 +425,141 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             .map_err(|_| CommandError::internal().into_status())?
             .map_err(CommandError::into_status)?;
 
+        // Recorded *after* the outbox commits, and never conditionally on
+        // whether the outbox call said "first acceptance" or "duplicate".
+        //
+        // Order matters: the outbox row is the authoritative durable
+        // acceptance and the audit record, so it commits first. If this
+        // second write then fails, the command is still durable and still
+        // reaches the trace; the operator gets an error and retries the same
+        // `command_id`, which the outbox recognises as a duplicate and which
+        // reaches this line again -- and `record` is idempotent, so the retry
+        // completes the delivery half without double-queueing it. Returning
+        // success here on a failed inbox write is the one thing that would be
+        // wrong: it is exactly the "recorded but never delivered" shape this
+        // whole work item exists to remove.
+        let inbox = self.inbox.clone();
+        tokio::task::spawn_blocking(move || inbox.with_lock(|inbox| inbox.record(&delivery)))
+            .await
+            .map_err(|_| CommandError::internal().into_status())?
+            .map_err(CommandError::into_status)?
+            .map_err(CommandError::into_status)?;
+
         Ok(tonic::Response::new(proto::ControlCommandResponse {
             duplicate: outcome.duplicate,
             command_id,
             delivered: outcome.delivered,
         }))
+    }
+
+    /// Returns the commands pending for the **calling agent**.
+    ///
+    /// The security shape of this method, in order:
+    ///
+    /// 1. The caller is authenticated against the agent workload credential
+    ///    space (`agent_auth`), never the operator one. An operator token
+    ///    cannot reach past this line.
+    /// 2. The agent identity is `caller.bound_agent_id()` -- derived from the
+    ///    credential. An unbound caller is refused outright rather than
+    ///    defaulted to anything.
+    /// 3. The permitted scopes are the caller's own, asked through
+    ///    [`CallerScopes`].
+    /// 4. The only request field read is `max_commands`, and it is clamped
+    ///    into the gateway's own bounds. It can shorten a result set the
+    ///    caller was already entitled to and nothing else.
+    ///
+    /// There is deliberately no branch anywhere below on an `agent_id`,
+    /// `run_id`, `workspace_id` or `namespace_id` from the request, because
+    /// the request has none. Adding one would be a security change.
+    async fn poll_commands(
+        &self,
+        request: tonic::Request<proto::PollCommandsRequest>,
+    ) -> Result<tonic::Response<proto::PollCommandsResponse>, tonic::Status> {
+        let peer = peer_identity_from_request(&request);
+        let caller = self
+            .agent_auth
+            .authenticate(request.metadata(), peer.as_ref())
+            .map_err(CommandError::into_status)?;
+        // `authenticated_for_agent` is the only public constructor an external
+        // resolver can use and it always binds an agent id, so this is
+        // belt-and-braces -- but an unbound caller reaching a per-agent
+        // retrieval path is precisely the bug worth failing closed on rather
+        // than assuming away.
+        let Some(agent_id) = caller.bound_agent_id().map(str::to_owned) else {
+            return Err(CommandError::unauthenticated().into_status());
+        };
+        let subject = caller.subject().unwrap_or(&agent_id).to_owned();
+        self.admit_poll(&subject)
+            .await
+            .map_err(CommandError::into_status)?;
+
+        let requested = request.get_ref().max_commands as usize;
+        let limit = if requested == 0 {
+            crate::inbox::DEFAULT_MAX_COMMANDS_PER_POLL
+        } else {
+            requested.min(crate::inbox::MAX_COMMANDS_PER_POLL)
+        };
+        let target = PollTarget {
+            agent_id: agent_id.clone(),
+            limit,
+        };
+
+        let inbox = self.inbox.clone();
+        let policy = self.delivery_policy;
+        let now_millis = crate::envelope::now_unix_millis();
+        // `spawn_blocking` for the same reason the accept path uses it: the
+        // inbox is behind a mutex, its durable backend fsyncs on every
+        // delivery record, and neither may run on a tonic worker thread.
+        let claimed: Vec<PendingCommand> = tokio::task::spawn_blocking(move || {
+            inbox.with_lock(|inbox| {
+                inbox.claim(&target, &CallerScopes(&caller), policy, now_millis)
+            })
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?
+        .map_err(CommandError::into_status)?;
+
+        Ok(tonic::Response::new(proto::PollCommandsResponse {
+            commands: claimed.into_iter().map(pending_to_proto).collect(),
+            agent_id,
+            min_poll_interval_seconds: self.min_poll_interval_seconds(),
+        }))
+    }
+}
+
+/// Maps a stored delivery record onto the wire type.
+///
+/// `parameters` is decoded from the bytes recorded at accept time. A record
+/// that somehow fails to decode yields `None` rather than an error: the
+/// command's action, target and reason are what a `stop` needs, and refusing
+/// to deliver a `stop` because an optional parameters blob is unreadable would
+/// be the wrong trade on this channel.
+fn pending_to_proto(command: PendingCommand) -> proto::PendingControlCommand {
+    let action = match command.action.as_str() {
+        "stop" => proto::ControlAction::Stop,
+        "pause" => proto::ControlAction::Pause,
+        "resume" => proto::ControlAction::Resume,
+        "inject" => proto::ControlAction::Inject,
+        "set_budget" => proto::ControlAction::SetBudget,
+        _ => proto::ControlAction::Unspecified,
+    };
+    proto::PendingControlCommand {
+        command_id: command.command_id,
+        workspace_id: command.workspace_id,
+        namespace_id: command.namespace_id,
+        agent_id: command.agent_id,
+        run_id: command.run_id,
+        trace_id: command.trace_id,
+        action: action as i32,
+        reason_code: command.reason_code,
+        parameters: if command.parameters.is_empty() {
+            None
+        } else {
+            <prost_types::Struct as prost::Message>::decode(command.parameters.as_slice()).ok()
+        },
+        issued_at: command.issued_at,
+        delivery_attempt: command.delivery_attempt,
     }
 }
 
@@ -262,6 +583,56 @@ mod tests {
             OperatorTokenAuthenticator::new(resolver),
             Arc::new(ControlOutboxBackend::new(outbox)),
         )
+    }
+
+    /// Certificate fingerprint fixture. `PeerIdentity` is a plain
+    /// SHA-256-of-leaf value, so a test can construct one directly without a
+    /// TLS session; the live tests in `tests/live_control_poll.rs` are what
+    /// prove the real extraction path.
+    fn peer(byte: u8) -> apex_event_ingest::PeerIdentity {
+        apex_event_ingest::PeerIdentity {
+            certificate_sha256: [byte; 32],
+        }
+    }
+
+    fn hex32(byte: u8) -> String {
+        (0..32).map(|_| format!("{byte:02x}")).collect()
+    }
+
+    /// A gateway serving one operator and two agent workloads in the same
+    /// workspace/namespace, each with its own credential and its own pinned
+    /// client certificate. This is the shape every isolation assertion below
+    /// needs: same tenant, different agents, so a leak cannot be explained
+    /// away by the scope check alone.
+    fn service_with_two_agents() -> ControlGatewayService<StaticOperatorTokenResolver> {
+        let agents = crate::agent_auth::parse_agent_token_table(&format!(
+            "agent-a-token-abcdefgh|{}|agent-a|acme/prod;agent-b-token-abcdefgh|{}|agent-b|acme/prod",
+            hex32(0xaa),
+            hex32(0xbb)
+        ))
+        .expect("agent table must parse");
+        service().with_agent_resolver(crate::agent_auth::BoxedAgentWorkloadResolver::new(agents))
+    }
+
+    fn poll_request(bearer: &str, peer: apex_event_ingest::PeerIdentity) -> tonic::Request<proto::PollCommandsRequest> {
+        poll_request_for(bearer, peer, proto::PollCommandsRequest { max_commands: 0 })
+    }
+
+    fn poll_request_for(
+        bearer: &str,
+        peer: apex_event_ingest::PeerIdentity,
+        body: proto::PollCommandsRequest,
+    ) -> tonic::Request<proto::PollCommandsRequest> {
+        let mut request = tonic::Request::new(body);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        // Stands in for what `peer_identity_from_request` reads off a real TLS
+        // connection. The in-process service is not served over TLS, so the
+        // extension has to be injected; `poll_commands` reads it through the
+        // same function either way.
+        request.extensions_mut().insert(peer);
+        request
     }
 
     fn authed_request(body: proto::ControlCommandRequest) -> tonic::Request<proto::ControlCommandRequest> {
@@ -652,6 +1023,285 @@ mod tests {
                 .check_rate_limit(&key, 1, Duration::from_secs(1))
                 .is_ok()
         );
+    }
+
+    // --- PollCommands ---------------------------------------------------
+
+    async fn submit_stop_for(
+        service: &ControlGatewayService<StaticOperatorTokenResolver>,
+        agent_id: &str,
+        suffix: u64,
+    ) -> String {
+        let mut request = stop_request();
+        request.agent_id = agent_id.to_owned();
+        request.command_id = Some(fresh_command_id(suffix));
+        service
+            .submit_command(authed_request(request))
+            .await
+            .expect("the operator must be able to submit")
+            .into_inner()
+            .command_id
+    }
+
+    #[tokio::test]
+    async fn an_agent_retrieves_the_stop_command_issued_against_it() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x100).await;
+
+        let response = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .expect("a registered agent must be able to poll")
+            .into_inner();
+
+        assert_eq!(response.agent_id, "agent-a");
+        assert_eq!(response.commands.len(), 1);
+        let command = &response.commands[0];
+        assert_eq!(command.command_id, command_id);
+        assert_eq!(command.action, proto::ControlAction::Stop as i32);
+        assert_eq!(command.agent_id, "agent-a");
+        assert_eq!(command.delivery_attempt, 1);
+        assert!(!command.issued_at.is_empty());
+        assert!(response.min_poll_interval_seconds >= 1);
+    }
+
+    /// **The mandatory isolation test.** Agent B authenticates as itself and
+    /// polls; a `stop` targeting agent A must not come back, and there must be
+    /// no request field it could set to make it come back.
+    ///
+    /// The second half is the part a scope check alone would not prove: both
+    /// agents hold `acme/prod`, so the only thing separating them is the
+    /// server-derived bound agent identity.
+    #[tokio::test]
+    async fn an_agent_cannot_retrieve_another_agents_commands() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x200).await;
+
+        // Agent B polls with its own valid credential and its own certificate.
+        let response = service
+            .poll_commands(poll_request("agent-b-token-abcdefgh", peer(0xbb)))
+            .await
+            .expect("agent B is a legitimate caller")
+            .into_inner();
+        assert_eq!(response.agent_id, "agent-b");
+        assert!(
+            response.commands.is_empty(),
+            "agent B retrieved a command targeting agent A: {:?}",
+            response.commands
+        );
+
+        // ... and asking harder does not help: `max_commands` is the only
+        // field on the request, and it can only narrow. There is no
+        // agent_id/run_id/workspace selector to abuse -- which is the point,
+        // and this assertion is here so that adding one is a test failure and
+        // not a silent widening.
+        let greedy = service
+            .poll_commands(poll_request_for(
+                "agent-b-token-abcdefgh",
+                peer(0xbb),
+                proto::PollCommandsRequest {
+                    max_commands: u32::MAX,
+                },
+            ))
+            .await
+            .expect("a clamped max_commands must not be an error")
+            .into_inner();
+        assert!(greedy.commands.is_empty());
+
+        // The command is still there for its actual target, so the emptiness
+        // above is isolation and not the command having gone missing.
+        let owner = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(owner.commands.len(), 1);
+        assert_eq!(owner.commands[0].command_id, command_id);
+    }
+
+    /// Stealing agent A's bearer token is not enough: it is bound to agent A's
+    /// client certificate, and agent B's connection presents a different one.
+    #[tokio::test]
+    async fn a_stolen_agent_token_is_useless_from_another_workload_connection() {
+        let service = service_with_two_agents();
+        submit_stop_for(&service, "agent-a", 0x300).await;
+        let status = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xbb)))
+            .await
+            .expect_err("agent A's token from agent B's certificate must be refused");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// The operator credential space and the agent credential space are
+    /// disjoint in both directions. An operator holds the authority to *issue*
+    /// a stop, never the authority to read what is pending for an agent.
+    #[tokio::test]
+    async fn an_operator_credential_cannot_poll() {
+        let service = service_with_two_agents();
+        submit_stop_for(&service, "agent-a", 0x400).await;
+        let status = service
+            .poll_commands(poll_request("op-token", peer(0xaa)))
+            .await
+            .expect_err("an operator token must not authenticate on the poll path");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// ... and the reverse: an agent credential cannot submit a command.
+    #[tokio::test]
+    async fn an_agent_credential_cannot_submit_a_command() {
+        let service = service_with_two_agents();
+        let mut request = tonic::Request::new(stop_request());
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-a-token-abcdefgh".parse().unwrap(),
+        );
+        let status = service
+            .submit_command(request)
+            .await
+            .expect_err("an agent credential must not authenticate on the submit path");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// A gateway that was never configured with agent credentials must serve
+    /// `PollCommands` to nobody, not to everybody.
+    #[tokio::test]
+    async fn a_gateway_with_no_agent_credentials_authenticates_no_agent() {
+        let service = service();
+        let status = service
+            .poll_commands(poll_request("anything-at-all-here", peer(0xaa)))
+            .await
+            .expect_err("an unconfigured agent credential space must fail closed");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// mTLS is load-bearing on this path, not decoration: a caller the
+    /// transport did not give a client certificate for is refused before the
+    /// token is even considered.
+    #[tokio::test]
+    async fn a_poll_with_no_client_certificate_is_refused() {
+        let service = service_with_two_agents();
+        let mut request = tonic::Request::new(proto::PollCommandsRequest { max_commands: 0 });
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-a-token-abcdefgh".parse().unwrap(),
+        );
+        let status = service
+            .poll_commands(request)
+            .await
+            .expect_err("strict peer requirement must refuse a certificate-less caller");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// A command an agent has already retrieved is not handed to it again on
+    /// the next poll, so a 1-second cadence does not re-enact a `stop` dozens
+    /// of times. Redelivery after the window is covered in `inbox.rs`, where
+    /// the clock is injectable.
+    #[tokio::test]
+    async fn a_retrieved_command_is_not_immediately_redelivered() {
+        let service = service_with_two_agents();
+        submit_stop_for(&service, "agent-a", 0x500).await;
+        let first = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.commands.len(), 1);
+        let second = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(second.commands.is_empty());
+    }
+
+    /// An agent polling aggressively must be bounded, or one workload can
+    /// degrade the control channel for every other workload sharing the
+    /// gateway.
+    #[tokio::test]
+    async fn poll_is_rate_limited_per_agent_after_the_ceiling() {
+        let service = service_with_two_agents();
+        for _ in 0..DEFAULT_MAX_POLLS_PER_WINDOW {
+            service
+                .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+                .await
+                .expect("polls inside the ceiling must succeed");
+        }
+        let status = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .expect_err("the poll ceiling must be enforced");
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+
+        // ... and the ceiling is per agent: a second workload is unaffected by
+        // the first one's behaviour, or one noisy agent becomes an outage for
+        // everybody.
+        service
+            .poll_commands(poll_request("agent-b-token-abcdefgh", peer(0xbb)))
+            .await
+            .expect("a different agent must have its own budget");
+    }
+
+    #[test]
+    fn the_poll_rate_limit_key_is_disjoint_from_the_operator_one() {
+        let subject = "spiffe://apex/workload/agent-a";
+        let poll = control_poll_rate_limit_key(subject);
+        let operator = control_admission_rate_limit_key(subject);
+        // Same namespace on purpose (see the key function's own comment: a
+        // second namespace would fall outside the deployment's Valkey ACL
+        // pattern and the shared ceiling would silently stop applying) ...
+        assert_eq!(poll.namespace, operator.namespace);
+        // ... and disjoint buckets, so an agent's polls can never consume an
+        // operator's command budget or vice versa.
+        assert_ne!(poll.bucket, operator.bucket);
+        assert!(!poll.bucket.contains("agent-a"));
+        // Both must satisfy the store's own key grammar, or every
+        // check_rate_limit call errors and the shared ceiling never applies.
+        let mut store = apex_event_ingest::InMemoryEphemeralStore::new();
+        assert!(
+            store
+                .check_rate_limit(&poll, 1, Duration::from_secs(1))
+                .is_ok()
+        );
+    }
+
+    /// The delivery record has to be written by the accept path, not by some
+    /// later worker: a command accepted while the agent is offline must be
+    /// waiting when it comes back.
+    #[tokio::test]
+    async fn a_command_accepted_before_the_agent_polls_is_waiting_for_it() {
+        let service = service_with_two_agents();
+        submit_stop_for(&service, "agent-a", 0x600).await;
+        submit_stop_for(&service, "agent-a", 0x601).await;
+        let response = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.commands.len(), 2);
+    }
+
+    /// An operator's idempotent resubmission must not queue a second delivery
+    /// of the same command.
+    #[tokio::test]
+    async fn a_duplicate_submission_does_not_queue_a_second_delivery() {
+        let service = service_with_two_agents();
+        let mut request = stop_request();
+        request.agent_id = "agent-a".to_owned();
+        request.command_id = Some(fresh_command_id(0x700));
+        service
+            .submit_command(authed_request(request.clone()))
+            .await
+            .unwrap();
+        service
+            .submit_command(authed_request(request))
+            .await
+            .unwrap();
+        let response = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.commands.len(), 1);
     }
 
     #[tokio::test]
