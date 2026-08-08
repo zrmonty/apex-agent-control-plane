@@ -171,11 +171,28 @@ services:
       # APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS are both configured; no claim can
       # confer it on its own.
       APEX_CONTROL_OPERATOR_TOKENS_FILE: /run/secrets/control_operator_tokens
+      # The *agent workload* credential table, for PollCommands. A separate
+      # file and a separate credential space from the operator table above,
+      # because they authorize different principals: an operator issues a
+      # `stop`, an agent retrieves the ones issued against it (ADR-0006). Each
+      # entry is `token|cert_sha256|agent_id|workspace/namespace[,...]`; the
+      # fingerprint pins the credential to one mTLS client certificate, so a
+      # leaked token is unusable from any other connection. There is no `*`
+      # form -- an agent workload has exactly one identity.
+      #
+      # Without this the gateway starts and says so on stderr, and accepts
+      # commands no agent can ever retrieve.
+      APEX_CONTROL_AGENT_TOKENS_FILE: /run/secrets/control_agent_tokens
       # A distinct outbox file from event-ingest's, by design: the two
       # services must not share a durability boundary any more than they
       # share auth.
       APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
       APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+      # Delivery state ("has the target agent retrieved this yet"), a
+      # different dimension from the outbox's fanout completion and tracked
+      # separately. Defaults to APEX_CONTROL_OUTBOX_BASE; named here so the
+      # journal is visible on the same durability volume.
+      APEX_CONTROL_INBOX_FILE: inbox.jsonl
       # Fanout to the primary trace, so an accepted command becomes an actual
       # `control` event rather than a durable row nobody reads. Its own NATS
       # client leaf and its own broker account, never the ingest gateway's:
@@ -210,6 +227,9 @@ services:
       - control_client_ca
       - source: control_operator_tokens
         target: /run/secrets/control_operator_tokens
+        mode: "0400"
+      - source: control_agent_tokens
+        target: /run/secrets/control_agent_tokens
         mode: "0400"
       - nats_client_ca
       - control_nats_client_cert
@@ -456,6 +476,11 @@ secrets:
     file: ${CONTROL_CLIENT_CA_FILE:?set CONTROL_CLIENT_CA_FILE to the CA that issues operator client certificates}
   control_operator_tokens:
     file: ${CONTROL_OPERATOR_TOKENS_FILE:?set CONTROL_OPERATOR_TOKENS_FILE to an operator credential table file}
+  # `token|cert_sha256|agent_id|workspace/namespace[,...]` per line or
+  # `;`-separated. Distinct from the operator table: retrieving a command is a
+  # different authority from issuing one.
+  control_agent_tokens:
+    file: ${CONTROL_AGENT_TOKENS_FILE:?set CONTROL_AGENT_TOKENS_FILE to an agent workload credential table file}
   # The control gateway's own NATS client leaf and broker account, separate
   # from ingest_nats_client_* / nats_username / nats_password. Grant this
   # account publish on the event subjects only -- it never manages streams --

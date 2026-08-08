@@ -70,6 +70,20 @@ x-control-pg-environment: &control-pg-environment
   APEX_POSTGRES_CA_FILE: /var/lib/apex-control-secrets/ca
   # No APEX_CONTROL_OUTBOX_BASE/_FILE: with the Postgres backend selected the
   # file outbox is never opened, and leaving them unset is what proves it.
+  #
+  # The command *inbox* (delivery state for PollCommands) has no Postgres
+  # backend yet, so each replica keeps its own. On a shared outbox that means
+  # an agent polling replica B never learns about a `stop` accepted by replica
+  # A, and the binary refuses to start without this acknowledgement rather
+  # than let a deployment discover it during the incident the kill switch was
+  # for. It is set here because this profile exists to prove *outbox* sharing
+  # and nothing polls these replicas. A real multi-replica deployment must
+  # wait for the shared inbox -- see docs/phase-0.5-progress.md.
+  APEX_CONTROL_ALLOW_LOCAL_INBOX_WITH_SHARED_OUTBOX: "true"
+  # These replicas mount no data volume (the outbox is Postgres), so the inbox
+  # journal goes on the tmpfs they already have.
+  APEX_CONTROL_INBOX_BASE: /tmp
+  APEX_CONTROL_AGENT_TOKENS_FILE: /var/lib/apex-control-secrets/control_agent_tokens
   APEX_CONTROL_NATS_URL: tls://jetstream:4222
   APEX_CONTROL_NATS_CA_FILE: /var/lib/apex-control-secrets/ca
   APEX_CONTROL_NATS_CLIENT_CERT_FILE: /var/lib/apex-control-secrets/control_nats_client_cert

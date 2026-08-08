@@ -93,6 +93,38 @@ def _write_operator_token_table(path: Path) -> None:
         pass
 
 
+def _write_agent_token_table(path: Path, certificate_path: Path, agent_id: str) -> None:
+    """Write a lab agent-workload credential table for `PollCommands`.
+
+    Format: `token|cert_sha256|agent_id|workspace/namespace[,...]`. Distinct
+    from the operator table on purpose -- per ADR-0006 the authority to
+    *issue* a `stop` and the authority to *retrieve* one belong to different
+    principals, so they get different credential spaces and different files.
+
+    The fingerprint is computed from the certificate this script just issued,
+    so the table and the leaf cannot drift. That binding is what makes the
+    bearer credential useless on its own: the gateway refuses a valid token
+    presented from a connection holding any other client certificate.
+
+    There is deliberately no `*` scope form here, unlike the operator table:
+    an agent workload has exactly one identity.
+    """
+    fingerprint = (
+        x509.load_pem_x509_certificate(certificate_path.read_bytes())
+        .fingerprint(hashes.SHA256())
+        .hex()
+    )
+    _prepare_write(path)
+    path.write_text(
+        f"{secure_secrets.token_urlsafe(32)}|{fingerprint}|{agent_id}|acme/prod\n",
+        encoding="ascii",
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def _is_private_secret_name(name: str) -> bool:
     """Names the host-side Rust secret policy treats as private material."""
     lower = name.lower()
@@ -360,6 +392,35 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # The agent workload's client identity for `PollCommands`. Its own leaf,
+    # neither the operator's nor the ingest workload's: an operator issues
+    # commands, an agent retrieves the ones issued against it, and those are
+    # different authorities held by different principals (ADR-0006). The
+    # gateway pins this exact certificate to the agent's bearer credential, so
+    # a leaked token cannot be used from any other connection.
+    _issue(
+        out=out,
+        basename="agent-workload-client",
+        common_name="apex-agent-workload",
+        san_dns=["apex-agent-workload"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
+    # A *second* agent leaf and credential, for the cross-agent isolation
+    # assertion in the live poll test. Without a real second workload, "agent B
+    # cannot read agent A's commands" can only be tested in process.
+    _issue(
+        out=out,
+        basename="agent-workload-b-client",
+        common_name="apex-agent-workload-b",
+        san_dns=["apex-agent-workload-b"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
     # The control gateway's own NATS client identity for fanout, distinct from
     # `ingest-nats-client`. It publishes into the same `apex.events.>` stream
     # -- a control event belongs in the same trace as everything else -- but
@@ -460,6 +521,30 @@ def main() -> None:
     # workload's -- same rule as the separate NATS account above.
     _write_runtime_secret(out / "valkey-control-password")
     _write_operator_token_table(out / "control-operator-tokens")
+    # Two entries in one table: the agent the live proof drives, and a second
+    # workload used only to show it cannot read the first one's commands.
+    _prepare_write(out / "control-agent-tokens")
+    _write_agent_token_table(
+        out / "control-agent-tokens-a",
+        out / "agent-workload-client.pem",
+        "reference-agent",
+    )
+    _write_agent_token_table(
+        out / "control-agent-tokens-b",
+        out / "agent-workload-b-client.pem",
+        "reference-agent-b",
+    )
+    (out / "control-agent-tokens").write_text(
+        (out / "control-agent-tokens-a").read_text(encoding="ascii").strip()
+        + ";\n"
+        + (out / "control-agent-tokens-b").read_text(encoding="ascii").strip()
+        + "\n",
+        encoding="ascii",
+    )
+    try:
+        (out / "control-agent-tokens").chmod(0o600)
+    except OSError:
+        pass
     host_out = write_host_secrets(out)
     print(f"Wrote local-dev PKI under {out}")
     print(f"Wrote host-restricted client secrets under {host_out}")

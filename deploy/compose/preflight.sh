@@ -40,7 +40,7 @@ done
 secret_keys=(
   GATEWAY_SERVER_CERT_FILE GATEWAY_SERVER_KEY_FILE GATEWAY_CLIENT_CA_FILE
   CONTROL_SERVER_CERT_FILE CONTROL_SERVER_KEY_FILE CONTROL_CLIENT_CA_FILE
-  CONTROL_OPERATOR_TOKENS_FILE
+  CONTROL_OPERATOR_TOKENS_FILE CONTROL_AGENT_TOKENS_FILE
   CONTROL_NATS_CLIENT_CERT_FILE CONTROL_NATS_CLIENT_KEY_FILE
   CONTROL_NATS_USERNAME_FILE CONTROL_NATS_PASSWORD_FILE
   INGEST_BEARER_TOKEN_FILE NATS_USERNAME_FILE NATS_PASSWORD_FILE
@@ -81,10 +81,12 @@ gateway_private_keys=(
   NATS_USERNAME_FILE NATS_PASSWORD_FILE INGEST_NATS_CLIENT_KEY_FILE
   INGEST_CLICKHOUSE_CLIENT_KEY_FILE INGEST_ARCHIVE_CLIENT_KEY_FILE
 )
-# The operator token table is a bearer credential, not merely config: it is
-# held to the same owner-only policy as a private key.
+# The operator and agent token tables are bearer credentials, not merely
+# config: both are held to the same owner-only policy as a private key. The
+# agent table additionally decides which workload may retrieve which agent's
+# pending commands, so a readable copy is a way to read another agent's stops.
 control_private_keys=(
-  CONTROL_SERVER_KEY_FILE CONTROL_OPERATOR_TOKENS_FILE
+  CONTROL_SERVER_KEY_FILE CONTROL_OPERATOR_TOKENS_FILE CONTROL_AGENT_TOKENS_FILE
   CONTROL_NATS_CLIENT_KEY_FILE CONTROL_NATS_USERNAME_FILE CONTROL_NATS_PASSWORD_FILE
 )
 

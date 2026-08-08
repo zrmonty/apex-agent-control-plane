@@ -1,6 +1,20 @@
 # Phase 0.5 progress
 
-**Status: every item below shipped and gated in CI -- but the gateway does not yet do what it exists to do.** A 2026-08-08 investigation found that no code path anywhere in this repository lets an agent receive a command an operator submits: [`control.proto`](../contracts/proto/apex/v1/control.proto) defines only `SubmitCommand`, one direction, operator to gateway, and nothing on the SDK side polls, subscribes, or otherwise consumes one. `stop`/`pause`/`resume`/`inject`/`set_budget` are durably accepted, authenticated, and recorded into the queryable trace; none of them currently change what a running agent does. Full evidence and analysis: [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md). **Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true; read "operationally complete" anywhere below as scoped to that path, not to an operator's ability to actually control a running agent.**
+**Status: `stop` now works end to end. `pause`/`resume`/`inject`/`set_budget` still do not.**
+
+A 2026-08-08 investigation found that no code path anywhere in this repository let an agent receive a command an operator submitted: [`control.proto`](../contracts/proto/apex/v1/control.proto) defined only `SubmitCommand`, one direction, operator to gateway, and nothing on the SDK side polled, subscribed, or otherwise consumed one. Full evidence and analysis: [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md).
+
+A fifth pass closed the retrieval half **for `stop` only**, deliberately scoped narrow and proven live: a new `PollCommands` RPC, a new agent-workload credential space, durable per-command delivery state, a real Python gRPC+mTLS client in the product SDK, and a minimal enactment hook in `ReferenceReasonActLoop`. See "Command retrieval and stop enactment" below, and "Live proof" for the run.
+
+**Read this precisely, because the distinction is the whole point:**
+
+| Question | Answer |
+|---|---|
+| Does an operator's `stop` halt a running instrumented agent? | **Yes**, for a runtime that polls the control channel. Proven live against a real container and a real agent process, gated in CI. |
+| Does `pause`, `resume`, `inject` or `set_budget` change what a running agent does? | **No.** They are accepted, recorded, retrievable through `PollCommands` -- and the reference runtime deliberately leaves them inert rather than half-enacting them. Explicitly out of scope for this pass. |
+| Does the SDK have a real event-ingest transport? | **No, and this pass did not fix it.** See "Flagged, not fixed" below. |
+
+Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true.
 
 Phase 0.5 delivered the out-of-band (OOB) control command gateway per [ADR-0006](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/06%20Decisions/ADR-0006%20OOB%20Control%20Gateway%20Moved%20to%20Phase%200.5.md) and [ADR-0005](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/06%20Decisions/ADR-0005%20Cooperative%20V1%20Controls.md). The control/durability/auth logic shipped and was pen-tested first; a second pass then made the gateway an actually-deployed service with its own transport boundary, which is what makes ADR-0006's independence claim operational rather than structural; a third pass closed the two gaps that deployment surfaced -- accepted commands were never delivered onward, and `--features postgres` did not actually select the Postgres outbox. A fourth pass closed the last two open items: production operator credentials are now verified against Keycloak, and the per-operator admission ceiling holds across replicas instead of multiplying by the replica count.
 
@@ -23,6 +37,117 @@ A new crate, `apps/control-plane-api` (`apex-control-plane-api`), exposes the fi
 | Its own transport boundary | Native mTLS via `tonic::transport::ServerTlsConfig` in `src/startup/service.rs`, client certificate mandatory. See "Transport security" below. |
 | Production operator identity | `src/keycloak.rs`: `KeycloakOperatorCredentialResolver` verifies short-lived, scope-bound credentials Keycloak issued via RFC 8693 token exchange, per [[Authentication and Identity]]. Selected by `APEX_CONTROL_KEYCLOAK_ISSUER`; `StaticOperatorTokenResolver` is unchanged and remains the local/lab and CI seam. See "Keycloak operator credentials" below. |
 | Admission control that means the same at N replicas as at one | `src/service.rs` takes an optional `apex_event_ingest::EphemeralStore` (reused, not forked) behind `APEX_CONTROL_VALKEY_*`, with the process-local ceiling retained as the hard floor. See "Cross-replica admission" below. |
+| An agent can retrieve the commands issued against it (ADR-0005's premise) | `ControlGateway.PollCommands`, a second RPC in a second credential space, plus `src/inbox.rs` for durable delivery state and `apex_sdk.control_transport` for the client. `stop` only. See "Command retrieval and stop enactment" below. |
+
+## Command retrieval and stop enactment
+
+`ControlCommandResponse.delivered` meant "reached the queryable trace", which was correct as written and easy to read as "the agent stopped". It is still exactly that, and there is now a second, separate answer to the second question.
+
+### `PollCommands`, and why it carries no target selector
+
+```protobuf
+rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
+
+message PollCommandsRequest {
+  uint32 max_commands = 1;   // a clamp hint, and the only field
+}
+```
+
+There is deliberately no `agent_id`, `run_id`, `workspace_id` or `namespace_id` on the request, and **adding one later would be a security change, not a feature**. The gateway derives the caller's agent identity from `Caller::bound_agent_id()` on the authenticated credential and its permitted scopes from that same credential's `allows_scope`; `max_commands` can only ever shorten a result set the caller was already entitled to. This is the rule already stated elsewhere in this project's docs -- *the server derives and enforces caller scope; client-supplied filters never expand access* -- carried to a new surface.
+
+**Unary, not server-streaming.** The choice is the conservative one and it is about the property ADR-0006 exists to protect. A stream pins one gateway task, one HTTP/2 stream and one idle connection per agent for the lifetime of a run, so a fleet could exhaust the control channel by merely existing; a unary poll costs a bounded amount of work per call and nothing between calls. A poll is also trivially rate-limitable per caller, where a long-lived stream is not -- its cost is in being held open, which no per-request ceiling observes. And an idle long-lived stream is precisely what load balancers, egress proxies and NAT silently reap, which would produce a control channel that looks connected and delivers nothing: the exact failure this work item exists to remove. *Flagged for the owner as a decision this pass made:* a subscription (JetStream per-agent subject, or long-poll) remains open for a later pass, and the ack-state mechanism below does not assume polling.
+
+### A third credential space (`src/agent_auth.rs`)
+
+`SubmitCommand` authenticates an **operator**. `PollCommands` authenticates an **agent workload**. Those are different authorities held by different principals, and ADR-0006 draws exactly that line, so they get separate resolvers, separate credential tables, separate files and separate rate-limit buckets. Reusing `OperatorCredentialResolver` here would have made an operator token a way to read every agent's pending commands, and an agent credential a way to issue them. Both directions are asserted, in process and live.
+
+**Reused, not forked**, the same rule the outbox, the JetStream publisher and the Valkey accelerator already followed. The verification stack is `event-ingest`'s own workload-identity model, unmodified:
+
+- `BearerTokenVerifier::new_strict` -- `authorization` parsing, the fail-closed check that a TLS peer certificate is present at all, and the per-(token, peer-certificate) failure budget.
+- `BearerTokenResolver::resolve_with_peer` -- the certificate-binding seam, whose *default* implementation refuses any resolver that has not explicitly opted in, so a resolver that forgets to pin cannot be used on the strict path.
+- `Caller::authenticated_for_agent` -- the bound identity, applying the same `is_scope_identifier` grammar to the agent id and scopes that the ingest data path applies.
+
+Only two things are new: this crate's own credential table (`APEX_CONTROL_AGENT_TOKENS[_FILE]`, entries of `token|cert_sha256|agent_id|workspace/namespace[,...]`, no `*` form because an agent workload has exactly one identity), and the peer-certificate extraction, because `PeerIdentity::from_request` is `pub(crate)` in `event-ingest` and these passes only read that crate. *Flagged for the owner:* widening it to `pub` would remove the restatement; not done for the same reason `PostgresOutbox`'s fixed table name was left alone.
+
+The bearer credential is pinned to one client certificate, so a leaked agent token is unusable from any other connection -- asserted live by presenting agent A's token over agent B's mTLS connection and getting `Unauthenticated`.
+
+### Durable delivery state (`src/inbox.rs`)
+
+Fanout completion and delivery-to-agent are **different dimensions and both are tracked**. The outbox structurally cannot answer the second: it marks a row complete and stops returning it. A command can be fanned out to the trace *and* still be pending delivery to its agent.
+
+- **At-least-once, idempotent consumers**, matching the pipeline's existing non-negotiable rather than inventing exactly-once here. A poll durably records a delivery attempt *before* the response is written; a delivered command is suppressed for `DEFAULT_REDELIVERY_AFTER` (30s) and then becomes visible again, so a response lost in flight -- or an agent that crashed between receiving a `stop` and acting on it -- sees it again rather than losing it. Enactment must therefore be idempotent, which for `stop` it trivially is.
+- **Redelivery is bounded** (`DEFAULT_MAX_DELIVERY_ATTEMPTS`, 8). A command whose target never comes back settles instead of being served to nobody forever; the durable audit record is the outbox row and the `control` event regardless.
+- **Concurrency**: every operation runs under one mutex, so two concurrent polls -- a restarted agent racing its predecessor, or a duplicated process -- serialise, and a command is handed to at most one of them. Asserted by `concurrent_polls_never_hand_one_command_to_two_callers`.
+- **Ordering on the accept path**: the outbox commits first (it is the authoritative durable acceptance and the audit record), then the inbox records. A failed inbox write returns an error rather than success, because returning success there is exactly the "recorded but never delivered" shape this work exists to remove; the operator retries the same `command_id`, the outbox recognises the duplicate, and `record` is idempotent, so the retry completes the delivery half without double-queueing it.
+- The `FileCommandInbox` journal follows `FileOutbox`'s disciplines exactly: base confinement, symlink refusal, bounded record and file sizes, an exclusive writer lock, fsync before the in-memory mutation, and a startup replay that fails closed on malformed data. Replayed records are re-validated against the identifier grammar rather than trusted, because the journal lives on a mounted volume.
+
+**There is no Postgres inbox yet, and that is enforced rather than documented.** `APEX_CONTROL_POSTGRES_URL` exists so replicas can share one authoritative outbox; the inbox is still process-local, so an agent polling replica B would never learn about a `stop` accepted by replica A. Behind a load balancer that is a coin flip on whether a kill switch works, which is worse than not having one. The binary therefore **refuses to start** in that configuration unless `APEX_CONTROL_ALLOW_LOCAL_INBOX_WITH_SHARED_OUTBOX=true` is set exactly (a near-miss like `TRUE` fails closed, the same rule as the non-loopback bind acknowledgement). `compose.control-pg.yaml` sets it because that profile exists to prove *outbox* sharing and nothing polls those replicas. Verified live in both directions.
+
+### Poll rate limiting
+
+A per-agent ceiling (`DEFAULT_MAX_POLLS_PER_WINDOW`, 5 per window), separate from the operator admission ceiling, with the same two-tier shape: the optional shared store may only ever deny, the process-local bucket is the hard floor, and an unreachable accelerator degrades to the local ceiling rather than failing open or shut. Without it, one agent -- or anything holding one agent's credential -- could spend the gateway's mutexes and CPU on behalf of every other agent sharing the process, which is a denial of the one channel ADR-0006 requires to stay reachable. The response carries `min_poll_interval_seconds`, derived from the configured ceiling so the two cannot drift, and a cooperative client that honours it is never throttled.
+
+The shared key reuses `CONTROL_ADMISSION_NAMESPACE` with a `poll-` bucket prefix instead of taking a new namespace. That is deliberate: `live-mtls/render_configs.py` derives the control gateway's Valkey ACL key pattern from that constant, and a second namespace would land outside the pattern -- where every `check_rate_limit` errors and the shared ceiling silently stops applying, which is the exact failure mode the cross-replica pass already had to find the hard way.
+
+### The SDK client (`packages/sdk-python/src/apex_sdk/control_transport.py`)
+
+A real gRPC+mTLS client -- the first real gRPC transport in this SDK. It reads the agent's workload certificate, key and CA under the same path discipline the Rust services apply (symlink refusal, bounded reads, owner-only permissions on private material, POSIX only where mode bits mean something), opens a channel, calls `PollCommands`, and returns typed results. Errors follow `errors.py`'s taxonomy and `exporter.py`'s classification style rather than a second style invented for one module, and the gRPC `details()` string -- server-controlled text -- is never read into a diagnostic.
+
+**The wire format is encoded by hand.** This package has no protobuf code-generation step and no `protobuf` runtime dependency, and adding both to ship one read-only RPC would be a larger change to the SDK's build and dependency surface than the RPC itself; `grpcio` accepts arbitrary serializer callables. Unknown fields are skipped the way any protobuf implementation must, so a gateway that starts sending new fields does not break an older agent. *Flagged for the owner:* if a second RPC ever needs a Python client, generate the stubs -- one hand-rolled message pair is defensible, three is a maintenance liability.
+
+`grpcio` is an optional extra (`apex-sdk[control]`) and the import is deferred, so importing `apex_sdk` never requires a gRPC stack.
+
+### The enactment hook (`ReferenceReasonActLoop`)
+
+One checkpoint, in one place: immediately **before** the tool call, because a `stop` observed after the side effect has stopped nothing. On a pending `stop` the loop emits a `control` event under the agent's own actor (distinguishable at a glance from the operator's, which carries actor type `user`) plus a `turn_end` of `status: "stopped"` naming the `control_command_id`, then returns early. A terminal event rather than a silent return, because a run that just stops emitting is indistinguishable from a crash -- the same "looks fine, means nothing" failure this whole work item exists to remove.
+
+Retrieval *is* the acknowledgement: the gateway durably records the delivery attempt before returning a command.
+
+Actions other than `stop` are retrieved and deliberately left **inert**. An agent that silently ignores `pause` is honest; an agent that pretends to pause is not.
+
+**A poll failure does not halt the run.** *Flagged for the owner as a policy choice, not a bug.* Halting whenever the out-of-band channel is unreachable would turn a gateway blip into a fleet-wide outage and invert the property ADR-0006 keeps this channel independent for. The failure is emitted as an `error` event so the trace shows the check did not happen rather than showing nothing and implying it passed. A deployment that would rather fail closed needs a policy switch in the control-integration API, which is out of scope here.
+
+This is intentionally small. `ReferenceReasonActLoop` is a synthetic single-turn loop for exercising the event contract, not a production runtime, so there is no general "checkpoint" abstraction — generalising this into a control-integration API surface is explicitly a later pass.
+
+## Live proof
+
+The deliverable of this pass is not the unit tests. `apps/control-plane-api/tests/live_control_poll.rs` drives:
+
+1. a real `control-plane-api` container (`compose.gateway-ref.yaml`, mTLS, uid 10002, read-only rootfs);
+2. a real Python process, `deploy/compose/gateway-ref/agent_under_control.py`, using the product SDK's own `GrpcControlTransport` and `ReferenceReasonActLoop` -- not a Rust stand-in client, not a mock returning a canned response;
+3. a real `stop` submitted through the existing, unmodified `SubmitCommand` RPC over mTLS with an operator credential.
+
+Observed on the recorded run (all timestamps from the agent's own transcript):
+
+```
+READY      15:33:30.262   agent authenticated and completed its first poll
+COMPLETED 1 15:33:30.316  a whole turn ran, tool included
+COMPLETED 2 15:33:31.370  and another -- the agent is not stopping on its own
+            ~15:33:31.37  operator submits stop -> command_id 019fe202-07aa-7240-8b6a-448213949484
+ITERATION 3 15:33:32.370  next turn begins, polls before its tool call
+STOPPED     15:33:32.375  019fe202-07aa-7240-8b6a-448213949484
+```
+
+Halted 1.005s after submission (one poll cadence), process exit code 0.
+
+**Why this is causation and not coincidence**, in the order the test asserts it:
+
+- The `command_id` the agent printed is the UUIDv7 **the gateway minted during that submission**. The agent could not have produced it by timing out, crashing, or finishing early.
+- Two whole iterations completed *before* the command existed, so the loop was demonstrably still running under its own power.
+- Zero iterations started *after* the halt -- a loop that kept working and merely logged a stop fails this.
+- The agent's own JSONL trace, read independently of its stdout, ends with a `control` event (`action: stop`, `enforcement: cooperative`, actor type `agent`) followed by `turn_end` with `status: "stopped"` and that same `control_command_id`.
+- The container's durable inbox journal shows the matching records: a `command` row for the delivered command and exactly one `delivered` row at `attempt: 1` — and **no** `delivered` row for the command targeting a different agent, whose target never polled.
+
+Two further live tests run against the same container:
+
+- `a_second_agent_workload_cannot_retrieve_the_first_ones_commands`: two real workloads with two real client certificates in the same workspace/namespace. Agent B authenticates, resolves as itself, and sees nothing of agent A's -- including when asking for `max_commands: u32::MAX`. Agent A's token presented over agent B's connection is refused outright.
+- `the_operator_and_agent_credential_spaces_do_not_overlap`: an operator credential cannot poll, an agent credential cannot submit.
+
+`.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- an operator stop halts a real agent process** step running exactly this, placed after the JetStream fanout verification (that step reads the last message on the subject, so a command submitted before it would displace the one it looks for).
+
+## Flagged, not fixed
+
+**The SDK has no real event-ingest transport.** `packages/sdk-python/src/apex_sdk/exporter.py` defines `GrpcIngestTransport` as a `Protocol` with **zero concrete implementation anywhere in this repository** -- the only thing satisfying it is `InMemoryIdempotentIngest`, a test double, and every "live" gRPC/mTLS exercise of the ingest path has been a Rust stand-in client rather than this product SDK. `control_transport.py` is new code for a new RPC, not a retrofit of that gap, and does not close it. This is a real, adjacent, pre-existing gap and it is out of scope for this pass by instruction; it needs its own work item.
 
 ## Containerization
 
@@ -201,6 +326,14 @@ Found during the Keycloak/cross-replica pass:
 - **Token-type confusion is reachable with the obvious configuration.** If the expected audience is the gateway's client id -- which is the natural choice, and what the lab realm uses -- then a Keycloak *ID token* for that client passes issuer, audience, expiry and signature. The payload `typ` check is the only thing separating them.
 - Reviewed for: secrets in logs (the Keycloak paths log only static rejection codes and never a token, `sub`, claim value, issuer URL or audience; `KeycloakConfigError` carries a static string for the same reason, so a misconfiguration cannot leak an internal issuer URL into a log aggregator), log amplification (rejection logging is throttled to one line per second in aggregate, on top of the existing per-token auth-failure bucket), and unbounded reads (the JWKS response is read through a bounded reader with a key-count ceiling; the token is size-checked before it is parsed).
 
+Found during the command-retrieval pass:
+
+- **A shared outbox with a process-local inbox would have shipped a kill switch that works on one replica in N.** The Postgres outbox exists precisely so replicas can share durability; the inbox added here does not, yet, so an agent polling replica B would never receive a `stop` accepted by replica A -- silently, and only discoverable during the incident that needed it. Made a hard startup error with an exact-match acknowledgement rather than a documented caveat. Verified live: the container refuses to start without it, and refuses `TRUE` as consent.
+- **The poll ceiling's shared key had to stay inside the existing Valkey namespace.** The obvious design -- a new `apex.control.poll` namespace -- would have fallen outside the ACL key pattern `render_configs.py` derives from `CONTROL_ADMISSION_NAMESPACE`, where every `check_rate_limit` errors and the ceiling silently stops applying. That is the same failure mode the cross-replica pass found the hard way, so the poll counters share the namespace and are separated by bucket prefix instead.
+- **`CommandError::from_gateway_error` was the wrong mapper for the agent auth path.** Its fallback arm is `InvalidCommand`, which is right for envelope validation and exactly wrong for an authentication failure -- it would have turned "your credential is not valid" into "your request was malformed" and handed a prober a distinguishable response. `agent_auth::map_agent_auth_error` maps the auth taxonomy explicitly, and every credential failure (unknown token, wrong client certificate, malformed entry) returns the same `Unauthenticated`.
+- **A `test-support`-gated peer-identity seam.** `TlsConnectInfo` cannot be constructed by a test, so the in-process scoping assertions would otherwise have had no way to present a client certificate. The injection branch is compiled out of the released binary and is unreachable from the wire in any case (request extensions are set by the transport, never by a client), and the live tests exercise the real extraction path.
+- Reviewed for: cross-tenant isolation (proven, not assumed -- in process and live, with both agents holding the same workspace/namespace scope so only the server-derived bound identity separates them); poll-frequency abuse (per-agent ceiling, separate from the operator one, local floor never liftable by the shared store); secrets and command content in logs (the poll path logs nothing at all -- no token, no `command_id`, no parameters; the inbox journal is a durability artefact on the service's own volume, not a log); replay and idempotency of ack state under concurrent polls (one mutex, asserted with eight concurrent callers racing for one command, and delivery state survives a restart with its window intact); a stolen agent bearer token (useless without the pinned client certificate, asserted live).
+
 - Reviewed for: auth bypass (none found -- every RPC path requires `authenticate` before any outbox interaction), injection via `inject.content` (content flows untouched into the `control` event's `parameters.content` field and is never interpreted, matching ADR-0005's "content is untrusted data" requirement; `validation/control.rs` already enforces `content_classification: "untrusted"` and a 32 KiB ceiling), budget overflow/negative/NaN/infinity/zero (all rejected by the existing `validate_control_data` finite/positive/bounded check, exercised here via `submit_command_rejects_a_negative_budget_limit`), replay/duplicate attacks (idempotency semantics above), secrets in logs (the fanout worker and auth paths only ever log static `GatewayErrorCode`/summary strings, never tokens or payload content), and TOCTOU on outbox claim (`ControlOutboxBackend` serializes every outbox operation, including the fanout worker's `pending`/`mark_complete`, behind a single `Mutex` -- verified under the concurrency test below).
 
 ## Edge cases covered (tests)
@@ -226,7 +359,27 @@ Found during the Keycloak/cross-replica pass:
 - Oversized token refused before parsing; configuration validation (plaintext/credentialed issuer, staleness ceiling below the refresh interval, malformed claim paths)
 - A stale key cache failing closed with `CREDENTIAL_VERIFIER_UNAVAILABLE`, and every *verification* failure being indistinguishable from the outside
 
-`apps/control-plane-api/src/{auth,envelope,outbox,replay,service}.rs` unit/integration tests (41, run with `--features test-support`):
+`apps/control-plane-api/src/{agent_auth,inbox}.rs` and the `PollCommands` half of `service.rs` (new this pass):
+
+- An agent retrieves the `stop` issued against it, with the resolved `agent_id` echoed from its own credential
+- **Agent B cannot retrieve agent A's command** -- same workspace, same namespace, both credentials valid -- and cannot by asking for `max_commands: u32::MAX`, because there is no selector on the request to abuse. The assertion is written so that adding one is a test failure rather than a silent widening
+- A valid agent token presented with the wrong client certificate is refused
+- An operator credential cannot poll; an agent credential cannot submit
+- A gateway with no agent credentials configured authenticates no agent (fail closed, not open)
+- A caller with no client certificate is refused before its token is considered
+- A retrieved command is not immediately redelivered; past the window it is, with the attempt count preserved across a restart
+- Redelivery is bounded by the attempt ceiling
+- Concurrent polls never hand one command to two callers (eight racing callers, exactly one delivery)
+- A resubmitted `command_id` does not queue a second delivery
+- The poll ceiling is enforced per agent and does not affect a second agent
+- The poll rate-limit key is disjoint from the operator one, carries no agent identity, and satisfies the ephemeral store's key grammar
+- The delivery record matches the trace record field for field, and carries `parameters` through byte-identically
+- The credential table refuses every malformed entry shape, preserves a token containing the separator, and has no wildcard form
+- The file inbox refuses a path outside its base and a command with an out-of-grammar identifier or action
+
+`packages/sdk-python/tests/test_control_transport.py` (58 tests): the hand-rolled wire codec exhaustively (every action value, unknown-field skipping, eight malformed-response shapes, oversize refusal), credential loading (missing/empty/oversized/symlinked/directory/world-readable, both-or-neither token sources), endpoint and timeout validation, the missing-`grpcio` path, gRPC status classification, and **a real in-process gRPC server over real mTLS** with a throwaway CA and mandatory client auth -- which is what makes "the transport works" a claim about handshakes and HTTP/2 framing rather than about a mock. `test_reference_runtime.py` adds the enactment cases: the tool never executes, the terminal events are emitted, a non-`stop` action stays inert, an out-of-grammar reason code still halts the run, a poll failure records an error and does not halt, and a run with no tool step does not poll at all.
+
+`apps/control-plane-api/src/{auth,envelope,outbox,replay,service}.rs` unit/integration tests (run with `--features test-support`):
 
 - Two replicas without a shared store admit twice the ceiling; with one, exactly the ceiling between them (the defect and its fix, asserted as exact counts)
 - A permanently-`Unavailable` store falls back to the local ceiling rather than failing open **or** shut
@@ -307,7 +460,16 @@ cargo deny check
 cargo audit
 ```
 
-All pass clean (75 + 18 + 14 + 5 + 3 + 2 tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing across 292 dependencies), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
+All pass clean (112 unit + 20 startup + 14 + 5 + 3 + 3 + 2 tests; `deny` reports advisories/bans/licenses/sources ok; `audit` finds nothing), as do `event-ingest`'s own gates (`cargo test --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`). `apps/event-ingest` was read as reference during every pass and has not been modified since the first.
+
+The Python SDK's own gate:
+
+```powershell
+cd packages/sdk-python
+python -m pytest --cov=apex_sdk --cov-fail-under=95
+```
+
+268 passed, 96.05% coverage (`control_transport.py` 97%), with `bandit -r src --severity-level medium` clean.
 
 `.github/workflows/live-mtls-e2e.yml` additionally builds the real images, starts the real containers, and drives real traffic at them. This exists for the same reason the equivalent gateway step does: `docker compose config` parses YAML, and never catches a Dockerfile that cannot build, a binary that panics before binding, or a container that cannot write its data volume. All three of those reached `master` for `event-ingest` before it had such a gate. The control-side steps, in order:
 
@@ -319,6 +481,7 @@ All pass clean (75 + 18 + 14 + 5 + 3 + 2 tests; `deny` reports advisories/bans/l
 | Postgres-backed control gateway (two replicas) + live tests + "landed in Postgres, not a file" | `--features postgres` selecting nothing, and double-claimed outbox rows |
 | **Cross-replica admission ceiling (two replicas + Valkey) + live tests** | An accelerator that is configured but not working -- which looks exactly like no accelerator at all, and which this gate caught on its first run |
 | **Keycloak-backed operator credentials + live tests** | `build_operator_resolver` not selecting the Keycloak path in a real container, and every verification rule against real Keycloak-issued material |
+| **Live proof -- an operator stop halts a real agent process** | The whole retrieval path: a contract mismatch between the SDK client and the Rust service, an agent credential the deployed container rejects, delivery state that never marks a command delivered, and an enactment hook that logs a stop without acting on it. Nothing else in CI can catch any of these -- every other test either drives the service in process or speaks to it from Rust |
 
 Both new gates assert a startup log line (`admission ceiling: shared (valkey)`, `operator credentials: keycloak`) *before* sending any traffic, so a container that fell back to a different code path fails with that as the diagnosis rather than with a downstream assertion that could have failed for a dozen reasons.
 
@@ -326,7 +489,19 @@ Both new gates assert a startup log line (`admission ceiling: shared (valkey)`, 
 
 Closed by the containerization/TLS pass: the container image and Compose wiring, and native mTLS termination. Closed by the delivery/backend pass: the unwired fanout worker and the inert `postgres` feature. Closed by this pass: Keycloak-backed operator credentials and cross-replica admission rate limiting (see the two sections above). Nothing *ADR-0006* itself called for is outstanding -- every requirement that ADR actually states (durable outbox, independent auth, `control` event emission, cooperative-only semantics, reachable-when-degraded) is met and gated.
 
-That is a narrower claim than it reads at first, and narrower than this document originally made it sound. **0. An agent cannot receive a command.** `control.proto` defines only `SubmitCommand`, operator to gateway, one direction -- no `WatchCommands`, no subscription, nothing. `packages/sdk-python/src/apex_sdk/control.py` validates a command's shape; it does not fetch one. `examples/reference-agent`'s reason-act loop has no control-checking logic. Every accepted command's actual lifecycle ends at "durably recorded and queryable" -- ADR-0005's premise that "the instrumented runtime observes and acts on" a command was never built on the runtime side. This was not in the original six work items or in any prior pass's own open-items list; it is a scoping gap between ADR-0006 (the gateway) and ADR-0005 (the runtime), not a broken promise on tracked work. See [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md) for the full evidence and open questions on how to close it.
+That is a narrower claim than it reads at first, and narrower than this document originally made it sound. **0. An agent could not receive a command at all** -- `control.proto` defined only `SubmitCommand`, and ADR-0005's premise that "the instrumented runtime observes and acts on" a command was never built on the runtime side. That was a scoping gap between ADR-0006 (the gateway) and ADR-0005 (the runtime), not a broken promise on tracked work. See [OOB Control Gateway — Command Delivery Gap](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/05%20Research/OOB%20Control%20Gateway%20%E2%80%94%20Command%20Delivery%20Gap.md) for the original evidence.
+
+**Closed for `stop`** by the command-retrieval pass (see "Command retrieval and stop enactment" and "Live proof" above). What is left of it, stated precisely:
+
+**0a. `pause`, `resume`, `inject` and `set_budget` are retrievable but not enacted.** They flow through `PollCommands` exactly as `stop` does; the reference runtime deliberately leaves them inert rather than half-implementing them. Each needs a genuine answer that this pass did not attempt: `pause`/`resume` need a suspension point and a resumption signal in a runtime that has neither; `set_budget` needs a running-total hook into every LLM/tool call, or an honest decision that it is checked only at turn boundaries; `inject` needs a safe way to thread explicitly-untrusted content into a live agent's context, possibly mid-turn. **Explicitly out of scope for this pass, and the largest remaining piece of ADR-0005.**
+
+**0b. The delivery mechanism is polling only, and the ack state is per-gateway-process.** A JetStream per-agent subject or a long-poll remains open (see the unary-vs-streaming reasoning above), and [[Human-in-the-Loop Approvals]]'s blocking mode likely wants the same infrastructure -- whoever designs it should design it once for both. Concretely, the command inbox has no Postgres backend, so a multi-replica deployment must route each agent to the replica that accepted its commands, and the binary refuses to start otherwise rather than degrade silently.
+
+**0c. There is no real event-ingest transport in the SDK.** See "Flagged, not fixed" above. Pre-existing, adjacent, untouched here.
+
+**0d. The reference runtime has one checkpoint, not a control-integration API.** `ReferenceReasonActLoop` checks before its tool call and nowhere else, which is right for a synthetic single-turn loop and is not a general instrumentation surface. Generalising it -- and deciding the fail-open/fail-closed policy on an unreachable control channel -- is a later pass.
+
+**0e. A `stop` is enacted per agent, not per run.** Delivery is scoped to the agent identity the credential binds, because that is what the credential can prove; the command's `run_id` is recorded and carried to the runtime but the reference loop does not filter on it. An operator stopping agent X stops agent X's current run whichever run they named. *Flagged for the owner* as a defensible default rather than an obviously correct one.
 
 What follows are the other, genuinely lower-stakes follow-ups surfaced by this work rather than required by it:
 
@@ -340,7 +515,11 @@ What follows are the other, genuinely lower-stakes follow-ups surfaced by this w
 
 Against the Phase 0.5 Plan's definition of done, every requirement now holds *operationally* -- deployed, in containers, against real infrastructure, gated in CI -- rather than structurally. The five cooperative controls, the durable outbox, the independent auth boundary, the separate transport, actual delivery into the queryable trace, a multi-writer outbox across replicas, production operator identity, and an admission ceiling that means the same thing at two replicas as at one.
 
-Two things are deliberately **not** claimed:
+And, since the command-retrieval pass, one thing that was previously false: an operator's `stop` halts a running agent, proven against a real container and a real agent process rather than inferred from component tests.
 
+Four things are deliberately **not** claimed:
+
+- **Only `stop` is enacted.** `pause`, `resume`, `inject` and `set_budget` are accepted, recorded, and retrievable, and change nothing about a running agent. Anywhere those four are described to an operator, that needs to be stated plainly until the runtime side exists -- the same correction the original gap note called for, now narrowed to four actions instead of five.
+- **Enactment requires a cooperating runtime.** These are cooperative controls (ADR-0005): the gateway never reaches into a process. An agent that does not poll, or whose poll fails, is not stopped -- and the reference runtime deliberately fails open on an unreachable control channel, which is a policy choice the owner should confirm.
 - **The break-glass policy is a choice this pass made, not one the product specified.** The conservative shape (default-unreachable, two independent conditions, one of them local configuration the identity provider does not control) is defensible and documented in code, but the owner should confirm it is the rule they want before it is depended on in an incident.
 - **The Keycloak resolver defends against a mis-mapped identity provider, not a compromised one.** A Keycloak that can mint arbitrary tokens can mint an arbitrary `sub`, so the local break-glass allow-list stops an over-broad group-to-role mapping and nothing more. That is the ceiling of what any OIDC resource server can do, and it is worth stating plainly rather than letting "explicit allow-listed claim rules" imply more than it delivers.

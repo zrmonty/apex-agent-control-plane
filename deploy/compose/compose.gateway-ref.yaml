@@ -355,7 +355,8 @@ services:
       - |
         umask 077
         for name in ca control_server_cert control_server_key \
-                    control_operator_tokens control_nats_client_cert \
+                    control_operator_tokens control_agent_tokens \
+                    control_nats_client_cert \
                     control_nats_client_key control_nats_username \
                     control_nats_password control_valkey_client_cert \
                     control_valkey_client_key control_valkey_password; do
@@ -384,6 +385,12 @@ services:
         target: control_server_key
       - source: control_operator_tokens
         target: control_operator_tokens
+      # The agent workload credential table, a separate file from the operator
+      # one on purpose: they authorize different principals to do different
+      # things, and one file holding both would be one mount away from an
+      # operator credential that can also read agents' pending commands.
+      - source: control_agent_tokens
+        target: control_agent_tokens
       - control_nats_client_cert
       - source: control_nats_client_key
         target: control_nats_client_key
@@ -421,8 +428,13 @@ services:
       APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
       APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
       APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
+      # Agent workload credentials for PollCommands. Without this the gateway
+      # accepts commands that no agent can ever retrieve, which is exactly the
+      # state this profile used to be in.
+      APEX_CONTROL_AGENT_TOKENS_FILE: /var/lib/apex-control-secrets/control_agent_tokens
       APEX_CONTROL_OUTBOX_BASE: /var/lib/apex-control
       APEX_CONTROL_OUTBOX_FILE: commands.jsonl
+      APEX_CONTROL_INBOX_FILE: inbox.jsonl
       # Fanout to the primary trace. Its own NATS client leaf and its own
       # broker account (control-publisher), never the ingest gateway's:
       # ADR-0006's credential separation has to hold at the broker too, or
@@ -508,6 +520,11 @@ secrets:
     file: ./live-mtls/secrets/control-plane-server.key
   control_operator_tokens:
     file: ./live-mtls/secrets/control-operator-tokens
+  # The agent workload credential table: `token|cert_sha256|agent_id|scopes`,
+  # with the fingerprint of agent-workload-client.pem baked in by
+  # generate_pki.py so the credential and the leaf cannot drift apart.
+  control_agent_tokens:
+    file: ./live-mtls/secrets/control-agent-tokens
   # The control gateway's own NATS client leaf and broker account, distinct
   # from ingest_nats_client_* / nats_username / nats_password above.
   # render_configs.py grants this account strictly less than the ingest

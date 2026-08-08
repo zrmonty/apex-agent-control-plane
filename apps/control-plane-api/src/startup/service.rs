@@ -262,24 +262,40 @@ fn build_agent_resolver(
 /// base. There is deliberately **no** Postgres backend yet; see
 /// `env::require_shared_inbox_acknowledgement` for why a shared outbox without
 /// a shared inbox is refused rather than quietly accepted.
-fn open_inbox(outbox_base: &Path) -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(outbox_base)?;
-    let inbox_file = outbox_base.join(
+fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
+    let base = inbox_base();
+    std::fs::create_dir_all(&base)?;
+    let inbox_file = base.join(
         std::env::var("APEX_CONTROL_INBOX_FILE").unwrap_or_else(|_| "inbox.jsonl".to_owned()),
     );
-    let inbox = FileCommandInbox::open(&inbox_file, outbox_base, OUTBOX_CAPACITY)
+    let inbox = FileCommandInbox::open(&inbox_file, &base, OUTBOX_CAPACITY)
         .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
     println!("apex-control-plane-api inbox backend: file");
     Ok(ControlInboxBackend::new(Box::new(inbox)))
 }
 
-/// Where the file-backed durability artefacts live. One reader so the outbox
-/// and the inbox cannot end up under different bases.
+/// Where the file outbox lives.
 fn outbox_base() -> PathBuf {
     PathBuf::from(
         std::env::var("APEX_CONTROL_OUTBOX_BASE")
             .unwrap_or_else(|_| "./data/control-outbox".to_owned()),
     )
+}
+
+/// Where the command inbox lives.
+///
+/// Defaults to the outbox base, because for a file-backed deployment they are
+/// the same durability volume and splitting them by default would be a way to
+/// lose one of them. It is separately configurable because the Postgres-backed
+/// profile selects a *shared* outbox and therefore mounts no outbox volume at
+/// all -- the inbox still needs somewhere writable, and it is process-local
+/// there by construction (see
+/// `env::require_shared_inbox_acknowledgement`).
+fn inbox_base() -> PathBuf {
+    match std::env::var("APEX_CONTROL_INBOX_BASE") {
+        Ok(value) if !value.is_empty() => PathBuf::from(value),
+        _ => outbox_base(),
+    }
 }
 
 /// Builds the optional cross-replica admission accelerator.
@@ -438,7 +454,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // than during the incident that needed the kill switch.
     require_shared_inbox_acknowledgement(control_postgres_url()?.is_some())?;
     let outbox = Arc::new(open_outbox()?);
-    let inbox = Arc::new(open_inbox(&outbox_base())?);
+    let inbox = Arc::new(open_inbox()?);
     let resolver = build_operator_resolver(&trusted_base)?;
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);

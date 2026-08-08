@@ -24,8 +24,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # grpcio: the live stop-enactment proof runs a real Python agent process
+      # using the product SDK's own mTLS PollCommands transport
+      # (packages/sdk-python/src/apex_sdk/control_transport.py).
       - name: Install Python tools
-        run: python -m pip install -U pip cryptography boto3
+        run: python -m pip install -U pip cryptography boto3 "grpcio>=1.60"
 
       # Mirrors deploy/compose/e2e/run_gates.py (Linux path for GitHub-hosted runners).
       - name: Generate live-mTLS PKI and configs
@@ -59,7 +62,12 @@ jobs:
           # added with the cross-replica admission ceiling: control-secrets-init
           # (uid 10002) stages it into the container at 0600, but it has to be
           # able to read the bind-mounted host file first.
-          chmod 644 secrets/control-operator-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password 2>/dev/null || true
+          # Same again for the agent workload credential table, added with
+          # PollCommands: control-secrets-init (uid 10002) stages it into the
+          # container at 0600 but has to read the bind-mounted host file first.
+          # The -a/-b single-entry copies are host-side only (the live proof's
+          # Python agent and the Rust isolation test read them) and stay 0600.
+          chmod 644 secrets/control-operator-tokens secrets/control-agent-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
@@ -333,6 +341,32 @@ jobs:
             docker compose $P logs --no-color --tail 120 control-plane-api jetstream >&2
             exit 1
           }
+
+      # The gate this pass's central claim lives or dies on.
+      #
+      # Every step above proves a command is accepted, recorded, and reaches
+      # the queryable trace. None of them proves the thing an operator
+      # actually wants: that the agent stops. Until PollCommands existed, no
+      # code path anywhere in this repository let an agent receive a command
+      # at all, and the entire suite above stayed green throughout -- which is
+      # exactly why this needs its own gate rather than trust in the component
+      # tests.
+      #
+      # It starts a real Python agent process using the product SDK's own
+      # mTLS transport, submits a real `stop` through the already-working
+      # SubmitCommand RPC, and asserts the agent halted naming *that*
+      # command_id. Run after the fanout verification above, deliberately:
+      # that step reads the last message on the subject, so a command
+      # submitted here first would displace the one it looks for.
+      - name: Live proof -- an operator stop halts a real agent process
+        working-directory: apps/control-plane-api
+        timeout-minutes: 15
+        env:
+          APEX_CONTROL_LIVE_POLL: "1"
+          APEX_CONTROL_LIVE_ENDPOINT: https://localhost:18446
+          APEX_CONTROL_LIVE_SECRETS: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+          APEX_CONTROL_LIVE_PYTHON: python
+        run: cargo test --test live_control_poll --features test-support -- --nocapture --test-threads=1
 
       # `--features postgres` used to change nothing about the running binary:
       # open_outbox() unconditionally built a FileOutbox and the feature only
@@ -626,6 +660,7 @@ jobs:
       - name: Tear down
         if: always()
         run: |
+          rm -f /tmp/apex-live-poll-*.jsonl || true
           docker compose -f deploy/compose/live-mtls/compose.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true
