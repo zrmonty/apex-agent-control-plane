@@ -432,6 +432,7 @@ def main() -> None:
     for basename, common in (
         ("agent-workload-pause-client", "apex-agent-workload-pause"),
         ("agent-workload-budget-client", "apex-agent-workload-budget"),
+        ("agent-workload-inject-client", "apex-agent-workload-inject"),
     ):
         _issue(
             out=out,
@@ -560,6 +561,11 @@ def main() -> None:
             "control-agent-tokens-budget",
             "agent-workload-budget-client.pem",
             "reference-agent-budget",
+        ),
+        (
+            "control-agent-tokens-inject",
+            "agent-workload-inject-client.pem",
+            "reference-agent-inject",
         ),
     )
     for table, certificate, agent_id in agents:

@@ -75,8 +75,12 @@ jobs:
           # Same again for the agent workload credential table, added with
           # PollCommands: control-secrets-init (uid 10002) stages it into the
           # container at 0600 but has to read the bind-mounted host file first.
-          # The -a/-b single-entry copies are host-side only (the live proof's
-          # Python agent and the Rust isolation test read them) and stay 0600.
+          # The single-entry copies (-a, -b, -pause, -budget, -inject) are
+          # host-side only -- the live proofs' Python agents and the Rust
+          # isolation test read them -- and stay 0600. One per proof, not one
+          # shared between them: the inbox redelivers for 30s, so a command
+          # left over from an earlier proof would otherwise reappear inside a
+          # later one.
           chmod 644 secrets/control-operator-tokens secrets/control-agent-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
@@ -362,14 +366,17 @@ jobs:
       # exactly why this needs its own gate rather than trust in the component
       # tests.
       #
-      # It starts a real Python agent process using the product SDK's own
+      # It starts real Python agent processes using the product SDK's own
       # mTLS transport, submits real commands through the already-working
-      # SubmitCommand RPC, and asserts the agent acted on *those* command_ids:
-      # a `stop` halts it, a `pause` stops it taking any action while leaving
-      # it alive and polling, and a `resume` starts it acting again. Run after
-      # the fanout verification above, deliberately: that step reads the last
-      # message on the subject, so a command submitted here first would
-      # displace the one it looks for.
+      # SubmitCommand RPC, and asserts each agent acted on *those* command_ids:
+      # a `stop` halts it; a `pause` stops it taking any action while leaving
+      # it alive and polling, and a `resume` starts it acting again; a
+      # `set_budget` halts it at the turn the arithmetic predicts; and an
+      # `inject` reaches its trace marked untrusted without halting the turn
+      # and without being reinterpreted as a command. Run after the fanout
+      # verification above, deliberately: that step reads the last message on
+      # the subject, so a command submitted here first would displace the one
+      # it looks for.
       - name: Live proof -- operator commands change what a real agent process does
         working-directory: apps/control-plane-api
         timeout-minutes: 15

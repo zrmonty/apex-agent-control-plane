@@ -29,6 +29,11 @@ the ordering of real events rather than on this script's own opinion:
     BUDGET_EXCEEDED <command_id> <n> <kind> <used> <limit> <iso8601>
                                         the ceiling was reached; the tool did
                                         not run and this process exits 0
+    INJECTED <command_id> <n> <sha256> <iso8601>
+                                        untrusted content was surfaced into
+                                        the trace; the turn continues. The
+                                        content is reported as a hash, never
+                                        echoed into this transcript
     NO_STOP <iso8601>                   ran out of iterations; proof failed
 
 Nothing here is production code. It is the harness that makes the claim
@@ -38,6 +43,7 @@ Nothing here is production code. It is the harness that makes the claim
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import time
 from datetime import UTC, datetime
@@ -161,6 +167,23 @@ def main() -> int:
             data = terminal.get("data", {}) if isinstance(terminal, dict) else {}
             status = data.get("status")
             command_id = data.get("control_command_id", "")
+            # Injected content is reported by `command_id` and by the SHA-256
+            # of the content, never by echoing the content itself: this
+            # transcript is a proof artefact that lands in CI logs, and
+            # operator-supplied free text does not belong there. The hash is
+            # enough for an orchestrating test to assert the content arrived
+            # byte-identically. The two lists pair up in order because the
+            # loop emits one `control` event per id, in that order.
+            injected_content = [
+                event["data"]["parameters"]["content"]
+                for event in events
+                if event.get("type") == "control" and event["data"].get("action") == "inject"
+            ]
+            for position, injected in enumerate(data.get("injected_command_ids", ())):
+                digest = hashlib.sha256(
+                    injected_content[position].encode("utf-8")
+                ).hexdigest()
+                _say(f"INJECTED {injected} {iteration} {digest} {_now()}")
             # Announce a newly-installed ceiling *before* reporting the turn,
             # so a transcript shows which turn the budget took effect on. That
             # is what makes "halted exactly at turn N" checkable arithmetic

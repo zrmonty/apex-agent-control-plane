@@ -14,7 +14,7 @@ from uuid import UUID
 from .control import ControlAction, ControlCommand, ControlValidationError
 from .event import EventBuilder
 from .observer import BoundedObserver
-from .validation import MAX_CONTROL_BUDGET_LIMIT
+from .validation import MAX_CONTROL_BUDGET_LIMIT, MAX_UNTRUSTED_CONTROL_CONTENT_BYTES
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 
@@ -102,14 +102,15 @@ class ReferenceReasonActLoop:
        before the budget check so a ceiling arriving on this poll governs this
        turn, and before the pause halt so a ceiling delivered to a paused
        agent is not lost.
-    3. ``pause``/``resume`` -- if the result is "paused", the turn ends here
+    3. ``inject`` -- surfaced into the trace as untrusted content. Never
+       halts, never parsed. Applied before the halting checks so an
+       operator's content is recorded even on a turn that will not act on
+       it, rather than being retrieved (and therefore acknowledged at the
+       gateway) and then dropped.
+    4. ``pause``/``resume`` -- if the result is "paused", the turn ends here
        without executing the tool.
-    4. The budget check -- if accumulated usage has passed the ceiling, the
+    5. The budget check -- if accumulated usage has passed the ceiling, the
        turn ends here without executing the tool.
-
-    ``inject`` is retrieved and deliberately left inert until its own pass
-    lands. An agent that silently ignores it is honest; one that pretends to
-    have consumed it is not.
 
     Within one poll, ``pause`` and ``resume`` are folded in delivery order.
     The gateway returns commands oldest-first (``inbox.rs`` preserves
@@ -289,6 +290,7 @@ class ReferenceReasonActLoop:
         stop: Any | None = None
         pause_intent: Any | None = None
         budgets: list[Any] = []
+        injects: list[Any] = []
         for command in self._poll(emit):
             action = getattr(command, "action", None)
             if action == "stop":
@@ -309,12 +311,13 @@ class ReferenceReasonActLoop:
                 pause_intent = command
             elif action == "set_budget":
                 budgets.append(command)
-            # `inject` is retrieved and deliberately left inert until its own
-            # pass lands, rather than half-implemented: an agent that silently
-            # ignores it is honest, an agent that pretends to have consumed it
-            # is not. Any other action -- including one this SDK decodes as
+            elif action == "inject":
+                injects.append(command)
+            # Any other action -- including one this SDK decodes as
             # "unspecified" because the gateway is newer than the client -- is
-            # inert for the same reason.
+            # inert. A runtime only enacts what it recognises, which is also
+            # why nothing here dispatches on anything but `action`, a value
+            # the gateway derived from its own enum.
 
         if stop is not None:
             emit(
@@ -338,6 +341,13 @@ class ReferenceReasonActLoop:
         extra: dict[str, Any] = {}
         for command in budgets:
             self._apply_budget(command, emit)
+        injected = [
+            command_id
+            for command_id in (self._surface_inject(command, emit) for command in injects)
+            if command_id is not None
+        ]
+        if injected:
+            extra["injected_command_ids"] = injected
         resumed_by = self._apply_pause_intent(pause_intent, emit)
         if self._paused_by is not None:
             # Every turn a paused agent starts still has to *end*, or the
@@ -456,6 +466,112 @@ class ReferenceReasonActLoop:
                 limit=limit,
             ).to_event_data(),
         )
+
+    def _surface_inject(
+        self, command: Any, emit: Callable[[str, dict[str, Any]], None]
+    ) -> str | None:
+        """Records injected content in the trace. Returns its ``command_id``.
+
+        This is the one action whose payload is **operator-supplied free
+        text**, and the security property it has to hold is narrow and
+        absolute: *the content is data that gets displayed, never data this
+        loop parses for instructions*.
+
+        How that is achieved is by construction rather than by filtering:
+
+        - **Nothing reads the content.** The only value this loop ever
+          dispatches on is ``command.action``, which the gateway derived from
+          its own protobuf enum. Content shaped to look like a control
+          directive -- ``action=stop``, a plausible ``command_id``, a
+          ``status`` transition, an instruction addressed to a model -- takes
+          exactly the same path as any other string, because there is no code
+          path that would treat it differently. There is deliberately no
+          sanitiser here: a sanitiser implies the content is on a path where
+          it could matter, and the fix for that is to have no such path.
+        - **It is surfaced as a ``control`` event, not a message.** A
+          ``message`` event has a ``role``, and any role this content could be
+          given (``system``, ``user``, ``assistant``) is a claim about
+          authority it does not have. A ``control`` event under the agent's
+          own actor says exactly what happened -- a control command was
+          received -- and nothing more.
+        - **The untrusted marking is re-stamped locally.** The classification
+          is rebuilt by ``ControlCommand.create(INJECT, ...)``, which sets
+          ``content_classification: "untrusted"`` itself, so the marking
+          cannot be omitted or downgraded by what arrived on the wire. The
+          wire value is *also* required to be ``untrusted``: a command that
+          claims anything else violates the contract the gateway enforces on
+          the way in, and is refused rather than accepted with a corrected
+          label.
+        - **It never touches the prompt.** ``prompt_ref`` is computed at
+          ``turn_start``, before this runs, from the caller's own prompt.
+          There is no merge step for content to be folded into.
+
+        The turn is **not** halted. After the content is recorded the turn
+        proceeds and completes normally, which is what distinguishes `inject`
+        from every other action here.
+        """
+        parameters = getattr(command, "parameters", None)
+        content = parameters.get("content") if isinstance(parameters, dict) else None
+        classification = (
+            parameters.get("content_classification") if isinstance(parameters, dict) else None
+        )
+        oversize = False
+        if isinstance(content, str):
+            try:
+                oversize = len(content.encode("utf-8")) > MAX_UNTRUSTED_CONTROL_CONTENT_BYTES
+            except UnicodeEncodeError:
+                content = None
+        if (
+            not isinstance(content, str)
+            or not content
+            or classification != "untrusted"
+            or oversize
+        ):
+            emit(
+                "error",
+                {
+                    "code": "REFERENCE_INJECT_CONTENT_REFUSED",
+                    "summary": "Injected content was retrieved but could not be surfaced.",
+                    "cause": "The command's content or content_classification did not satisfy the untrusted-content contract.",
+                    "retryable": False,
+                    "recommended_next_steps": [
+                        "Resubmit the injection with non-empty UTF-8 content under 32 KiB.",
+                        "Treat this turn as not having received the content.",
+                    ],
+                },
+            )
+            return None
+        try:
+            emit(
+                "control",
+                ControlCommand.create(
+                    ControlAction.INJECT,
+                    reason_code=self._reason_code(command),
+                    content=content,
+                ).to_event_data(),
+            )
+        except Exception:
+            # Event validation refuses `data` containing high-confidence
+            # secret-like material, and injected content is exactly the field
+            # an operator could paste a credential into. Refusing is right;
+            # crashing the agent is not, and neither is echoing the rejected
+            # text into an error event to explain why. Nothing about the
+            # content reaches this diagnostic.
+            emit(
+                "error",
+                {
+                    "code": "REFERENCE_INJECT_CONTENT_REFUSED",
+                    "summary": "Injected content was retrieved but could not be surfaced.",
+                    "cause": "The content could not be recorded as a validated untrusted-content control event.",
+                    "retryable": False,
+                    "recommended_next_steps": [
+                        "Resubmit the injection without material the event contract refuses to record.",
+                        "Treat this turn as not having received the content.",
+                    ],
+                },
+            )
+            return None
+        return str(getattr(command, "command_id", ""))
 
     def _budget_exceeded(self) -> str | None:
         """The ``command_id`` of the ceiling this turn would breach, if any.
