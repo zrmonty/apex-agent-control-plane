@@ -32,6 +32,11 @@ from .errors import ConfigurationError, EventIntegrityError, TelemetryMappingErr
 from .execution import build_execution, validate_execution
 from .exporter import BoundedGrpcExporter, ExportDeliveryError
 from .event import EventBuilder, canonical_event_bytes, event_hash
+from .ingest_transport import (
+    AgentIngestCredentials,
+    EventEncodingError,
+    GrpcEventIngestTransport,
+)
 from .observer import BoundedObserver, JsonlSink, ObserverStats
 from .telemetry import to_otel_attributes
 from .reference_runtime import ReferenceReasonActLoop
@@ -72,13 +77,16 @@ __all__ = [
     "ControlSpec",
     "ControlValidationError",
     "AgentControlCredentials",
+    "AgentIngestCredentials",
     "ControlPollError",
     "ControlPoller",
     "GrpcControlTransport",
+    "GrpcEventIngestTransport",
     "InMemoryControlPoller",
     "PendingControlCommand",
     "PollResult",
     "EventBuilder",
+    "EventEncodingError",
     "EventIntegrityError",
     "EventValidationError",
     "ExportDeliveryError",

@@ -160,6 +160,24 @@ class BoundedGrpcExporter:
     @staticmethod
     def _classify_failure(error: Exception, correlation: Mapping[str, str]) -> ExportDeliveryError:
         if not isinstance(error, GrpcStatusError):
+            # A transport that has already decided the event itself is the
+            # problem -- the real gRPC transport refuses an envelope it cannot
+            # encode faithfully, before any request is made -- must not be
+            # retried. Re-sending an identical dict produces an identical
+            # refusal, and reporting it as retryable invites an operator to
+            # replay an event that can never be accepted. Nothing in the retry
+            # or backoff policy changes; this only stops a decision the
+            # transport already made from being overwritten with a softer one.
+            if isinstance(error, ApexError) and not error.retryable:
+                return ExportDeliveryError(
+                    error.summary,
+                    correlation=correlation,
+                    code=error.code,
+                    category=error.category,
+                    retryable=False,
+                    cause=error.cause,
+                    recommended_next_steps=error.recommended_next_steps,
+                )
             return ExportDeliveryError(correlation=correlation)
         status = error.status.upper()
         if status not in {"UNAUTHENTICATED", "PERMISSION_DENIED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"}:
