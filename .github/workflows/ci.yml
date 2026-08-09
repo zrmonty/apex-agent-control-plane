@@ -27,7 +27,10 @@ jobs:
         env:
           TEMP: /tmp
           TMP: /tmp
-        run: python -m pytest -q --cov=apex_sdk --cov-fail-under=95
+        # Pin the coverage configuration explicitly so checked-in generated
+        # protobuf/gRPC stubs stay outside the handwritten SDK gate even when
+        # pytest-cov's config discovery changes.
+        run: python -m pytest -q --cov=apex_sdk --cov-config=pyproject.toml --cov-fail-under=95
 
   rust-ingest:
     runs-on: ubuntu-latest
@@ -39,13 +42,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Test (core features)
+      - name: Test (all feature paths)
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
-        run: cargo test --locked --lib --features test-support -- --nocapture
+        run: cargo test --locked --lib --features "test-support,valkey,postgres" -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"
@@ -59,6 +62,7 @@ jobs:
         # (dtolnay stable can differ slightly across minutes). Still surface findings.
         run: |
           set -eu
+          set -o pipefail
           cargo clippy --locked --lib --features test-support -- -W clippy::all 2>&1 | tee /tmp/clippy.log
           # Fail only on hard compiler/clippy errors, not style warnings.
           if grep -E '^error(\[|:)' /tmp/clippy.log; then
@@ -81,7 +85,7 @@ jobs:
           CARGO_HTTP_MULTIPLEXING: "false"
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
-        run: cargo test --locked --features test-support -- --nocapture
+        run: cargo test --locked --features "test-support,postgres,valkey" -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"
@@ -96,6 +100,7 @@ jobs:
         # slightly from the locally pinned toolchain.
         run: |
           set -eu
+          set -o pipefail
           cargo clippy --locked --all-targets --features test-support -- -W clippy::all 2>&1 | tee /tmp/clippy-control.log
           if grep -E '^error(\[|:)' /tmp/clippy-control.log; then
             exit 1
