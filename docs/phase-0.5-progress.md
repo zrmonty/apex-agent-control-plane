@@ -16,7 +16,7 @@ A sixth pass closed the remaining four actions one at a time, each committed and
 | Does an operator's `pause` stop a running agent from taking further actions, and does `resume` start it again? | **Yes**, for the same runtime. Proven live the same way -- the agent takes no tool call for the whole paused window, keeps polling throughout, and resumes on the specific `command_id` the operator submitted. |
 | Does an operator's `set_budget` stop a running agent that goes over the ceiling? | **Yes**, for the same runtime, checked at the same pre-tool-call checkpoint against a running total that persists across turns. Proven live at the *specific* turn the arithmetic predicts, not "eventually". |
 | Does an operator's `inject` reach a running agent? | **Yes**, surfaced into its trace as explicitly untrusted content, and -- unlike the other four -- **without** halting the turn. Proven live with content shaped like a control directive, which the loop treats as inert data. |
-| Does the SDK have a real event-ingest transport? | **No, and this pass did not fix it.** See "Flagged, not fixed" below. |
+| Does the SDK have a real event-ingest transport? | **Yes, as of a seventh pass.** `apex_sdk.GrpcEventIngestTransport` submits `apex.v1.EventEnvelope` over real mTLS to a real `event-ingest`. Proven live against a running container -- first submission accepted, byte-identical replay answered `duplicate`, a distinct id accepted -- and gated in CI. See "The SDK's event-ingest transport" below. |
 
 Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true.
 
@@ -329,9 +329,101 @@ Surfaced 1.056s after submission -- one poll cadence, the same shape as the othe
 
 `.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- an operator stop halts a real agent process** step running exactly this, placed after the JetStream fanout verification (that step reads the last message on the subject, so a command submitted before it would displace the one it looks for).
 
-## Flagged, not fixed
+## The SDK's event-ingest transport
 
-**The SDK has no real event-ingest transport.** `packages/sdk-python/src/apex_sdk/exporter.py` defines `GrpcIngestTransport` as a `Protocol` with **zero concrete implementation anywhere in this repository** -- the only thing satisfying it is `InMemoryIdempotentIngest`, a test double, and every "live" gRPC/mTLS exercise of the ingest path has been a Rust stand-in client rather than this product SDK. `control_transport.py` is new code for a new RPC, not a retrofit of that gap, and does not close it. This is a real, adjacent, pre-existing gap and it is out of scope for this pass by instruction; it needs its own work item.
+**Closed by a seventh pass.** The gap this section used to record was real and long-lived: `packages/sdk-python/src/apex_sdk/exporter.py` defined `GrpcIngestTransport` as a `Protocol` with **zero concrete implementation anywhere in this repository**. The only thing satisfying it was `InMemoryIdempotentIngest`, a test double, and every "live" gRPC/mTLS exercise of the ingest path -- including `apps/event-ingest/tests/adversarial_ingest.rs` -- was a Rust stand-in client rather than the product SDK. Nothing anywhere proved this SDK could submit a single event, and the whole suite stayed green regardless.
+
+`packages/sdk-python/src/apex_sdk/ingest_transport.py` is the real implementation. It mirrors `control_transport.py` rather than forking a second style: the same hand-rolled protobuf codec (no `protoc`/`grpcio-tools` in the SDK's install surface), the same `_read_credential_file` discipline, the same `grpc.secure_channel` construction, the same `ssl_target_name_override` narrowing, and the same refusal to read a server-supplied `details()` string into an error.
+
+### The `google.protobuf.Struct` encoder
+
+The genuinely new piece. `control_transport` only ever needed to *decode* a `Struct` (reading `PollCommands` parameters); an event's `data` is an arbitrary JSON-like object that has to be *encoded*. `Value` is a `oneof kind`, and the wire type per kind is fixed:
+
+| field | kind | wire type |
+|---|---|---|
+| 1 | `null_value` (`NullValue` enum) | varint |
+| 2 | `number_value` (double) | fixed64 |
+| 3 | `string_value` | length-delimited |
+| 4 | `bool_value` | varint |
+| 5 | `struct_value` | length-delimited |
+| 6 | `list_value` | length-delimited |
+
+The trap is proto3 default omission. A scalar field holding its default is omitted -- but a member of a `oneof` is not, because presence *is* the meaning. An encoder that skipped `null_value` because the enum is zero, or `bool_value` because it is `false`, would emit a `Value` with no `kind` set, which prost decodes as `None` and `validation/convert.rs` rejects as `InvalidStructure`. That is asserted directly (`test_every_oneof_kind_is_emitted_even_when_it_holds_its_default_value`). `bool` being a subclass of `int` in Python is the other one: testing `int` first would send every `True` as the number `1.0`.
+
+**How the encoder was verified: against the decoder that was already here.** `control_transport._decode_struct` predates this encoder, was written for a different RPC, has been exercised against a real Rust `control-plane-api`, and was not modified for this work. `test_the_struct_encoder_and_the_sdk_decoder_agree` round-trips twelve payloads -- empty objects, empty keys, both booleans, null, float extremes, heterogeneous arrays, nested objects, non-ASCII text -- through encoder then decoder. An encoder and a decoder can each look right in isolation and still disagree about the wire; only agreement between two independently-written halves is evidence.
+
+The enum tables are checked against the frozen contract by **parsing `contracts/proto/apex/v1/event.proto`** rather than restating it, because a restated table drifts silently and a wrong `EventType` value produces an envelope the gateway canonicalizes -- and therefore hashes -- differently.
+
+### Integrity: the transport re-derives the hash before sending
+
+`google.protobuf.Struct` is not a lossless container for the RFC 8785 canonical form the hash chain is built on: every JSON number becomes an IEEE-754 double. An encoder bug, or simply a value that cannot survive the trip, would put an envelope on the wire that means something other than the dict that was hashed -- and the gateway, which recomputes `canonical_event_hash` from the bytes it received (`apps/event-ingest/src/validation/canonical.rs`), would answer `InvalidIntegrity` with nothing on either side explaining why.
+
+So before anything reaches the network, `GrpcEventIngestTransport` decodes its own encoded `data` back with `_decode_struct`, rebuilds the event around the decoded value, and recomputes `event_hash`. A mismatch is refused locally, non-retryably, with nothing sent and no idempotency slot consumed at the gateway. Integers outside ±(2^53 − 1), non-finite floats, and non-JSON types are refused outright rather than rounded or coerced.
+
+### Authentication targeted, and why there was no choice to make
+
+**mTLS *and* a bearer credential, with the credential pinned to that exact client certificate.** This was verified from `event-ingest`'s own code rather than assumed from `control-plane-api`:
+
+- `apps/event-ingest/src/startup/service.rs` builds exactly one verifier, `BearerTokenVerifier::new_strict(FileBearerResolver::…)`.
+- `new_strict` refuses any request whose TLS peer presented no certificate (`auth/verifier.rs`).
+- `FileBearerResolver::resolve_with_peer` additionally requires `sha256(peer_leaf) == APEX_BEARER_CERT_SHA256` (`startup/auth.rs`).
+- `BearerTokenResolver` is a public trait a deployment could implement differently -- a workload-identity-only resolver would be legal -- but **no such implementation exists in this repository**, and the trait's default `resolve_with_peer` fails closed when a peer certificate is present.
+
+There is therefore no mTLS-only mode to target; offering one would be inventing a client for a server that does not exist.
+
+The two services are structurally similar and their credentials are **not** interchangeable, which the module documents and the tests assert. `control-plane-api` reads a *table* of `token|cert_sha256|agent_id|scopes` rows, so one file describes many agents. `event-ingest`'s `APEX_BEARER_TOKEN_FILE` is the raw token and nothing else, with agent id, scopes and pinned fingerprint in separate environment variables -- a deliberately single-agent staging credential gated behind an explicit `APEX_FILE_BEARER_MODE=single-agent-staging` acknowledgement. The metadata header is `authorization: Bearer …` for both, checked in `auth/verifier.rs` rather than carried over by assumption.
+
+### One change outside the new module
+
+`BoundedGrpcExporter._classify_failure` previously relabelled *any* non-`GrpcStatusError` from a transport as retryable. Nothing could hit that before, because no transport ever returned a considered verdict; the new one does -- it refuses an event it cannot encode faithfully, before any request. Retrying that three times and then handing the caller `retryable: True` would invite a replay of an event that can never be accepted. Retry and backoff policy is untouched; a decision the transport already made simply stops being overwritten with a softer one.
+
+### Live proof
+
+`deploy/compose/gateway-ref/agent_submits_events.py` is a real Python process using `EventBuilder`, `BoundedGrpcExporter` and `GrpcEventIngestTransport` against a running `apex-event-ingest` container over real mTLS. Nothing in the path is a mock, a stub, or `InMemoryIdempotentIngest`.
+
+Run against the `apex-gateway-ref` profile, 2026-08-09:
+
+```
+READY                                                              17:49:50.262354Z
+EVENT     1 019fe7a5-2f36-77cd-9138-78fb7840f94d
+            hash 5bf923189579146a33d00f1bba2724677e2607df56f637063b4da1259d36e77f
+            ts   2026-08-09T17:49:50.262463Z
+ACCEPTED  1 019fe7a5-2f36-77cd-9138-78fb7840f94d                   17:49:50.284765Z
+EVENT     2 019fe7a5-2f36-77cd-9138-78fb7840f94d   (identical id, identical bytes)
+DUPLICATE 2 019fe7a5-2f36-77cd-9138-78fb7840f94d                   17:49:50.286116Z
+EVENT     3 019fe7a5-2f4e-7798-a94b-8cff8717cf74
+            hash 6e8d56e695b294a69c4904b249fa965297edaf5cf769539abea2b574f749f3a4
+ACCEPTED  3 019fe7a5-2f4e-7798-a94b-8cff8717cf74                   17:49:50.296282Z
+STATS attempted=3 delivered=2 duplicates=1 failed=0
+PROOF_COMPLETE                                                     17:49:50.296311Z
+```
+
+**What each line actually establishes:**
+
+- `ACCEPTED 1` is the whole encoder/service contract in one fact. The gateway decoded this client's hand-rolled protobuf, ran `canonical_event_hash` over the bytes it received, and got `5bf9231895…` -- the value the Python SDK computed locally via `rfc8785`. Any disagreement anywhere in the encoding (an omitted `oneof` member, a wrong enum value, a number that did not survive the double, a `prev_hash` sent as `""` instead of absent) produces `InvalidIntegrity` instead. The payload deliberately exercised every `Struct` kind: string, integer, float, boolean, null, array, nested object.
+- `DUPLICATE 2` is the idempotency claim, on the byte-identical event.
+- `ACCEPTED 3` is why `DUPLICATE 2` means anything: a different `event_id` is *not* called a duplicate, so `duplicate` is a property of the id rather than a constant returned for everything after the first request.
+
+**Confirmed against the gateway's own durable state, not the answer it gave.** `duplicate: true` is the service reporting on itself, and this repository has already shipped one bug in exactly that shape. The gateway's file idempotency journal held exactly two rows for the run -- one `committed` per distinct `event_id`, none for the replay:
+
+```
+{"op":"committed", ..., "event_id":"019fe7a5-2f36-77cd-9138-78fb7840f94d", "payload_hash":[58,93,54,7,...]}
+{"op":"committed", ..., "event_id":"019fe7a5-2f4e-7798-a94b-8cff8717cf74", ...}
+```
+
+Both events also reached both downstream stores through the real fanout, carrying the same hashes the SDK computed:
+
+| store | rows | event ids | recorded hash |
+|---|---|---|---|
+| `clickhouse-projection` (`events`) | 2 | `019fe7a5-2f36-…`, `019fe7a5-2f4e-…` | `5bf9231895…`, `6e8d56e695…` |
+| `archive-provider` (`objects`) | 2 | same | same |
+
+`.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- the product SDK submits a real event over real mTLS** step running exactly this against the CI container, placed immediately after the gateway image smoke-start. It re-asserts the transcript's own correlation (the duplicated id is the id submitted first; the third id differs) and then queries the gateway's idempotency journal for exactly one durable row per distinct id.
+
+### Flagged for the owner
+
+- **Two hand-rolled protobuf codecs now exist in this SDK.** `control_transport.py` already noted that its `Struct` decoder was the point at which "generate the stubs instead" stopped being a preference. This module adds the encoder. Both are bounded, tested against each other, and checked against the frozen `.proto`, but the next addition should come with generated stubs rather than a third hand-rolled message.
+- **`deploy/compose/gateway-ref/run.ps1` never computes `APEX_BEARER_CERT_SHA256`.** The CI workflow recomputes the fingerprint in the same run, so CI is unaffected; a local `run.ps1` bring-up leaves the pin unset or stale and every submission fails `UNAUTHENTICATED` at the resolver with nothing indicating why. This was hit while building the live proof locally (a stale `secrets/ingest-http-client.sha256` left over from an earlier PKI regeneration). Not fixed here because `run.ps1` is outside this change's scope.
 
 ## Containerization
 
@@ -759,7 +851,7 @@ What is left of item 0, stated precisely:
 
 **0b. The delivery mechanism is polling only, and the ack state is per-gateway-process.** A JetStream per-agent subject or a long-poll remains open (see the unary-vs-streaming reasoning above), and [[Human-in-the-Loop Approvals]]'s blocking mode likely wants the same infrastructure -- whoever designs it should design it once for both. Concretely, the command inbox has no Postgres backend, so a multi-replica deployment must route each agent to the replica that accepted its commands, and the binary refuses to start otherwise rather than degrade silently.
 
-**0c. There is no real event-ingest transport in the SDK.** See "Flagged, not fixed" above. Pre-existing, adjacent, untouched here.
+**0c. ~~There is no real event-ingest transport in the SDK.~~ Closed by the seventh pass.** `apex_sdk.GrpcEventIngestTransport` implements `exporter.GrpcIngestTransport` for real, over mTLS, and is proven live against a running `event-ingest` container and gated in CI. See "The SDK's event-ingest transport" above -- including the two things that section flags for the owner (two hand-rolled protobuf codecs now exist; `gateway-ref/run.ps1` never computes the certificate pin).
 
 **0d. The reference runtime has one checkpoint, not a control-integration API.** `ReferenceReasonActLoop` checks before its tool call and nowhere else, which is right for a synthetic single-turn loop and is not a general instrumentation surface. **This is now the largest remaining gap between "the controls work" and "the controls work for your runtime":** all five actions are enacted and gated live, but by this one loop. Any other instrumented runtime has to write the same enactment itself, with the same care about redelivery idempotency, halting precedence and untrusted content. Generalising it -- and deciding the fail-open/fail-closed policy on an unreachable control channel -- is a later pass. One concrete consequence of the single checkpoint: usage accrues on the `llm` event, which precedes it, so a budget-halted or paused turn still counts its model call. A runtime with a checkpoint before the model call would not.
 

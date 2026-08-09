@@ -12,13 +12,15 @@ own workload certificate and key, calls ``PollCommands``, and returns what came
 back. It does not submit commands (that is an operator's authority, not an
 agent's), and it is not a general ingest transport.
 
-**Adjacent gap, flagged and deliberately not fixed here:**
-``exporter.GrpcIngestTransport`` is a ``Protocol`` with no concrete
-implementation anywhere in this repository -- the only thing satisfying it is
-``InMemoryIdempotentIngest``, a test double. So the SDK still has no real
-event-ingest transport. That is a separate, pre-existing gap; this module is
-new code for a new RPC, not a retrofit of it. See
-``docs/phase-0.5-progress.md``.
+**The adjacent gap this module used to flag is now closed.** When this was
+written, ``exporter.GrpcIngestTransport`` was a ``Protocol`` with no concrete
+implementation anywhere in the repository -- the only thing satisfying it was
+``InMemoryIdempotentIngest``, a test double -- so the SDK had no real
+event-ingest transport. ``ingest_transport.GrpcEventIngestTransport`` is that
+implementation, and it deliberately mirrors this module's credential loading,
+channel construction and error-classification shape rather than inventing a
+second style. It also *encodes* a ``google.protobuf.Struct``, which is the
+mirror image of the decoder below; the two are tested against each other.
 
 Why the wire format is encoded by hand
 --------------------------------------
