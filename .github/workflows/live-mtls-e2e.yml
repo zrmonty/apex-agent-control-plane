@@ -267,60 +267,6 @@ jobs:
           echo "gateway never began serving" >&2
           exit 1
 
-      # The gate for the SDK's own event-submission path.
-      #
-      # `exporter.GrpcIngestTransport` was a Protocol with no implementation
-      # for this project's whole life: the only thing satisfying it was
-      # `InMemoryIdempotentIngest`, a test double, and every "live" exercise of
-      # ingest admission -- including the adversarial corpus below -- was a Rust
-      # stand-in client. So nothing anywhere proved the *product SDK* could
-      # submit a single event, and the entire suite stayed green regardless.
-      #
-      # This runs a real Python process using `apex_sdk.EventBuilder`,
-      # `BoundedGrpcExporter` and `GrpcEventIngestTransport` against the running
-      # container over real mTLS. An accepted first submission is the whole
-      # contract in one fact: the gateway decoded this client's hand-rolled
-      # protobuf, recomputed the RFC 8785 canonical hash from the bytes it
-      # received, and got the same value the SDK computed locally. An encoder
-      # that disagreed anywhere -- a `Value` oneof member omitted because it held
-      # its default, a number that did not survive the double, a wrong enum
-      # value -- would fail here and nowhere else.
-      - name: Live proof -- the product SDK submits a real event over real mTLS
-        working-directory: deploy/compose
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
-          transcript=/tmp/apex-ingest-sdk-proof.txt
-          python gateway-ref/agent_submits_events.py \
-            --endpoint 127.0.0.1:18445 \
-            --secrets "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/secrets-host" \
-            | tee "$transcript"
-          grep -q '^PROOF_COMPLETE ' "$transcript" \
-            || { echo "the SDK never completed a submission" >&2; exit 1; }
-
-          first="$(awk '$1=="EVENT" && $2=="1" {print $3}' "$transcript")"
-          replayed="$(awk '$1=="DUPLICATE" {print $3}' "$transcript")"
-          second="$(awk '$1=="EVENT" && $2=="3" {print $3}' "$transcript")"
-          echo "first=$first replayed=$replayed second=$second"
-          [ -n "$first" ] && [ "$first" = "$replayed" ] \
-            || { echo "the duplicate was not the event that was submitted first" >&2; exit 1; }
-          [ -n "$second" ] && [ "$second" != "$first" ] \
-            || { echo "the third submission reused the first event id" >&2; exit 1; }
-
-          # `duplicate: true` is the service reporting on itself, and this
-          # repository has already shipped one bug in exactly that shape. Ask
-          # the gateway's own durable idempotency journal instead: each distinct
-          # event id must have committed exactly once, and the replay must have
-          # added no second row for the id it replayed.
-          journal="$(docker compose $P exec -T ingest-gateway cat /var/lib/apex/idempotency.jsonl)"
-          for id in "$first" "$second"; do
-            committed="$(printf '%s\n' "$journal" | grep -c "\"event_id\":\"$id\"" || true)"
-            echo "durable rows for $id: $committed"
-            [ "$committed" = 1 ] \
-              || { echo "expected exactly one durable row for $id, found $committed" >&2; exit 1; }
-          done
-
       # Same reasoning as the gateway step above, for the service that had none
       # of it: apps/control-plane-api shipped with no Dockerfile and no Compose
       # entry at all, so nothing anywhere proved its image could build, its
@@ -409,6 +355,76 @@ jobs:
             docker compose $P logs --no-color --tail 120 control-plane-api jetstream >&2
             exit 1
           }
+
+      # The gate for the SDK's own event-submission path.
+      #
+      # `exporter.GrpcIngestTransport` was a Protocol with no implementation
+      # for this project's whole life: the only thing satisfying it was
+      # `InMemoryIdempotentIngest`, a test double, and every "live" exercise of
+      # ingest admission -- including the adversarial corpus below -- was a Rust
+      # stand-in client. So nothing anywhere proved the *product SDK* could
+      # submit a single event, and the entire suite stayed green regardless.
+      #
+      # This runs a real Python process using `apex_sdk.EventBuilder`,
+      # `BoundedGrpcExporter` and `GrpcEventIngestTransport` against the running
+      # container over real mTLS. An accepted first submission is the whole
+      # contract in one fact: the gateway decoded this client's hand-rolled
+      # protobuf, recomputed the RFC 8785 canonical hash from the bytes it
+      # received, and got the same value the SDK computed locally. An encoder
+      # that disagreed anywhere -- a `Value` oneof member omitted because it held
+      # its default, a number that did not survive the double, a wrong enum
+      # value -- would fail here and nowhere else.
+      #
+      # **Placement is load-bearing, and this step learned it the hard way.**
+      # It must run *after* "Verify control commands reach JetStream", for the
+      # same reason that step's own comment gives about the operator-command
+      # proof below it: the verifier fetches `last_by_subj` on
+      # `apex.events.acme.prod` and treats "a message is there but is not the
+      # control event" as an immediate failure, not a retry. These submissions
+      # land on that exact subject -- the gateway fans every admitted event out
+      # to it -- so running earlier displaced the message the verifier looks
+      # for and failed a gate that had nothing to do with this change (CI run
+      # 31327679638). Using a different scope is not an escape: the workload
+      # credential is bound to `acme/prod` and any other scope is ScopeDenied.
+      # A more robust alternative, flagged rather than taken here, is to make
+      # verify_control_fanout.py retry on a wrong message rather than fail on
+      # it; that is a change to an existing proof's semantics and belongs in
+      # its own pass.
+      - name: Live proof -- the product SDK submits a real event over real mTLS
+        working-directory: deploy/compose
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          transcript=/tmp/apex-ingest-sdk-proof.txt
+          python gateway-ref/agent_submits_events.py \
+            --endpoint 127.0.0.1:18445 \
+            --secrets "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/secrets-host" \
+            | tee "$transcript"
+          grep -q '^PROOF_COMPLETE ' "$transcript" \
+            || { echo "the SDK never completed a submission" >&2; exit 1; }
+
+          first="$(awk '$1=="EVENT" && $2=="1" {print $3}' "$transcript")"
+          replayed="$(awk '$1=="DUPLICATE" {print $3}' "$transcript")"
+          second="$(awk '$1=="EVENT" && $2=="3" {print $3}' "$transcript")"
+          echo "first=$first replayed=$replayed second=$second"
+          [ -n "$first" ] && [ "$first" = "$replayed" ] \
+            || { echo "the duplicate was not the event that was submitted first" >&2; exit 1; }
+          [ -n "$second" ] && [ "$second" != "$first" ] \
+            || { echo "the third submission reused the first event id" >&2; exit 1; }
+
+          # `duplicate: true` is the service reporting on itself, and this
+          # repository has already shipped one bug in exactly that shape. Ask
+          # the gateway's own durable idempotency journal instead: each distinct
+          # event id must have committed exactly once, and the replay must have
+          # added no second row for the id it replayed.
+          journal="$(docker compose $P exec -T ingest-gateway cat /var/lib/apex/idempotency.jsonl)"
+          for id in "$first" "$second"; do
+            committed="$(printf '%s\n' "$journal" | grep -c "\"event_id\":\"$id\"" || true)"
+            echo "durable rows for $id: $committed"
+            [ "$committed" = 1 ] \
+              || { echo "expected exactly one durable row for $id, found $committed" >&2; exit 1; }
+          done
 
       # The gate this pass's central claim lives or dies on.
       #
