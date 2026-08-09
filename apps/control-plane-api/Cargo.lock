@@ -25,6 +25,7 @@ dependencies = [
  "base64",
  "fs2",
  "jsonwebtoken",
+ "postgres",
  "prost",
  "prost-build",
  "prost-types",

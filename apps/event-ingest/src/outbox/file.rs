@@ -19,7 +19,10 @@ fn payload_fingerprint(envelope: &[u8]) -> [u8; 32] {
 }
 
 fn hex_fingerprint(fingerprint: [u8; 32]) -> String {
-    fingerprint.iter().map(|byte| format!("{byte:02x}")).collect()
+    fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn parse_fingerprint(hex: &str) -> Option<[u8; 32]> {
@@ -225,11 +228,22 @@ impl FileOutbox {
     }
 
     fn append(&mut self, record: &FileOutboxRecord) -> Result<(), GatewayError> {
-        let mut encoded = serde_json::to_vec(record)
-            .map_err(|_| GatewayError::new(crate::GatewayErrorCode::Internal))?;
-        encoded.push(b'\n');
-        if encoded.len() > MAX_OUTBOX_RECORD_BYTES {
-            return Err(GatewayError::new(crate::GatewayErrorCode::PayloadTooLarge));
+        self.append_batch(std::slice::from_ref(record))
+    }
+
+    fn append_batch(&mut self, records: &[FileOutboxRecord]) -> Result<(), GatewayError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = Vec::new();
+        for record in records {
+            let mut record_bytes = serde_json::to_vec(record)
+                .map_err(|_| GatewayError::new(crate::GatewayErrorCode::Internal))?;
+            record_bytes.push(b'\n');
+            if record_bytes.len() > MAX_OUTBOX_RECORD_BYTES {
+                return Err(GatewayError::new(crate::GatewayErrorCode::PayloadTooLarge));
+            }
+            encoded.extend_from_slice(&record_bytes);
         }
         let current_size = self
             .file
@@ -304,6 +318,36 @@ impl EventOutbox for FileOutbox {
             })?;
             self.pending.remove(key);
             self.complete.insert(key.clone(), fingerprint);
+        }
+        Ok(())
+    }
+
+    fn mark_complete_many(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
+        let mut records = Vec::new();
+        for key in keys {
+            if self.complete.contains_key(key) {
+                continue;
+            }
+            let Some(event) = self.pending.get(key) else {
+                return Err(GatewayError::internal());
+            };
+            records.push(FileOutboxRecord::Complete {
+                workspace_id: key.workspace_id.clone(),
+                namespace_id: key.namespace_id.clone(),
+                event_id: key.event_id.clone(),
+                envelope_sha256: Some(hex_fingerprint(payload_fingerprint(&event.envelope))),
+            });
+        }
+        self.append_batch(&records)?;
+        for key in keys {
+            if self.complete.contains_key(key) {
+                continue;
+            }
+            let Some(event) = self.pending.remove(key) else {
+                return Err(GatewayError::internal());
+            };
+            let fingerprint = payload_fingerprint(&event.envelope);
+            self.complete.insert(key.clone(), Some(fingerprint));
         }
         Ok(())
     }

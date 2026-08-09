@@ -420,10 +420,18 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         } = build_control_request(input, &operator).map_err(CommandError::into_status)?;
 
         let outbox = self.outbox.clone();
-        let outcome = tokio::task::spawn_blocking(move || submit_command(&outbox, &ingest_request))
-            .await
-            .map_err(|_| CommandError::internal().into_status())?
-            .map_err(CommandError::into_status)?;
+        let inbox = self.inbox.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            // Keep the authoritative outbox commit ahead of the delivery
+            // record, but perform both synchronous backend operations in one
+            // blocking task so the accept path pays one scheduler handoff.
+            let outcome = submit_command(&outbox, &ingest_request)?;
+            inbox.with_lock(|inbox| inbox.record(&delivery))??;
+            Ok::<_, CommandError>(outcome)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?;
 
         // Recorded *after* the outbox commits, and never conditionally on
         // whether the outbox call said "first acceptance" or "duplicate".
@@ -438,13 +446,6 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         // success here on a failed inbox write is the one thing that would be
         // wrong: it is exactly the "recorded but never delivered" shape this
         // whole work item exists to remove.
-        let inbox = self.inbox.clone();
-        tokio::task::spawn_blocking(move || inbox.with_lock(|inbox| inbox.record(&delivery)))
-            .await
-            .map_err(|_| CommandError::internal().into_status())?
-            .map_err(CommandError::into_status)?
-            .map_err(CommandError::into_status)?;
-
         Ok(tonic::Response::new(proto::ControlCommandResponse {
             duplicate: outcome.duplicate,
             command_id,
@@ -508,8 +509,8 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         let policy = self.delivery_policy;
         let now_millis = crate::envelope::now_unix_millis();
         // `spawn_blocking` for the same reason the accept path uses it: the
-        // inbox is behind a mutex, its durable backend fsyncs on every
-        // delivery record, and neither may run on a tonic worker thread.
+        // inbox is behind a mutex, its durable backend performs synchronous
+        // I/O, and neither may run on a tonic worker thread.
         let claimed: Vec<PendingCommand> = tokio::task::spawn_blocking(move || {
             inbox.with_lock(|inbox| {
                 inbox.claim(&target, &CallerScopes(&caller), policy, now_millis)

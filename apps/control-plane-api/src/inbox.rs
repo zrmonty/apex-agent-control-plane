@@ -55,6 +55,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{CommandError, CommandErrorCode};
 
+#[cfg(feature = "postgres")]
+#[path = "inbox_postgres.rs"]
+mod postgres;
+
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresCommandInbox;
+
 /// Suppression window after a delivery attempt before a command becomes
 /// visible again.
 ///
@@ -531,13 +538,30 @@ impl FileCommandInbox {
     }
 
     fn append(&mut self, record: &InboxRecord) -> Result<(), CommandError> {
-        let mut encoded = serde_json::to_vec(record).map_err(|_| CommandError::internal())?;
-        encoded.push(b'\n');
-        if encoded.len() > MAX_INBOX_RECORD_BYTES {
-            return Err(CommandError::new(
-                CommandErrorCode::Capacity,
-                "The durable command inbox is at capacity. Retry after operator remediation.",
-            ));
+        self.append_batch(std::slice::from_ref(record))
+    }
+
+    /// Append a group of journal records with one durability barrier.
+    ///
+    /// A poll claims several commands at once. Fsyncing after every delivery
+    /// record made the file backend's latency scale with the poll size even
+    /// though the records are one atomic claim from the caller's perspective.
+    /// The state is still mutated only after the complete batch is durable.
+    fn append_batch(&mut self, records: &[InboxRecord]) -> Result<(), CommandError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = Vec::new();
+        for record in records {
+            let mut record_bytes = serde_json::to_vec(record).map_err(|_| CommandError::internal())?;
+            record_bytes.push(b'\n');
+            if record_bytes.len() > MAX_INBOX_RECORD_BYTES {
+                return Err(CommandError::new(
+                    CommandErrorCode::Capacity,
+                    "The durable command inbox is at capacity. Retry after operator remediation.",
+                ));
+            }
+            encoded.extend_from_slice(&record_bytes);
         }
         let current = self
             .file
@@ -584,25 +608,32 @@ impl CommandInbox for FileCommandInbox {
         now_millis: u64,
     ) -> Result<Vec<PendingCommand>, CommandError> {
         let keys = self.state.deliverable(target, scopes, policy, now_millis);
+
+        let records: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let attempt = self
+                    .state
+                    .entries
+                    .get(key)
+                    .map_or(0, |entry| entry.attempts)
+                    .saturating_add(1);
+                InboxRecord::Delivered {
+                    workspace_id: key.workspace_id.clone(),
+                    namespace_id: key.namespace_id.clone(),
+                    command_id: key.command_id.clone(),
+                    attempt,
+                    at_millis: now_millis,
+                }
+            })
+            .collect();
+
+        // Durable *before* any command is handed back. One sync for the poll
+        // keeps the same crash semantics while avoiding one fsync per command.
+        self.append_batch(&records)?;
+
         let mut delivered = Vec::with_capacity(keys.len());
         for key in keys {
-            let attempt = self
-                .state
-                .entries
-                .get(&key)
-                .map_or(0, |entry| entry.attempts)
-                .saturating_add(1);
-            // Durable *before* the command is handed back. If this write
-            // fails, the command stays visible and the caller receives fewer
-            // commands rather than an untracked delivery -- the failure mode
-            // that keeps at-least-once honest.
-            self.append(&InboxRecord::Delivered {
-                workspace_id: key.workspace_id.clone(),
-                namespace_id: key.namespace_id.clone(),
-                command_id: key.command_id.clone(),
-                attempt,
-                at_millis: now_millis,
-            })?;
             if let Some(command) = self.state.mark_delivered(&key, now_millis) {
                 delivered.push(command);
             }
@@ -647,6 +678,19 @@ fn is_recordable(command: &PendingCommand) -> bool {
         && command.issued_at.is_ascii()
         && !command.issued_at.chars().any(char::is_control)
         && command.parameters.len() <= MAX_INBOX_RECORD_BYTES / 2
+}
+
+/// Stable semantic identity for a delivery record. The attempt counter is
+/// deliberately excluded: redelivery mutates that operational field but not
+/// the command an agent is meant to enact.
+#[cfg(feature = "postgres")]
+pub(super) fn command_hash(command: &PendingCommand) -> Result<[u8; 32], CommandError> {
+    use sha2::{Digest, Sha256};
+
+    let mut semantic = command.clone();
+    semantic.delivery_attempt = 0;
+    let encoded = serde_json::to_vec(&semantic).map_err(|_| CommandError::internal())?;
+    Ok(Sha256::digest(encoded).into())
 }
 
 fn is_identifier(value: &str) -> bool {

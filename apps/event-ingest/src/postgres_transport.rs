@@ -29,7 +29,7 @@ enum TransportMode {
 /// Connect without allowing a remote plaintext or downgradeable PostgreSQL
 /// session. The connection string is never included in an error because it
 /// can contain database credentials.
-pub(crate) fn connect(connection_string: &str) -> Result<Client, ()> {
+pub fn connect_postgres(connection_string: &str) -> Result<Client, ()> {
     let config = parse_and_classify(connection_string, plaintext_explicitly_allowed())?;
     match config.1 {
         TransportMode::LoopbackPlaintext => config.0.connect(NoTls).map_err(|_| ()),
@@ -63,7 +63,7 @@ pub(crate) fn connect(connection_string: &str) -> Result<Client, ()> {
 /// Serialising the DDL on an advisory lock keyed to the schema removes the
 /// race outright. The lock is session-scoped and released explicitly, so a
 /// caller that dies mid-DDL frees it when its connection closes.
-pub(crate) fn apply_schema(client: &mut Client, lock_key: i64, sql: &str) -> Result<(), ()> {
+pub fn apply_postgres_schema(client: &mut Client, lock_key: i64, sql: &str) -> Result<(), ()> {
     client
         .execute("SELECT pg_advisory_lock($1)", &[&lock_key])
         .map_err(|_| ())?;

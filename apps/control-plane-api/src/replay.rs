@@ -45,6 +45,7 @@ where
                 continue;
             }
             let mut publisher_guard = publisher.lock().await;
+            let mut completed = Vec::new();
             for event in pending {
                 let publish_result = catch_unwind(AssertUnwindSafe(|| {
                     publisher_guard.publish(&event)
@@ -60,7 +61,7 @@ where
                             namespace_id: event.namespace_id().to_owned(),
                             event_id: event.event_id().to_owned(),
                         };
-                        let _ = backend.with_lock_from_async(|outbox| outbox.mark_complete(&key));
+                        completed.push(key);
                     }
                     Ok(Err(error)) => {
                         eprintln!(
@@ -73,6 +74,10 @@ where
                         eprintln!("control-plane-api fanout deferred: panic during publish");
                     }
                 }
+            }
+            if !completed.is_empty() {
+                let _ = backend
+                    .with_lock_from_async(|outbox| outbox.mark_complete_many(&completed));
             }
         }
     })

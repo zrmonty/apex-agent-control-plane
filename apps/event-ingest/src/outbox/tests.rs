@@ -170,6 +170,41 @@ fn file_outbox_survives_restart_and_replays_pending_rows() {
 }
 
 #[test]
+fn file_outbox_settles_a_published_batch_in_one_journal_operation() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-batch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let first = sample_event("018f5c91-2d88-7c00-8000-000000000002");
+    let second = sample_event("018f5c91-2d88-7c00-8000-000000000003");
+    let keys = [first.event_id.as_str(), second.event_id.as_str()]
+        .into_iter()
+        .map(|event_id| OutboxKey {
+            workspace_id: "acme".into(),
+            namespace_id: "prod".into(),
+            event_id: event_id.into(),
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut outbox = FileOutbox::open(&path, &base, 4).unwrap();
+        outbox.enqueue(&first).unwrap();
+        outbox.enqueue(&second).unwrap();
+        outbox.mark_complete_many(&keys).unwrap();
+        assert!(outbox.pending().is_empty());
+    }
+    let mut reopened = FileOutbox::open(&path, &base, 4).unwrap();
+    assert_eq!(reopened.enqueue(&first).unwrap(), EnqueueResult::AlreadyComplete);
+    assert_eq!(reopened.enqueue(&second).unwrap(), EnqueueResult::AlreadyComplete);
+    remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn file_outbox_rejects_corrupt_records_without_dropping_state() {
     let base = std::env::temp_dir().join(format!(
         "apex-outbox-corrupt-{}-{}",

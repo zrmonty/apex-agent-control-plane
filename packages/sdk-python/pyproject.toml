@@ -22,3 +22,9 @@ dev = ["pytest>=9.0", "pytest-cov>=7.0", "cryptography>=42", "grpcio>=1.60", "pr
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=apex_sdk --cov-branch --cov-report=term-missing --cov-fail-under=95"
+
+[tool.coverage.run]
+# Checked-in protobuf/gRPC stubs are generated artifacts, not handwritten SDK
+# behavior. Keep them importable and shipped, but do not make contract
+# regeneration change the SDK's handwritten coverage gate.
+omit = ["src/apex_sdk/_generated/*"]

@@ -16,12 +16,14 @@ use apex_control_plane_api::{
     StaticAgentWorkloadResolver, bounded_control_gateway_server, parse_agent_token_table,
     parse_operator_token_table,
 };
+#[cfg(feature = "postgres")]
+use apex_control_plane_api::PostgresCommandInbox;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
     AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source,
     control_postgres_url, control_valkey_env, keycloak_env, operator_token_source, path, required,
-    require_shared_inbox_acknowledgement, resolve_bind_addr,
+    resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -256,13 +258,19 @@ fn build_agent_resolver(
 }
 
 /// Opens the durable command inbox -- the delivery-state store `PollCommands`
-/// reads and the accept path writes.
-///
-/// File-backed, alongside the file outbox and under the same operator-owned
-/// base. There is deliberately **no** Postgres backend yet; see
-/// `env::require_shared_inbox_acknowledgement` for why a shared outbox without
-/// a shared inbox is refused rather than quietly accepted.
+/// reads and the accept path writes. It follows the outbox backend selection:
+/// a Postgres outbox gets a Postgres inbox, so every replica sees the same
+/// delivery state; otherwise both remain on the operator-owned file volume.
 fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(url) = control_postgres_url()? {
+            let inbox = PostgresCommandInbox::connect(&url, OUTBOX_CAPACITY)
+                .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
+            println!("apex-control-plane-api inbox backend: postgres");
+            return Ok(ControlInboxBackend::new(Box::new(inbox)));
+        }
+    }
     let base = inbox_base();
     std::fs::create_dir_all(&base)?;
     let inbox_file = base.join(
@@ -286,11 +294,8 @@ fn outbox_base() -> PathBuf {
 ///
 /// Defaults to the outbox base, because for a file-backed deployment they are
 /// the same durability volume and splitting them by default would be a way to
-/// lose one of them. It is separately configurable because the Postgres-backed
-/// profile selects a *shared* outbox and therefore mounts no outbox volume at
-/// all -- the inbox still needs somewhere writable, and it is process-local
-/// there by construction (see
-/// `env::require_shared_inbox_acknowledgement`).
+/// lose one of them. It remains separately configurable for deployments that
+/// intentionally choose a local file inbox.
 fn inbox_base() -> PathBuf {
     match std::env::var("APEX_CONTROL_INBOX_BASE") {
         Ok(value) if !value.is_empty() => PathBuf::from(value),
@@ -449,10 +454,6 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // trust boundaries and, in Compose, separate mounts.
     let trusted_base = PathBuf::from(required("APEX_CONTROL_TRUSTED_SECRET_BASE")?);
     let tls = load_server_tls(&trusted_base)?;
-    // Checked before anything is opened, so a deployment that would silently
-    // deliver commands to only one of its replicas fails at startup rather
-    // than during the incident that needed the kill switch.
-    require_shared_inbox_acknowledgement(control_postgres_url()?.is_some())?;
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
     let resolver = build_operator_resolver(&trusted_base)?;

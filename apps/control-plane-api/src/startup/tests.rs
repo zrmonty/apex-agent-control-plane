@@ -14,7 +14,7 @@ use super::env::{
     agent_token_source_value, bounded_secs_value, control_postgres_url_value,
     control_valkey_host_value, expected_token_typ_value, fanout_interval_value,
     global_subjects_value, nats_retry_attempts_value, operator_token_source_value,
-    resolve_bind_addr_value, shared_inbox_acknowledgement_value,
+    resolve_bind_addr_value,
 };
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -35,28 +35,6 @@ fn two_configured_agent_credential_sources_are_refused() {
         agent_token_source_value(None, None).unwrap(),
         AgentTokenSource::Unset
     );
-}
-
-/// A shared (Postgres) outbox alongside a process-local command inbox means an
-/// agent polling replica B never learns about a `stop` accepted by replica A.
-/// That must be a startup error, not a runtime surprise during the incident
-/// the kill switch was for.
-#[test]
-fn a_shared_outbox_with_a_local_inbox_requires_an_explicit_acknowledgement() {
-    // File outbox: single writer, nothing to acknowledge.
-    assert!(shared_inbox_acknowledgement_value(false, None).is_ok());
-    // Shared outbox, no acknowledgement: refused.
-    assert!(shared_inbox_acknowledgement_value(true, None).is_err());
-    // Exact-match acknowledgement, the same fail-closed rule the non-loopback
-    // bind acknowledgement uses. A generous reading of "TRUE"/"1"/"yes" here
-    // would let a copied `.env` silently accept a half-working kill switch.
-    for near_miss in ["TRUE", "True", "1", "yes", "on", " true", ""] {
-        assert!(
-            shared_inbox_acknowledgement_value(true, Some(near_miss)).is_err(),
-            "{near_miss:?} must not be read as consent"
-        );
-    }
-    assert!(shared_inbox_acknowledgement_value(true, Some("true")).is_ok());
 }
 
 fn scratch(label: &str) -> PathBuf {

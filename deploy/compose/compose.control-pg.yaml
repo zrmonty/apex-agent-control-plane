@@ -15,10 +15,10 @@
 # Two replicas, not one, on purpose. A single replica against Postgres proves
 # only that the connection string was read. The claim that actually matters
 # for what comes next (cross-replica rate limiting) is that two processes can
-# share one authoritative outbox: `apex_event_outbox`'s advisory-locked schema
-# DDL, its `ON CONFLICT DO NOTHING` insert race, and its
-# `FOR UPDATE SKIP LOCKED` claim leases. Those were fixed in `event-ingest`;
-# this proves they still hold when *this* crate is the one using them.
+# share the authoritative outbox and command inbox: both schemas use advisory
+# locks, the outbox has its `ON CONFLICT DO NOTHING` insert race handling and
+# `FOR UPDATE SKIP LOCKED` claim leases, and the inbox has row-locked delivery
+# claims. This proves those guarantees when *this* crate is the one using them.
 #
 # Local/CI reference path only -- not a substitute for digest-pinned
 # production images or a managed database.
@@ -71,18 +71,9 @@ x-control-pg-environment: &control-pg-environment
   # No APEX_CONTROL_OUTBOX_BASE/_FILE: with the Postgres backend selected the
   # file outbox is never opened, and leaving them unset is what proves it.
   #
-  # The command *inbox* (delivery state for PollCommands) has no Postgres
-  # backend yet, so each replica keeps its own. On a shared outbox that means
-  # an agent polling replica B never learns about a `stop` accepted by replica
-  # A, and the binary refuses to start without this acknowledgement rather
-  # than let a deployment discover it during the incident the kill switch was
-  # for. It is set here because this profile exists to prove *outbox* sharing
-  # and nothing polls these replicas. A real multi-replica deployment must
-  # wait for the shared inbox -- see docs/phase-0.5-progress.md.
-  APEX_CONTROL_ALLOW_LOCAL_INBOX_WITH_SHARED_OUTBOX: "true"
-  # These replicas mount no data volume (the outbox is Postgres), so the inbox
-  # journal goes on the tmpfs they already have.
-  APEX_CONTROL_INBOX_BASE: /tmp
+  # The command inbox uses the same shared Postgres authority as the outbox,
+  # so an agent may poll either replica and still sees commands accepted by
+  # the other.
   APEX_CONTROL_AGENT_TOKENS_FILE: /var/lib/apex-control-secrets/control_agent_tokens
   APEX_CONTROL_NATS_URL: tls://jetstream:4222
   APEX_CONTROL_NATS_CA_FILE: /var/lib/apex-control-secrets/ca

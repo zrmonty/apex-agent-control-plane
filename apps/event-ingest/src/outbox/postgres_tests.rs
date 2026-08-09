@@ -44,12 +44,7 @@ fn valid_outbox_event(event_id: &str) -> IngestRequest {
     };
     let hash = IngestRequest::canonical_hash_for_test(&envelope).unwrap();
     envelope.integrity.as_mut().unwrap().event_hash = hash;
-    IngestRequest::new(
-        event_id,
-        "acme",
-        "prod",
-        envelope.encode_to_vec(),
-    )
+    IngestRequest::new(event_id, "acme", "prod", envelope.encode_to_vec())
 }
 
 #[test]
@@ -248,7 +243,10 @@ fn postgres_outbox_parallel_enqueue_of_one_event_yields_one_owner() {
         "{enqueued} replicas took ownership of one outbox row \
          (already_pending={already_pending}, internal={internal}, other={other:?})"
     );
-    assert!(other.is_empty(), "unexpected outcomes racing one event: {other:?}");
+    assert!(
+        other.is_empty(),
+        "unexpected outcomes racing one event: {other:?}"
+    );
     assert_eq!(
         internal, 0,
         "{internal} of {WRITERS} concurrent enqueues lost the primary-key race \
@@ -309,7 +307,10 @@ fn postgres_outbox_parallel_enqueue_with_divergent_envelopes_conflicts() {
         }
     }
 
-    assert_eq!(enqueued, 1, "{enqueued} replicas took ownership of one outbox row");
+    assert_eq!(
+        enqueued, 1,
+        "{enqueued} replicas took ownership of one outbox row"
+    );
     assert_eq!(
         internal, 0,
         "{internal} divergent-envelope writers were reported as INTERNAL_FAILURE \
@@ -344,7 +345,8 @@ fn postgres_outbox_concurrent_schema_creation_does_not_fail_a_replica() {
     // EXISTS` short-circuits and the test would pass without exercising
     // anything. Drop first so this is a real cold start every time.
     {
-        let mut admin = crate::postgres_transport::connect(&url).expect("admin connection");
+        let mut admin =
+            crate::postgres_transport::connect_postgres(&url).expect("admin connection");
         admin
             .batch_execute(
                 "DROP TABLE IF EXISTS apex_event_outbox CASCADE;
@@ -408,7 +410,10 @@ fn postgres_outbox_fails_closed_while_the_database_is_down() {
         .enqueue(&valid_outbox_event(&before))
         .expect("enqueue while the database is up");
 
-    assert!(docker(&["stop", "-t", "2", &container]), "could not stop {container}");
+    assert!(
+        docker(&["stop", "-t", "2", &container]),
+        "could not stop {container}"
+    );
 
     let during = unique_event_id(0xd9);
     let result = outbox.enqueue(&valid_outbox_event(&during));
@@ -423,7 +428,10 @@ fn postgres_outbox_fails_closed_while_the_database_is_down() {
         "pending() returned rows from an unreachable database"
     );
 
-    assert!(docker(&["start", &container]), "could not start {container}");
+    assert!(
+        docker(&["start", &container]),
+        "could not start {container}"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     let mut recovered = None;
     while std::time::Instant::now() < deadline {

@@ -248,7 +248,10 @@ fn postgres_idempotency_parallel_reserve_on_one_key_admits_exactly_one() {
         "{reserved} writers were granted the same idempotency key \
          (in_progress={in_progress}, internal={internal}, other={other:?})"
     );
-    assert!(other.is_empty(), "unexpected outcomes racing one key: {other:?}");
+    assert!(
+        other.is_empty(),
+        "unexpected outcomes racing one key: {other:?}"
+    );
 
     // Liveness: a loser must learn that someone else holds the key, not that
     // the server broke. INTERNAL_FAILURE carries no retry guidance and reads as
@@ -323,7 +326,11 @@ fn postgres_idempotency_parallel_reserve_with_divergent_payloads_conflicts() {
         "{internal} divergent-payload writers were reported as INTERNAL_FAILURE \
          instead of a typed conflict"
     );
-    assert_eq!(refused, WRITERS - 1, "every divergent payload must be refused");
+    assert_eq!(
+        refused,
+        WRITERS - 1,
+        "every divergent payload must be refused"
+    );
 }
 
 /// A reservation must not outlive its writer without a release path.
@@ -366,7 +373,10 @@ fn postgres_idempotency_pending_row_from_a_dead_writer_blocks_until_reaped() {
     let reclaimed = survivor
         .reap_expired(std::time::Duration::from_secs(0))
         .expect("reap");
-    assert!(reclaimed >= 1, "the reaper did not reclaim the orphaned reservation");
+    assert!(
+        reclaimed >= 1,
+        "the reaper did not reclaim the orphaned reservation"
+    );
     assert!(
         matches!(
             survivor.reserve(key, hash).expect("reserve"),

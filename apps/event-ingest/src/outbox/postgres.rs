@@ -38,9 +38,9 @@ impl PostgresOutbox {
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_outbox_configuration());
         }
-        let mut client = crate::postgres_transport::connect(connection_string)
+        let mut client = crate::postgres_transport::connect_postgres(connection_string)
             .map_err(|_| GatewayError::invalid_outbox_configuration())?;
-        crate::postgres_transport::apply_schema(
+        crate::postgres_transport::apply_postgres_schema(
             &mut client,
             OUTBOX_SCHEMA_LOCK,
             include_str!("../../../../deploy/postgres/outbox.sql"),
@@ -179,6 +179,58 @@ impl EventOutbox for PostgresOutbox {
                 return Err(GatewayError::internal());
             }
         }
+        Ok(())
+    }
+
+    fn mark_complete_many(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut workspaces = Vec::with_capacity(keys.len());
+        let mut namespaces = Vec::with_capacity(keys.len());
+        let mut event_ids = Vec::with_capacity(keys.len());
+        for key in keys {
+            if !is_scope_identifier(&key.workspace_id)
+                || !is_scope_identifier(&key.namespace_id)
+                || !is_lowercase_uuidv7(&key.event_id)
+            {
+                return Err(GatewayError::invalid_outbox_configuration());
+            }
+            workspaces.push(key.workspace_id.clone());
+            namespaces.push(key.namespace_id.clone());
+            event_ids.push(Uuid::from_str(&key.event_id).map_err(|_| GatewayError::internal())?);
+        }
+
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|_| GatewayError::internal())?;
+        let updated = tx
+            .execute(
+                "UPDATE apex_event_outbox
+                 SET state = 'complete', completed_at = now()
+                 WHERE (workspace_id, namespace_id, event_id) IN
+                       (SELECT * FROM unnest($1::text[], $2::text[], $3::uuid[]))
+                   AND state = 'pending'",
+                &[&workspaces, &namespaces, &event_ids],
+            )
+            .map_err(|_| GatewayError::internal())?;
+        if updated < keys.len() as u64 {
+            let existing: i64 = tx
+                .query_one(
+                    "SELECT COUNT(*)
+                    FROM apex_event_outbox
+                    WHERE (workspace_id, namespace_id, event_id) IN
+                           (SELECT * FROM unnest($1::text[], $2::text[], $3::uuid[]))",
+                    &[&workspaces, &namespaces, &event_ids],
+                )
+                .map_err(|_| GatewayError::internal())?
+                .get(0);
+            if existing != keys.len() as i64 {
+                return Err(GatewayError::internal());
+            }
+        }
+        tx.commit().map_err(|_| GatewayError::internal())?;
         Ok(())
     }
 

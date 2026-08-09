@@ -21,7 +21,7 @@
 //!   distinct outbox file from event-ingest's, by design: the two services
 //!   must not share a durability boundary any more than they share auth.
 //! - `APEX_CONTROL_POSTGRES_URL` -- selects the multi-writer Postgres outbox
-//!   instead of the single-writer file outbox above. Requires a binary built
+//!   and shared command inbox instead of the single-writer file stores above. Requires a binary built
 //!   with `--features postgres`; setting it without that is a hard startup
 //!   error rather than a silent downgrade to the file backend. **It must
 //!   resolve to a database or schema of the control gateway's own.**

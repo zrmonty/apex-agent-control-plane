@@ -76,6 +76,17 @@ fn operator_token(root: &Path) -> String {
         .to_owned()
 }
 
+fn agent_token(root: &Path) -> String {
+    let raw = String::from_utf8(require_secret(root, "control-agent-tokens"))
+        .expect("agent token table must be UTF-8");
+    raw.split(';')
+        .map(str::trim)
+        .find(|entry| !entry.is_empty())
+        .and_then(|entry| entry.split('|').next())
+        .expect("agent token table must have at least one entry")
+        .to_owned()
+}
+
 fn tls_config() -> ClientTlsConfig {
     let root = secrets_dir();
     ClientTlsConfig::new()
@@ -87,11 +98,34 @@ fn tls_config() -> ClientTlsConfig {
         ))
 }
 
+fn agent_tls_config() -> ClientTlsConfig {
+    let root = secrets_dir();
+    ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(require_secret(&root, "ca.pem")))
+        .domain_name("localhost")
+        .identity(Identity::from_pem(
+            require_secret(&root, "agent-workload-client.pem"),
+            require_secret(&root, "agent-workload-client.key"),
+        ))
+}
+
 async fn connect(url: &str) -> tonic::transport::Channel {
     Endpoint::from_shared(url.to_owned())
         .expect("endpoint must parse")
         .tls_config(tls_config())
         .expect("client TLS must configure")
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("{url} must be reachable over mTLS: {error}"))
+}
+
+async fn connect_agent(url: &str) -> tonic::transport::Channel {
+    Endpoint::from_shared(url.to_owned())
+        .expect("endpoint must parse")
+        .tls_config(agent_tls_config())
+        .expect("agent TLS must configure")
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .connect()
@@ -126,6 +160,19 @@ async fn submit(
         format!("Bearer {token}").parse().expect("valid metadata"),
     );
     client.submit_command(request).await.map(|r| r.into_inner())
+}
+
+async fn poll(
+    channel: tonic::transport::Channel,
+    token: &str,
+) -> Result<proto::PollCommandsResponse, tonic::Status> {
+    let mut client = proto::control_gateway_client::ControlGatewayClient::new(channel);
+    let mut request = tonic::Request::new(proto::PollCommandsRequest { max_commands: 64 });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("valid metadata"),
+    );
+    client.poll_commands(request).await.map(|r| r.into_inner())
 }
 
 /// A caller-supplied `command_id` must be a canonical lowercase UUIDv7 whose
@@ -192,6 +239,46 @@ async fn two_replicas_accept_one_command_id_exactly_once() {
         "exactly one of 16 concurrent submissions of one command_id may be a first acceptance"
     );
     assert_eq!(duplicates, 15);
+}
+
+/// The command delivery half must be shared just like the audit outbox half:
+/// accept on replica A, poll on replica B, and observe the command without
+/// relying on sticky routing or a process-local journal.
+#[tokio::test]
+async fn a_command_accepted_on_one_replica_is_pollable_from_the_other() {
+    if !live_enabled() {
+        eprintln!("skip live control Postgres: set APEX_CONTROL_LIVE_POSTGRES=1");
+        return;
+    }
+    apex_control_plane_api::install_rustls_provider();
+    let (url_a, url_b) = endpoints();
+    let root = secrets_dir();
+    let operator = operator_token(&root);
+    let agent = agent_token(&root);
+    let command_id = fresh_command_id();
+    let mut command = stop_command(Some(command_id.clone()));
+    command.agent_id = "reference-agent".to_owned();
+
+    let mut operator_client =
+        proto::control_gateway_client::ControlGatewayClient::new(connect(&url_a).await);
+    let mut request = tonic::Request::new(command);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {operator}").parse().expect("valid metadata"),
+    );
+    operator_client
+        .submit_command(request)
+        .await
+        .expect("replica A must accept the command");
+
+    let response = poll(connect_agent(&url_b).await, &agent)
+        .await
+        .expect("replica B must serve the shared inbox");
+    assert!(
+        response.commands.iter().any(|command| command.command_id == command_id),
+        "replica B did not return the command accepted by replica A"
+    );
+    assert_eq!(response.agent_id, "reference-agent");
 }
 
 /// A command accepted by replica A must be visible as a duplicate to replica

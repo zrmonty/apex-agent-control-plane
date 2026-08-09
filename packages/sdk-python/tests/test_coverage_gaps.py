@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+from types import SimpleNamespace
 from time import monotonic
 
 import pytest
@@ -228,3 +230,107 @@ def test_permission_denied_and_rate_limit_status_mapping() -> None:
     with pytest.raises(ExportDeliveryError) as limited:
         BoundedGrpcExporter(Status("RESOURCE_EXHAUSTED"), max_attempts=1).write(event())
     assert limited.value.code == "INGEST_RATE_LIMITED"
+
+
+def test_control_struct_compatibility_decoder_covers_all_value_kinds() -> None:
+    """Exercise the bounded wire adapter retained for older protobuf runtimes."""
+    from apex_sdk import control_transport as transport
+
+    def varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            chunk = value & 0x7F
+            value >>= 7
+            out.append(chunk | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+
+    def tag(field: int, wire: int) -> bytes:
+        return varint((field << 3) | wire)
+
+    def bytes_field(field: int, body: bytes) -> bytes:
+        return tag(field, 2) + varint(len(body)) + body
+
+    def varint_field(field: int, value: int) -> bytes:
+        return tag(field, 0) + varint(value)
+
+    def entry(key: str, value: bytes) -> bytes:
+        body = bytes_field(1, key.encode()) + bytes_field(2, value)
+        return bytes_field(1, body)
+
+    values = b"".join(
+        (
+            entry("null", varint_field(1, 0)),
+            entry("number", tag(2, 1) + struct.pack("<d", -1.5)),
+            entry("text", bytes_field(3, b"hello")),
+            entry("bool", varint_field(4, 1)),
+            entry("nested", bytes_field(5, b"")),
+            entry("list", bytes_field(6, bytes_field(1, bytes_field(3, b"item")))),
+        )
+    )
+    decoded = transport._decode_struct_wire(values)  # type: ignore[attr-defined]
+    assert decoded == {
+        "null": None,
+        "number": -1.5,
+        "text": "hello",
+        "bool": True,
+        "nested": {},
+        "list": ["item"],
+    }
+
+    # Empty map keys are legal even though protobuf omits the key field.
+    missing_key_entry = bytes_field(2, bytes_field(3, b"empty"))
+    assert transport._decode_struct_wire(bytes_field(1, missing_key_entry)) == {"": "empty"}  # type: ignore[attr-defined]
+
+
+def test_control_struct_decoder_rejects_bad_text_depth_and_entry_bounds() -> None:
+    from apex_sdk import control_transport as transport
+
+    def varint(value: int) -> bytes:
+        out = bytearray()
+        while True:
+            chunk = value & 0x7F
+            value >>= 7
+            out.append(chunk | (0x80 if value else 0))
+            if not value:
+                return bytes(out)
+
+    def bytes_field(field: int, body: bytes) -> bytes:
+        return varint((field << 3) | 2) + varint(len(body)) + body
+
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_text(1, "field")  # type: ignore[attr-defined]
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_text(b"\xff", "field")  # type: ignore[attr-defined]
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_struct_list(b"", transport.MAX_STRUCT_DEPTH + 1)  # type: ignore[attr-defined]
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_struct_wire(b"", transport.MAX_STRUCT_DEPTH + 1)  # type: ignore[attr-defined]
+
+    oversized = b"".join(
+        bytes_field(1, bytes_field(1, str(index).encode()))
+        for index in range(transport.MAX_STRUCT_ENTRIES + 1)
+    )
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_struct_wire(oversized)  # type: ignore[attr-defined]
+
+
+def test_generated_struct_adapter_rejects_unknown_kinds_and_bounds() -> None:
+    from apex_sdk import control_transport as transport
+
+    class Unknown:
+        def WhichOneof(self, _name: str) -> str:
+            return "future_value"
+
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_generated_value(Unknown(), 0)  # type: ignore[attr-defined]
+
+    oversized_list = SimpleNamespace(values=[SimpleNamespace(WhichOneof=lambda _name: None)] * (transport.MAX_STRUCT_ENTRIES + 1))
+    class ListValue:
+        def WhichOneof(self, _name: str) -> str:
+            return "list_value"
+
+        list_value = oversized_list
+
+    with pytest.raises(transport.ControlPollError):
+        transport._decode_generated_value(ListValue(), 0)  # type: ignore[attr-defined]

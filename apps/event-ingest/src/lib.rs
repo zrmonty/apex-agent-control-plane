@@ -59,6 +59,8 @@ pub use outbox::{
     PendingEventReplayer,
 };
 pub use persistence::{FindingJournal, FindingPersistenceError};
+#[cfg(feature = "postgres")]
+pub use postgres_transport::{apply_postgres_schema, connect_postgres};
 pub use publisher::{
     InMemoryPublisher, JetStreamPublisher, JetStreamTransport, RetryingJetStreamTransport,
 };

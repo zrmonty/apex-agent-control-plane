@@ -200,49 +200,6 @@ pub(crate) fn agent_token_source_value(
     }
 }
 
-/// Refuses a process-local command inbox next to a *shared* (Postgres) outbox
-/// unless the operator explicitly acknowledged it.
-///
-/// This is a real correctness boundary, not a style rule. `APEX_CONTROL_POSTGRES_URL`
-/// exists so several replicas can share one authoritative outbox, and the live
-/// two-replica gate proves they do. The command inbox added in this pass has no
-/// Postgres backend yet, so under that configuration each replica keeps its own
-/// file inbox -- and an agent whose `stop` was accepted by replica A learns
-/// nothing by polling replica B. Behind any load balancer that is a coin flip
-/// on whether a kill switch works, which is worse than not having one.
-///
-/// So: a deployment that shares an outbox must either wait for the shared
-/// inbox (the next pass) or state, in one loudly-named variable, that it
-/// understands agents must be routed to the replica that accepted their
-/// command. The lab profile sets the acknowledgement because its two replicas
-/// exist to prove outbox sharing and nothing polls them.
-pub(crate) fn require_shared_inbox_acknowledgement(
-    postgres_outbox_configured: bool,
-) -> Result<(), io::Error> {
-    shared_inbox_acknowledgement_value(
-        postgres_outbox_configured,
-        optional("APEX_CONTROL_ALLOW_LOCAL_INBOX_WITH_SHARED_OUTBOX").as_deref(),
-    )
-}
-
-pub(crate) fn shared_inbox_acknowledgement_value(
-    postgres_outbox_configured: bool,
-    acknowledgement: Option<&str>,
-) -> Result<(), io::Error> {
-    if !postgres_outbox_configured {
-        return Ok(());
-    }
-    // Exact match, the same fail-closed rule `APEX_CONTROL_ALLOW_NONLOCAL_BIND`
-    // uses: "TRUE"/"1"/"yes" must not be generously read as consent.
-    if acknowledgement == Some("true") {
-        return Ok(());
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "APEX_CONTROL_POSTGRES_URL shares one outbox across replicas, but the command inbox is still process-local, so an agent polling a different replica than the one that accepted its command will not receive it. Set APEX_CONTROL_ALLOW_LOCAL_INBOX_WITH_SHARED_OUTBOX=true only if every agent is routed to the replica that accepted its commands.",
-    ))
-}
-
 /// Everything the Keycloak resolver needs, read from the environment.
 ///
 /// The CA arrives here as a *path*; `startup::service` resolves it through

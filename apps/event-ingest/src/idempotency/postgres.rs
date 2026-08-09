@@ -36,9 +36,9 @@ impl PostgresIdempotencyStore {
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_idempotency_configuration());
         }
-        let mut client = crate::postgres_transport::connect(connection_string)
+        let mut client = crate::postgres_transport::connect_postgres(connection_string)
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
-        crate::postgres_transport::apply_schema(
+        crate::postgres_transport::apply_postgres_schema(
             &mut client,
             IDEMPOTENCY_SCHEMA_LOCK,
             include_str!("../../../../deploy/postgres/idempotency.sql"),

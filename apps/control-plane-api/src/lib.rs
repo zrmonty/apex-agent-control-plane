@@ -46,6 +46,8 @@ pub use inbox::{
     FileCommandInbox, InMemoryCommandInbox, InboxKey, MAX_COMMANDS_PER_POLL, PendingCommand,
     PollTarget, RecordResult, ScopeAuthorizer,
 };
+#[cfg(feature = "postgres")]
+pub use inbox::PostgresCommandInbox;
 pub use keycloak::{
     KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
 };
