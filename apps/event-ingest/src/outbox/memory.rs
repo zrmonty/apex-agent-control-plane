@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -18,6 +19,10 @@ pub struct InMemoryOutbox {
     capacity: usize,
     pending: HashMap<OutboxKey, IngestRequest>,
     complete: HashMap<OutboxKey, [u8; 32]>,
+    complete_events: HashMap<OutboxKey, IngestRequest>,
+    completed_at_millis: HashMap<OutboxKey, u64>,
+    next_attempt_at_millis: HashMap<OutboxKey, u64>,
+    quarantined: HashMap<OutboxKey, IngestRequest>,
 }
 
 impl InMemoryOutbox {
@@ -31,6 +36,10 @@ impl InMemoryOutbox {
             capacity,
             pending: HashMap::new(),
             complete: HashMap::new(),
+            complete_events: HashMap::new(),
+            completed_at_millis: HashMap::new(),
+            next_attempt_at_millis: HashMap::new(),
+            quarantined: HashMap::new(),
         })
     }
 }
@@ -47,6 +56,9 @@ impl EventOutbox for InMemoryOutbox {
                 return Ok(EnqueueResult::AlreadyComplete);
             }
             return Err(GatewayError::idempotency_conflict());
+        }
+        if self.quarantined.contains_key(&key) {
+            return Ok(EnqueueResult::AlreadyPending);
         }
         if let Some(existing) = self.pending.get(&key) {
             if existing.envelope == event.envelope {
@@ -66,8 +78,12 @@ impl EventOutbox for InMemoryOutbox {
     fn mark_complete(&mut self, key: &OutboxKey) -> Result<(), GatewayError> {
         match self.pending.remove(key) {
             Some(event) => {
+                let completed_at = now_millis();
                 self.complete
                     .insert(key.clone(), payload_fingerprint(&event.envelope));
+                self.complete_events.insert(key.clone(), event);
+                self.completed_at_millis.insert(key.clone(), completed_at);
+                self.next_attempt_at_millis.remove(key);
                 Ok(())
             }
             // Already complete is idempotent; unknown keys are a caller bug.
@@ -79,4 +95,85 @@ impl EventOutbox for InMemoryOutbox {
     fn pending(&mut self) -> Vec<IngestRequest> {
         self.pending.values().cloned().collect()
     }
+
+    fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError> {
+        let now = now_millis();
+        Ok(self
+            .pending
+            .iter()
+            .filter(|(key, _)| {
+                self.next_attempt_at_millis
+                    .get(*key)
+                    .copied()
+                    .unwrap_or(0)
+                    <= now
+            })
+            .take(limit)
+            .map(|(_, event)| event.clone())
+            .collect())
+    }
+
+    fn recent_completed_batch(
+        &mut self,
+        since_millis: u64,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        Ok(self
+            .completed_at_millis
+            .iter()
+            .filter(|(_, completed_at)| **completed_at >= since_millis)
+            .filter_map(|(key, _)| self.complete_events.get(key).cloned())
+            .take(limit)
+            .collect())
+    }
+
+    fn pending_reconciliation_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        Ok(self.pending.values().take(limit).cloned().collect())
+    }
+
+    fn reschedule(&mut self, keys: &[OutboxKey], after: std::time::Duration) -> Result<(), GatewayError> {
+        // The replay worker owns the in-process monotonic deadline. This
+        // backend is test/embedded durability and has no restart contract for
+        // retry timing; keeping scheduling here would bind paused-clock tests
+        // to wall-clock milliseconds.
+        let _ = (keys, after);
+        Ok(())
+    }
+
+    fn quarantine(&mut self, keys: &[OutboxKey], _reason: &'static str) -> Result<(), GatewayError> {
+        for key in keys {
+            self.next_attempt_at_millis.remove(key);
+            if let Some(event) = self.pending.remove(key) {
+                self.quarantined.insert(key.clone(), event);
+            }
+        }
+        Ok(())
+    }
+
+    fn quarantined_batch(&mut self, limit: usize) -> Result<Vec<OutboxKey>, GatewayError> {
+        Ok(self.quarantined.keys().take(limit).cloned().collect())
+    }
+
+    fn quarantined_count(&mut self) -> Result<u64, GatewayError> {
+        Ok(self.quarantined.len() as u64)
+    }
+
+    fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
+        for key in keys {
+            if let Some(event) = self.quarantined.remove(key) {
+                self.pending.insert(key.clone(), event);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }

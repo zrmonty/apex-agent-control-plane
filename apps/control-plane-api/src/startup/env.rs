@@ -22,6 +22,29 @@ use apex_event_ingest::NatsTlsConfig;
 /// terminates TLS itself.
 pub(crate) const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9443";
 
+pub(crate) fn metrics_bind_addr() -> Result<Option<SocketAddr>, io::Error> {
+    metrics_bind_addr_value(env::var("APEX_CONTROL_METRICS_ADDR").ok().as_deref())
+}
+
+pub(crate) fn metrics_bind_addr_value(raw: Option<&str>) -> Result<Option<SocketAddr>, io::Error> {
+    let Some(raw) = raw.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let addr: SocketAddr = raw.parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_METRICS_ADDR must be a host:port socket address",
+        )
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_METRICS_ADDR must remain loopback-only",
+        ));
+    }
+    Ok(Some(addr))
+}
+
 pub(crate) fn required(name: &str) -> Result<String, io::Error> {
     env::var(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("{name} is required")))
@@ -505,6 +528,28 @@ const DEFAULT_FANOUT_INTERVAL_SECS: u64 = 5;
 /// meant to disable fanout should unset `APEX_CONTROL_NATS_URL` -- which says
 /// so -- rather than leave a worker running on a tick nobody will notice.
 const MAX_FANOUT_INTERVAL_SECS: u64 = 3600;
+
+const DEFAULT_POSTGRES_POOL_SIZE: usize = 4;
+const MAX_POSTGRES_POOL_SIZE: usize = 16;
+
+pub(crate) fn postgres_pool_size() -> Result<usize, io::Error> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_POSTGRES_POOL_SIZE must be an integer from 1 through 16",
+        )
+    };
+    let size = env::var("APEX_CONTROL_POSTGRES_POOL_SIZE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<usize>().map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or(DEFAULT_POSTGRES_POOL_SIZE);
+    if !(1..=MAX_POSTGRES_POOL_SIZE).contains(&size) {
+        return Err(invalid());
+    }
+    Ok(size)
+}
 
 pub(crate) fn fanout_interval() -> Result<Duration, io::Error> {
     fanout_interval_value(env::var("APEX_CONTROL_FANOUT_INTERVAL_SECS").ok().as_deref())

@@ -4,6 +4,8 @@ mod file;
 mod memory;
 #[cfg(feature = "postgres")]
 mod postgres;
+#[cfg(feature = "postgres")]
+mod postgres_replay;
 mod publisher;
 mod types;
 

@@ -429,7 +429,7 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
 
         let outbox = self.outbox.clone();
         let inbox = self.inbox.clone();
-        let (outcome, delivery_result) = tokio::task::spawn_blocking(move || {
+        let accept_result = tokio::task::spawn_blocking(move || {
             // Keep the authoritative outbox commit ahead of the delivery
             // record, but perform both synchronous backend operations in one
             // blocking task so the accept path pays one scheduler handoff.
@@ -437,9 +437,27 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             let delivery_result = inbox.with_lock(|inbox| inbox.record(&delivery))??;
             Ok::<_, CommandError>((outcome, delivery_result))
         })
-        .await
-        .map_err(|_| CommandError::internal().into_status())?
-        .map_err(CommandError::into_status)?;
+        .await;
+        let (outcome, delivery_result) = match accept_result {
+            Ok(Ok(value)) => {
+                self.metrics
+                    .storage_healthy
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                value
+            }
+            Ok(Err(error)) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(error.into_status());
+            }
+            Err(_) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(CommandError::internal().into_status());
+            }
+        };
 
         self.metrics
             .submissions
@@ -532,15 +550,38 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         // `spawn_blocking` for the same reason the accept path uses it: the
         // inbox is behind a mutex, its durable backend performs synchronous
         // I/O, and neither may run on a tonic worker thread.
-        let claimed: Vec<PendingCommand> = tokio::task::spawn_blocking(move || {
+        let claim_result = tokio::task::spawn_blocking(move || {
             inbox.with_lock(|inbox| {
                 inbox.claim(&target, &CallerScopes(&caller), policy, now_millis)
             })
         })
-        .await
-        .map_err(|_| CommandError::internal().into_status())?
-        .map_err(CommandError::into_status)?
-        .map_err(CommandError::into_status)?;
+        .await;
+        let claimed: Vec<PendingCommand> = match claim_result {
+            Ok(Ok(Ok(claimed))) => {
+                self.metrics
+                    .storage_healthy
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                claimed
+            }
+            Ok(Ok(Err(error))) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(error.into_status());
+            }
+            Ok(Err(error)) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(error.into_status());
+            }
+            Err(_) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(CommandError::internal().into_status());
+            }
+        };
 
         self.metrics
             .polls

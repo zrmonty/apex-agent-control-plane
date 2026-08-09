@@ -82,6 +82,7 @@ x-control-pg-environment: &control-pg-environment
   APEX_CONTROL_NATS_USERNAME_FILE: /var/lib/apex-control-secrets/control_nats_username
   APEX_CONTROL_NATS_PASSWORD_FILE: /var/lib/apex-control-secrets/control_nats_password
   APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
+  APEX_CONTROL_POSTGRES_POOL_SIZE: ${APEX_CONTROL_POSTGRES_POOL_SIZE:-4}
   APEX_CONTROL_COMMAND_RETENTION_SECS: ${APEX_CONTROL_COMMAND_RETENTION_SECS:-2592000}
 
 services:

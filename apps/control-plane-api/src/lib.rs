@@ -51,17 +51,22 @@ pub use inbox::{
     PollTarget, RecordResult, ScopeAuthorizer,
 };
 #[cfg(feature = "postgres")]
-pub use inbox::PostgresCommandInbox;
+pub use inbox::{PostgresCommandInbox, RecoveringPostgresCommandInbox};
 pub use keycloak::{
     KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
 };
 pub use outbox::{ControlOutboxBackend, submit_command};
-pub use replay::{spawn_fanout_worker, spawn_fanout_worker_with_metrics};
+#[cfg(feature = "postgres")]
+pub use outbox::RecoveringPostgresOutbox;
+pub use replay::{
+    spawn_fanout_worker, spawn_fanout_worker_with_metrics,
+    spawn_fanout_worker_with_metrics_and_shutdown,
+};
 pub use service::{
     ControlGatewayService, SharedEphemeralStore, bounded_control_gateway_server,
     control_admission_rate_limit_key, control_poll_rate_limit_key,
 };
-pub use status::{GatewayRuntimeMetrics, GatewayRuntimeSnapshot};
+pub use status::{GatewayRuntimeMetrics, GatewayRuntimeSnapshot, GatewayShutdown};
 
 /// Maximum admitted `ControlCommandRequest` size, matching the ingest
 /// envelope ceiling (`apex_event_ingest::MAX_ENVELOPE_BYTES`) plus headroom

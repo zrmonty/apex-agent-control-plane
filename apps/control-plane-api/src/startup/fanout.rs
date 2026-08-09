@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apex_control_plane_api::{
-    ControlOutboxBackend, GatewayRuntimeMetrics, spawn_fanout_worker_with_metrics,
+    ControlOutboxBackend, GatewayRuntimeMetrics, GatewayShutdown,
+    spawn_fanout_worker_with_metrics_and_shutdown,
 };
 use apex_event_ingest::{
     AsyncNatsJetStreamClient, EventPublisher, GatewayError, IngestRequest, JetStreamPublisher,
@@ -179,12 +180,19 @@ impl ControlFanout {
         self,
         backend: Arc<ControlOutboxBackend>,
         metrics: Arc<GatewayRuntimeMetrics>,
+        shutdown: GatewayShutdown,
     ) -> tokio::task::JoinHandle<()> {
         println!(
             "apex-control-plane-api fanout worker started (tick {}s)",
             self.interval.as_secs()
         );
-        spawn_fanout_worker_with_metrics(backend, self.publisher, self.interval, Some(metrics))
+        spawn_fanout_worker_with_metrics_and_shutdown(
+            backend,
+            self.publisher,
+            self.interval,
+            Some(metrics),
+            Some(shutdown),
+        )
     }
 }
 

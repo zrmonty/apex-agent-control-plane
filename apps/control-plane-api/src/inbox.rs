@@ -49,6 +49,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,9 @@ mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresCommandInbox;
+
+#[cfg(feature = "postgres")]
+pub use postgres::RecoveringPostgresCommandInbox;
 
 /// Suppression window after a delivery attempt before a command becomes
 /// visible again.
@@ -948,27 +952,59 @@ fn is_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
-/// Serialises every inbox operation behind one lock, exactly as
-/// [`crate::outbox::ControlOutboxBackend`] does for the outbox and for the same
-/// reasons: the concurrency argument above depends on it, and a future
-/// Postgres-backed implementation would drive its own runtime and block.
+/// Serialises file and in-memory inbox operations behind one lock. Postgres
+/// uses a bounded set of independent connections so concurrent gateway work
+/// can use row-level locking without sharing one process mutex.
 pub struct ControlInboxBackend {
-    inner: Mutex<Box<dyn CommandInbox + Send>>,
+    inner: InboxBackendInner,
+}
+
+enum InboxBackendInner {
+    Single(Mutex<Box<dyn CommandInbox + Send>>),
+    Pool {
+        connections: Vec<Mutex<Box<dyn CommandInbox + Send>>>,
+        next: AtomicUsize,
+    },
 }
 
 impl ControlInboxBackend {
     pub fn new(inbox: Box<dyn CommandInbox + Send>) -> Self {
         Self {
-            inner: Mutex::new(inbox),
+            inner: InboxBackendInner::Single(Mutex::new(inbox)),
         }
+    }
+
+    pub fn new_pool(
+        inboxes: Vec<Box<dyn CommandInbox + Send>>,
+    ) -> Result<Self, CommandError> {
+        if inboxes.is_empty() {
+            return Err(CommandError::internal());
+        }
+        Ok(Self {
+            inner: InboxBackendInner::Pool {
+                connections: inboxes.into_iter().map(Mutex::new).collect(),
+                next: AtomicUsize::new(0),
+            },
+        })
     }
 
     pub fn with_lock<T>(
         &self,
         f: impl FnOnce(&mut Box<dyn CommandInbox + Send>) -> T,
     ) -> Result<T, CommandError> {
-        let mut guard = self.inner.lock().map_err(|_| CommandError::internal())?;
-        Ok(f(&mut guard))
+        match &self.inner {
+            InboxBackendInner::Single(inner) => {
+                let mut guard = inner.lock().map_err(|_| CommandError::internal())?;
+                Ok(f(&mut guard))
+            }
+            InboxBackendInner::Pool { connections, next } => {
+                let index = next.fetch_add(1, Ordering::Relaxed) % connections.len();
+                let mut guard = connections[index]
+                    .lock()
+                    .map_err(|_| CommandError::internal())?;
+                Ok(f(&mut guard))
+            }
+        }
     }
 }
 

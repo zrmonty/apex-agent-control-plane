@@ -15,7 +15,7 @@ use super::env::{
     command_retention_value, control_valkey_host_value, expected_token_typ_value,
     fanout_interval_value,
     global_subjects_value, nats_retry_attempts_value, operator_token_source_value,
-    resolve_bind_addr_value,
+    metrics_bind_addr_value, resolve_bind_addr_value,
 };
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -96,6 +96,19 @@ fn bind_address_rejects_values_that_are_not_socket_addresses() {
             "{bad:?} must not parse as a bind address"
         );
     }
+}
+
+#[test]
+fn metrics_endpoint_is_optional_and_loopback_only() {
+    assert_eq!(metrics_bind_addr_value(None).unwrap(), None);
+    assert_eq!(
+        metrics_bind_addr_value(Some("127.0.0.1:9943")).unwrap()
+            .unwrap()
+            .to_string(),
+        "127.0.0.1:9943"
+    );
+    assert!(metrics_bind_addr_value(Some("0.0.0.0:9943")).is_err());
+    assert!(metrics_bind_addr_value(Some("not-an-address")).is_err());
 }
 
 #[test]

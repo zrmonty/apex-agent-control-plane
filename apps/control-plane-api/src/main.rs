@@ -34,6 +34,13 @@
 //!   (event-ingest's variable) on this process is refused for the same
 //!   reason. This is the Postgres equivalent of the separate `control-outbox`
 //!   volume the file backend already gets.
+//! - `APEX_CONTROL_POSTGRES_POOL_SIZE` -- bounded number of independent
+//!   synchronous Postgres outbox connections, default 4 (1..=16). Each
+//!   connection owns its own client runtime so submissions, replay, retention,
+//!   and reconciliation can make progress concurrently.
+//! - `APEX_CONTROL_METRICS_ADDR` -- optional loopback-only Prometheus text
+//!   endpoint (for example `127.0.0.1:9943`) exposing counters and health
+//!   gauges without adding a remote control surface.
 //! - `APEX_CONTROL_NATS_URL` / `APEX_CONTROL_NATS_CA_FILE` /
 //!   `APEX_CONTROL_NATS_CLIENT_CERT_FILE` / `APEX_CONTROL_NATS_CLIENT_KEY_FILE`
 //!   / `APEX_CONTROL_NATS_USERNAME_FILE` / `APEX_CONTROL_NATS_PASSWORD_FILE`

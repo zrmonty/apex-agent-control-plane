@@ -13,19 +13,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use apex_control_plane_api::{
     BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver, ControlGatewayService,
     ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, GatewayRuntimeMetrics,
+    GatewayShutdown,
     KeycloakConfig,
     KeycloakOperatorCredentialResolver, OperatorTokenAuthenticator, SharedEphemeralStore,
     StaticAgentWorkloadResolver, bounded_control_gateway_server, parse_agent_token_table,
     parse_operator_token_table,
 };
 #[cfg(feature = "postgres")]
-use apex_control_plane_api::PostgresCommandInbox;
+use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
     AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source,
     command_retention, control_postgres_url, control_valkey_env, keycloak_env,
-    operator_token_source, path, required, resolve_bind_addr,
+    metrics_bind_addr, operator_token_source, path, postgres_pool_size, required,
+    resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -270,10 +272,16 @@ fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
     #[cfg(feature = "postgres")]
     {
         if let Some(url) = control_postgres_url()? {
-            let inbox = PostgresCommandInbox::connect(&url, OUTBOX_CAPACITY)
-                .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
+            let pool_size = postgres_pool_size()?;
+            let mut inboxes = Vec::with_capacity(pool_size);
+            for _ in 0..pool_size {
+                let inbox = RecoveringPostgresCommandInbox::connect(&url, OUTBOX_CAPACITY)
+                    .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
+                inboxes.push(Box::new(inbox) as Box<dyn apex_control_plane_api::CommandInbox + Send>);
+            }
             println!("apex-control-plane-api inbox backend: postgres");
-            return Ok(ControlInboxBackend::new(Box::new(inbox)));
+            return ControlInboxBackend::new_pool(inboxes)
+                .map_err(|_| io::Error::other("failed to create control inbox pool").into());
         }
     }
     let base = inbox_base();
@@ -315,6 +323,26 @@ fn now_unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let Ok(mut terminate) = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// Periodically removes settled delivery state while retaining command
 /// identities for the configured idempotency window. This runs independently
 /// of JetStream so a broker outage cannot make the local inbox grow forever.
@@ -323,12 +351,16 @@ fn spawn_inbox_retention_worker(
     inbox: Arc<ControlInboxBackend>,
     retention_millis: u64,
     metrics: Arc<GatewayRuntimeMetrics>,
+    shutdown: GatewayShutdown,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(RETENTION_SWEEP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.wait() => break,
+            }
             let outbox = Arc::clone(&outbox);
             let inbox = Arc::clone(&inbox);
             let metrics = Arc::clone(&metrics);
@@ -367,24 +399,46 @@ fn spawn_inbox_retention_worker(
 fn spawn_inbox_reconciliation_worker(
     outbox: Arc<ControlOutboxBackend>,
     inbox: Arc<ControlInboxBackend>,
+    retention_millis: u64,
     metrics: Arc<GatewayRuntimeMetrics>,
+    shutdown: GatewayShutdown,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(INBOX_RECONCILIATION_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.wait() => break,
+            }
             let outbox = Arc::clone(&outbox);
             let inbox = Arc::clone(&inbox);
             let metrics = Arc::clone(&metrics);
             let _ = tokio::task::spawn_blocking(move || {
-                let Ok(events) = outbox.pending_batch(INBOX_RECONCILIATION_BATCH) else {
+                let now = now_unix_millis();
+                let since = now.saturating_sub(retention_millis);
+                let Ok(mut events) = outbox.pending_reconciliation_batch(
+                    INBOX_RECONCILIATION_BATCH,
+                ) else {
                     metrics
                         .reconciliation_failures
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!("control-plane-api: inbox reconciliation could not read the outbox");
                     return;
                 };
+                let Ok(completed) = outbox.recent_completed_batch(
+                    since,
+                    INBOX_RECONCILIATION_BATCH,
+                ) else {
+                    metrics
+                        .reconciliation_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!(
+                        "control-plane-api: completed-row reconciliation could not read the outbox"
+                    );
+                    return;
+                };
+                events.extend(completed);
                 for event in events {
                     let Ok(delivery) = apex_control_plane_api::pending_command_from_ingest_request(
                         &event,
@@ -422,22 +476,188 @@ fn spawn_inbox_reconciliation_worker(
 }
 
 fn spawn_status_logger(
+    outbox: Arc<ControlOutboxBackend>,
     metrics: Arc<GatewayRuntimeMetrics>,
     ephemeral: Option<SharedEphemeralStore>,
+    shutdown: GatewayShutdown,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.wait() => break,
+            }
             let accelerator_sidelined = ephemeral.as_ref().is_some_and(|store| {
                 store
                     .lock()
                     .map(|guard| guard.accelerator_sidelined())
                     .unwrap_or(true)
             });
+            if let Ok(count) = outbox.quarantined_count() {
+                metrics
+                    .quarantined_current
+                    .store(count, std::sync::atomic::Ordering::Relaxed);
+            }
             eprintln!("{}", metrics.status_line(accelerator_sidelined));
         }
     })
+}
+
+fn spawn_health_monitor(
+    reporter: tonic_health::server::HealthReporter,
+    metrics: Arc<GatewayRuntimeMetrics>,
+    ephemeral: Option<SharedEphemeralStore>,
+    shutdown: GatewayShutdown,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.wait() => {
+                    reporter
+                        .set_service_status(
+                            "apex.v1.ControlGateway",
+                            tonic_health::ServingStatus::NotServing,
+                        )
+                        .await;
+                    reporter
+                        .set_service_status(
+                            "apex.v1.ControlGateway.Fanout",
+                            tonic_health::ServingStatus::NotServing,
+                        )
+                        .await;
+                    reporter
+                        .set_service_status(
+                            "apex.v1.ControlGateway.AdmissionAccelerator",
+                            tonic_health::ServingStatus::NotServing,
+                        )
+                        .await;
+                    break;
+                }
+            }
+            let accelerator_sidelined = ephemeral.as_ref().is_some_and(|store| {
+                store
+                    .lock()
+                    .map(|guard| guard.accelerator_sidelined())
+                    .unwrap_or(true)
+            });
+            metrics.set_accelerator_sidelined(accelerator_sidelined);
+            let storage_status = if metrics
+                .storage_healthy
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tonic_health::ServingStatus::Serving
+            } else {
+                tonic_health::ServingStatus::NotServing
+            };
+            let fanout_status = if metrics
+                .fanout_healthy
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tonic_health::ServingStatus::Serving
+            } else {
+                tonic_health::ServingStatus::NotServing
+            };
+            let accelerator_status = if metrics.accelerator_healthy() {
+                tonic_health::ServingStatus::Serving
+            } else {
+                tonic_health::ServingStatus::NotServing
+            };
+            reporter
+                .set_service_status("apex.v1.ControlGateway", storage_status)
+                .await;
+            reporter
+                .set_service_status("apex.v1.ControlGateway.Fanout", fanout_status)
+                .await;
+            reporter
+                .set_service_status(
+                    "apex.v1.ControlGateway.AdmissionAccelerator",
+                    accelerator_status,
+                )
+                .await;
+        }
+    })
+}
+
+/// Serves a loopback-only Prometheus text endpoint without adding an HTTP
+/// framework to the control plane. It is intentionally separate from the
+/// mTLS command listener: metrics are local diagnostics, never a remote
+/// control surface.
+fn spawn_metrics_server(
+    addr: std::net::SocketAddr,
+    metrics: Arc<GatewayRuntimeMetrics>,
+    shutdown: GatewayShutdown,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("apex-control-plane-api: metrics listener failed: {error}");
+                return;
+            }
+        };
+        eprintln!("apex-control-plane-api metrics listening on http://{addr}/metrics");
+        loop {
+            tokio::select! {
+                _ = shutdown.wait() => break,
+                accepted = listener.accept() => {
+                    let Ok((stream, _peer)) = accepted else { continue; };
+                    let metrics = Arc::clone(&metrics);
+                    tokio::spawn(async move {
+                        serve_metrics_connection(stream, metrics).await;
+                    });
+                }
+            }
+        }
+    })
+}
+
+async fn serve_metrics_connection(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<GatewayRuntimeMetrics>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut request = [0_u8; 4096];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut request))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(0);
+    let first_line = String::from_utf8_lossy(&request[..read])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let snapshot = metrics.snapshot();
+    let (status, body) = if first_line.starts_with("GET /metrics ") {
+        (
+            "200 OK",
+            format!(
+                "# TYPE apex_control_gateway_submissions_total counter\napex_control_gateway_submissions_total {}\n# TYPE apex_control_gateway_duplicate_submissions_total counter\napex_control_gateway_duplicate_submissions_total {}\n# TYPE apex_control_gateway_polls_total counter\napex_control_gateway_polls_total {}\n# TYPE apex_control_gateway_fanout_successes_total counter\napex_control_gateway_fanout_successes_total {}\n# TYPE apex_control_gateway_fanout_failures_total counter\napex_control_gateway_fanout_failures_total {}\n# TYPE apex_control_gateway_quarantined_rows_total counter\napex_control_gateway_quarantined_rows_total {}\n# TYPE apex_control_gateway_quarantined_rows gauge\napex_control_gateway_quarantined_rows {}\n# TYPE apex_control_gateway_storage_healthy gauge\napex_control_gateway_storage_healthy {}\n# TYPE apex_control_gateway_fanout_healthy gauge\napex_control_gateway_fanout_healthy {}\n# TYPE apex_control_gateway_accelerator_configured gauge\napex_control_gateway_accelerator_configured {}\n# TYPE apex_control_gateway_accelerator_sidelined gauge\napex_control_gateway_accelerator_sidelined {}\n",
+                snapshot.submissions,
+                snapshot.duplicate_submissions,
+                snapshot.polls,
+                snapshot.fanout_successes,
+                snapshot.fanout_failures,
+                snapshot.quarantined_rows,
+                snapshot.quarantined_current,
+                u8::from(snapshot.storage_healthy),
+                u8::from(snapshot.fanout_healthy),
+                u8::from(snapshot.accelerator_configured),
+                u8::from(snapshot.accelerator_sidelined),
+            ),
+        )
+    } else {
+        ("404 Not Found", "not found\n".to_owned())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 
 /// Builds the optional cross-replica admission accelerator.
@@ -536,15 +756,22 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
             // Reused verbatim from `event-ingest`, including its multi-replica
             // fixes (advisory-locked schema DDL, `ON CONFLICT DO NOTHING` on
             // the insert race, and `FOR UPDATE SKIP LOCKED` claim leases in
-            // `pending()`). See `env::control_postgres_url_value` for why this
+            // `pending_batch()`). See `env::control_postgres_url_value` for why this
             // must be a different database or schema from the ingest
             // gateway's, given both share the `apex_event_outbox` table name.
-            let outbox = apex_event_ingest::PostgresOutbox::connect(&url, OUTBOX_CAPACITY)
-                .map_err(|error| {
-                    format!("failed to open control outbox: {}", error.code.as_str())
-                })?;
+            let pool_size = postgres_pool_size()?;
+            let mut outboxes = Vec::with_capacity(pool_size);
+            for _ in 0..pool_size {
+                let outbox = RecoveringPostgresOutbox::connect(&url, OUTBOX_CAPACITY)
+                    .map_err(|error| {
+                        format!("failed to open control outbox: {}", error.code.as_str())
+                    })?;
+                outboxes.push(Box::new(outbox) as Box<dyn apex_event_ingest::EventOutbox + Send>);
+            }
             println!("apex-control-plane-api outbox backend: postgres");
-            return Ok(ControlOutboxBackend::new(Box::new(outbox)));
+            println!("apex-control-plane-api postgres outbox pool: {pool_size} connection(s)");
+            return ControlOutboxBackend::new_pool(outboxes)
+                .map_err(|_| io::Error::other("failed to create control outbox pool").into());
         }
     }
     #[cfg(not(feature = "postgres"))]
@@ -584,6 +811,7 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
 /// complete.
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = resolve_bind_addr()?;
+    let metrics_addr = metrics_bind_addr()?;
     // Confines every configured secret path under one operator-owned
     // directory, so a compromised env var cannot point this process at
     // arbitrary files on the host. Same role as `APEX_TRUSTED_SECRET_BASE`
@@ -610,7 +838,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // is synchronous and the wrapper around it must not be constructed on a
     // runtime thread any more than the Postgres client may be.
     let ephemeral = build_ephemeral_store(&trusted_base)?;
-    let metrics = Arc::new(GatewayRuntimeMetrics::default());
+    let metrics = Arc::new(GatewayRuntimeMetrics::new(fanout.is_some()));
+    metrics.set_accelerator_configured(ephemeral.is_some());
     let mut service =
         ControlGatewayService::with_inbox(auth, Arc::clone(&outbox), Arc::clone(&inbox))
             .with_agent_resolver(agent_resolver)
@@ -642,38 +871,106 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tonic_health::ServingStatus::Serving,
             )
             .await;
+        health_reporter
+            .set_service_status(
+                "apex.v1.ControlGateway.Fanout",
+                if fanout.is_some() {
+                    tonic_health::ServingStatus::Serving
+                } else {
+                    tonic_health::ServingStatus::NotServing
+                },
+            )
+            .await;
+        health_reporter
+            .set_service_status(
+                "apex.v1.ControlGateway.AdmissionAccelerator",
+                if metrics.accelerator_healthy() {
+                    tonic_health::ServingStatus::Serving
+                } else {
+                    tonic_health::ServingStatus::NotServing
+                },
+            )
+            .await;
+        let shutdown = GatewayShutdown::default();
         // Bound to a named variable, not `_`, and kept alive until `serve`
         // returns: this is the only thing that turns a durably accepted
         // command into an observable `control` event. Nothing on the accept
         // path touches it -- `ControlGatewayService` never sees the publisher
         // -- so a JetStream outage delays `delivered` and defers the trace
         // write without affecting whether a command is accepted (ADR-0006).
-        let _fanout_worker = fanout.map(|fanout| {
-            fanout.spawn(Arc::clone(&outbox), Arc::clone(&metrics))
+        let fanout_worker = fanout.map(|fanout| {
+            fanout.spawn(
+                Arc::clone(&outbox),
+                Arc::clone(&metrics),
+                shutdown.clone(),
+            )
         });
-        let _inbox_retention_worker =
+        let inbox_retention_worker =
             spawn_inbox_retention_worker(
                 Arc::clone(&outbox),
                 Arc::clone(&inbox),
                 retention_millis,
                 Arc::clone(&metrics),
+                shutdown.clone(),
             );
-        let _inbox_reconciliation_worker =
+        let inbox_reconciliation_worker =
             spawn_inbox_reconciliation_worker(
                 Arc::clone(&outbox),
                 Arc::clone(&inbox),
+                retention_millis,
                 Arc::clone(&metrics),
+                shutdown.clone(),
             );
-        let _status_logger = spawn_status_logger(Arc::clone(&metrics), ephemeral.clone());
+        let status_logger = spawn_status_logger(
+            Arc::clone(&outbox),
+            Arc::clone(&metrics),
+            ephemeral.clone(),
+            shutdown.clone(),
+        );
+        let health_monitor = spawn_health_monitor(
+            health_reporter.clone(),
+            Arc::clone(&metrics),
+            ephemeral.clone(),
+            shutdown.clone(),
+        );
+        let metrics_server = metrics_addr.map(|addr| {
+            spawn_metrics_server(addr, Arc::clone(&metrics), shutdown.clone())
+        });
         println!(
             "apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)"
         );
-        Server::builder()
+        let signal_shutdown = shutdown.clone();
+        let signal_reporter = health_reporter.clone();
+        let serve_result = Server::builder()
             .tls_config(tls)?
             .add_service(health_service)
             .add_service(bounded_control_gateway_server(service))
-            .serve(bind_addr)
-            .await?;
+            .serve_with_shutdown(bind_addr, async move {
+                wait_for_shutdown_signal().await;
+                signal_reporter
+                    .set_service_status(
+                        "apex.v1.ControlGateway",
+                        tonic_health::ServingStatus::NotServing,
+                    )
+                    .await;
+                signal_shutdown.request();
+            })
+            .await;
+        shutdown.request();
+        metrics
+            .shutdowns
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = fanout_worker {
+            let _ = handle.await;
+        }
+        let _ = inbox_retention_worker.await;
+        let _ = inbox_reconciliation_worker.await;
+        let _ = status_logger.await;
+        let _ = health_monitor.await;
+        if let Some(handle) = metrics_server {
+            let _ = handle.await;
+        }
+        serve_result?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     Ok(())

@@ -36,15 +36,59 @@ pub trait EventOutbox: Send {
     /// Returns at most `limit` pending events. The default preserves the
     /// original backend contract; durable backends should override it so a
     /// large backlog is bounded before it reaches the replay worker.
-    fn pending_batch(&mut self, limit: usize) -> Vec<IngestRequest> {
+    fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError> {
         let mut events = self.pending();
         events.truncate(limit);
-        events
+        Ok(events)
+    }
+
+    /// Returns recently completed events so a gateway can repair a delivery
+    /// record that was lost after fanout completed. Backends that cannot
+    /// reconstruct completed payloads may return an empty batch.
+    fn recent_completed_batch(
+        &mut self,
+        _since_millis: u64,
+        _limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        Ok(Vec::new())
+    }
+
+    /// Returns pending events without claiming them or changing retry state.
+    /// Reconciliation uses this read-only view so it cannot steal a replay
+    /// lease or inflate delivery attempts while repairing the inbox.
+    fn pending_reconciliation_batch(
+        &mut self,
+        _limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        Ok(Vec::new())
     }
 
     /// Releases failed claims for a bounded retry. Backends without leases
     /// can keep their existing next-cycle behaviour.
     fn reschedule(&mut self, _keys: &[OutboxKey], _after: Duration) -> Result<(), GatewayError> {
+        Ok(())
+    }
+
+    /// Removes a poison row from the replay work set while retaining its
+    /// durable idempotency identity for operator remediation.
+    fn quarantine(&mut self, _keys: &[OutboxKey], _reason: &'static str) -> Result<(), GatewayError> {
+        Ok(())
+    }
+
+    /// Lists quarantined identities for operator tooling. Payloads are not
+    /// returned by this inventory method.
+    fn quarantined_batch(&mut self, _limit: usize) -> Result<Vec<OutboxKey>, GatewayError> {
+        Ok(Vec::new())
+    }
+
+    fn quarantined_count(&mut self) -> Result<u64, GatewayError> {
+        Ok(0)
+    }
+
+    /// Requeues selected quarantined rows for another bounded replay attempt.
+    /// This is intentionally a separate operation from normal submission so
+    /// remediation is explicit and can be audited by the caller.
+    fn requeue_quarantined(&mut self, _keys: &[OutboxKey]) -> Result<(), GatewayError> {
         Ok(())
     }
 
@@ -74,12 +118,43 @@ impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
         (**self).mark_complete_many(keys)
     }
 
-    fn pending_batch(&mut self, limit: usize) -> Vec<IngestRequest> {
+    fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError> {
         (**self).pending_batch(limit)
+    }
+
+    fn recent_completed_batch(
+        &mut self,
+        since_millis: u64,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        (**self).recent_completed_batch(since_millis, limit)
+    }
+
+    fn pending_reconciliation_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError> {
+        (**self).pending_reconciliation_batch(limit)
     }
 
     fn reschedule(&mut self, keys: &[OutboxKey], after: Duration) -> Result<(), GatewayError> {
         (**self).reschedule(keys, after)
+    }
+
+    fn quarantine(&mut self, keys: &[OutboxKey], reason: &'static str) -> Result<(), GatewayError> {
+        (**self).quarantine(keys, reason)
+    }
+
+    fn quarantined_batch(&mut self, limit: usize) -> Result<Vec<OutboxKey>, GatewayError> {
+        (**self).quarantined_batch(limit)
+    }
+
+    fn quarantined_count(&mut self) -> Result<u64, GatewayError> {
+        (**self).quarantined_count()
+    }
+
+    fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
+        (**self).requeue_quarantined(keys)
     }
 
     fn maintain(

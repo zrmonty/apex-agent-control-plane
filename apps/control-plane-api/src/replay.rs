@@ -9,17 +9,39 @@
 //! command, and it never blocks a new `SubmitCommand` call.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use apex_event_ingest::{EventPublisher, OutboxKey};
+use sha2::{Digest, Sha256};
 
 use crate::outbox::ControlOutboxBackend;
-use crate::status::GatewayRuntimeMetrics;
+use crate::status::{GatewayRuntimeMetrics, GatewayShutdown};
 
 const FANOUT_BATCH_SIZE: usize = 256;
 const MIN_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const MAX_REPLAY_ATTEMPTS: u32 = 8;
+
+fn retry_delay(key: &OutboxKey, attempts: u32) -> Duration {
+    let multiplier = 1_u64 << attempts.min(4);
+    let base = MIN_RETRY_DELAY
+        .saturating_mul(multiplier as u32)
+        .min(MAX_RETRY_DELAY);
+    // A deterministic per-key jitter keeps replicas from retrying a hot set
+    // in lockstep without introducing a new RNG dependency or making tests
+    // nondeterministic.
+    let mut input = Vec::new();
+    input.extend_from_slice(key.workspace_id.as_bytes());
+    input.push(0);
+    input.extend_from_slice(key.namespace_id.as_bytes());
+    input.push(0);
+    input.extend_from_slice(key.event_id.as_bytes());
+    let digest = Sha256::digest(input);
+    let jitter_millis = u16::from_be_bytes([digest[0], digest[1]]) as u64 % 1_000;
+    base + Duration::from_millis(jitter_millis)
+}
 
 /// Spawns a loop that periodically drains pending outbox rows through
 /// `publisher` and marks each complete on success. Failures are logged and
@@ -33,7 +55,7 @@ pub fn spawn_fanout_worker<P>(
 where
     P: EventPublisher + Send + 'static,
 {
-    spawn_fanout_worker_with_metrics(backend, publisher, interval, None)
+    spawn_fanout_worker_with_metrics_and_shutdown(backend, publisher, interval, None, None)
 }
 
 pub fn spawn_fanout_worker_with_metrics<P>(
@@ -45,29 +67,95 @@ pub fn spawn_fanout_worker_with_metrics<P>(
 where
     P: EventPublisher + Send + 'static,
 {
+    spawn_fanout_worker_with_metrics_and_shutdown(backend, publisher, interval, metrics, None)
+}
+
+pub fn spawn_fanout_worker_with_metrics_and_shutdown<P>(
+    backend: Arc<ControlOutboxBackend>,
+    publisher: Arc<tokio::sync::Mutex<P>>,
+    interval: Duration,
+    metrics: Option<Arc<GatewayRuntimeMetrics>>,
+    shutdown: Option<GatewayShutdown>,
+) -> tokio::task::JoinHandle<()>
+where
+    P: EventPublisher + Send + 'static,
+{
     tokio::spawn(async move {
-        let mut failure_streak = 0_u32;
+        let mut wait_for_tick = true;
+        let mut failures: HashMap<OutboxKey, u32> = HashMap::new();
+        let mut not_before: HashMap<OutboxKey, tokio::time::Instant> = HashMap::new();
+        let mut draining = false;
         loop {
-            tokio::time::sleep(interval).await;
+            if wait_for_tick {
+                if let Some(shutdown) = &shutdown {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = shutdown.wait() => { draining = true; }
+                    }
+                } else {
+                    tokio::time::sleep(interval).await;
+                }
+            }
             let backend = backend.clone();
             // `with_lock_from_async`, not `with_lock`: `PostgresOutbox` runs
             // every query through the `postgres` crate's own internal runtime
             // and `block_on`, which panics on a tokio worker thread. See that
             // method's doc comment -- this exact call aborted the worker on
             // the first Postgres-backed container start.
-            let pending = match backend
+            let pending: Vec<apex_event_ingest::IngestRequest> = match backend
                 .with_lock_from_async(|outbox| outbox.pending_batch(FANOUT_BATCH_SIZE))
             {
-                Ok(pending) => pending,
-                Err(_) => {
-                    failure_streak = failure_streak.saturating_add(1);
+                Ok(Ok(pending)) => {
+                    if let Some(metrics) = &metrics {
+                        metrics
+                            .storage_healthy
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let now = tokio::time::Instant::now();
+                    pending
+                        .into_iter()
+                        .filter(|event| {
+                            let key = OutboxKey {
+                                workspace_id: event.workspace_id().to_owned(),
+                                namespace_id: event.namespace_id().to_owned(),
+                                event_id: event.event_id().to_owned(),
+                            };
+                            not_before.get(&key).is_none_or(|deadline| *deadline <= now)
+                        })
+                        .collect()
+                }
+                Ok(Err(_)) | Err(_) => {
+                    if let Some(metrics) = &metrics {
+                        metrics
+                            .storage_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .fanout_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Some(metrics) = &metrics {
+                        metrics
+                            .outbox_read_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if draining {
+                        break;
+                    }
+                    wait_for_tick = true;
                     continue;
                 }
             };
             if pending.is_empty() {
-                failure_streak = 0;
+                if draining {
+                    break;
+                }
+                wait_for_tick = true;
                 continue;
             }
+            if shutdown.as_ref().is_some_and(GatewayShutdown::is_requested) {
+                draining = true;
+            }
+            let was_full_batch = pending.len() == FANOUT_BATCH_SIZE;
             let mut publisher_guard = publisher.lock().await;
             let mut completed = Vec::new();
             let mut failed = Vec::new();
@@ -88,6 +176,9 @@ where
                     Ok(Ok(_outcome)) => {
                         if let Some(metrics) = &metrics {
                             metrics
+                                .fanout_healthy
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            metrics
                                 .fanout_successes
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -95,6 +186,9 @@ where
                     }
                     Ok(Err(error)) => {
                         if let Some(metrics) = &metrics {
+                            metrics
+                                .fanout_healthy
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
                             metrics
                                 .fanout_failures
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -109,6 +203,9 @@ where
                     Err(_) => {
                         if let Some(metrics) = &metrics {
                             metrics
+                                .fanout_healthy
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            metrics
                                 .fanout_failures
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
@@ -118,18 +215,80 @@ where
                 }
             }
             if !completed.is_empty() {
-                let _ = backend
+                let settle_result = backend
                     .with_lock_from_async(|outbox| outbox.mark_complete_many(&completed));
+                if settle_result.is_err() {
+                    if let Some(metrics) = &metrics {
+                        metrics
+                            .storage_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .outbox_write_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    eprintln!("control-plane-api: failed to settle completed fanout rows");
+                    failed.extend(completed);
+                } else {
+                    for key in &completed {
+                        failures.remove(key);
+                        not_before.remove(key);
+                    }
+                }
             }
             if !failed.is_empty() {
-                failure_streak = failure_streak.saturating_add(1);
-                let multiplier = 1_u64 << failure_streak.min(4);
-                let delay = MIN_RETRY_DELAY
-                    .saturating_mul(multiplier as u32)
-                    .min(MAX_RETRY_DELAY);
-                let _ = backend.reschedule(&failed, delay);
+                let mut retry_groups: HashMap<Duration, Vec<OutboxKey>> = HashMap::new();
+                let mut quarantine = Vec::new();
+                for key in failed {
+                    let attempts = failures
+                        .entry(key.clone())
+                        .or_default();
+                    *attempts = attempts.saturating_add(1);
+                    if *attempts >= MAX_REPLAY_ATTEMPTS {
+                        quarantine.push(key);
+                        continue;
+                    }
+                    let delay = retry_delay(&key, *attempts);
+                    not_before.insert(key.clone(), tokio::time::Instant::now() + delay);
+                    retry_groups.entry(delay).or_default().push(key);
+                }
+                for (delay, keys) in retry_groups {
+                    if backend.reschedule(&keys, delay).is_err() {
+                        if let Some(metrics) = &metrics {
+                            metrics
+                                .storage_healthy
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            metrics
+                                .outbox_write_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                if !quarantine.is_empty() {
+                    if backend.quarantine(&quarantine, "replay_attempts_exhausted").is_ok() {
+                        if let Some(metrics) = &metrics {
+                            metrics
+                                .quarantined_rows
+                                .fetch_add(quarantine.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        for key in quarantine {
+                            failures.remove(&key);
+                            not_before.remove(&key);
+                        }
+                    } else if let Some(metrics) = &metrics {
+                        metrics
+                            .storage_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                wait_for_tick = true;
             } else {
-                failure_streak = 0;
+                // A full successful batch means there may be more work. Drain
+                // it immediately rather than adding one configured tick of
+                // latency per batch during a backlog.
+                wait_for_tick = !was_full_batch;
+            }
+            if draining {
+                break;
             }
         }
     })
@@ -318,8 +477,13 @@ mod tests {
         advance_past_one_tick(interval).await;
         assert!(publisher.lock().await.published.is_empty());
 
-        // Second tick: publish succeeds, row is marked complete.
-        advance_past_one_tick(interval).await;
+        // The first failed attempt gets the per-event 2x backoff. Move the
+        // paused clock past that durable retry deadline and the next worker
+        // tick; this asserts the scheduler rather than relying on wall time.
+        tokio::time::advance(MIN_RETRY_DELAY * 2 + Duration::from_secs(1) + interval).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(publisher.lock().await.published.len(), 1);
         let remaining = backend.with_lock(|outbox| outbox.pending()).unwrap();
         assert!(remaining.is_empty());
