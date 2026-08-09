@@ -529,8 +529,13 @@ class AgentControlCredentials:
 
     ca_certificate: bytes
     client_certificate: bytes
-    client_key: bytes
-    token: str
+    #: Private material, excluded from ``repr``. A dataclass prints every field
+    #: by default, so ``logging.debug("%r", credentials)``, a pytest
+    #: ``--showlocals`` traceback, or any exception rendering local variables
+    #: would otherwise put the workload private key and the bearer token into a
+    #: log. Neither is ever needed to identify a credential object.
+    client_key: bytes = field(repr=False)
+    token: str = field(repr=False)
 
     @classmethod
     def from_files(

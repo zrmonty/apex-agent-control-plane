@@ -1184,3 +1184,33 @@ def test_a_status_error_raised_by_the_channel_is_not_rewrapped(pki):
     with pytest.raises(GrpcStatusError) as caught:
         _transport(pki, channel).ingest(_event(), event_id=EVENT_ID)
     assert caught.value.status == "RESOURCE_EXHAUSTED"
+
+
+def test_credentials_never_print_the_private_key_or_the_bearer_token(pki):
+    """A dataclass prints every field by default; these two must not be printed.
+
+    ``logging.debug("%r", credentials)``, a pytest ``--showlocals`` traceback,
+    or any exception renderer that walks local variables would otherwise put a
+    workload private key and a live bearer credential into a log. Asserted for
+    both transports' credential objects, because they are the same shape and a
+    leak in either is the same incident.
+    """
+    from apex_sdk.control_transport import AgentControlCredentials
+
+    ingest = _credentials(pki)
+    control = AgentControlCredentials(
+        ca_certificate=pki["ca_pem"],
+        client_certificate=pki["client_cert_pem"],
+        client_key=pki["client_key_pem"],
+        token="agent-a-token-abcdefgh",
+    )
+    for credentials, token in ((ingest, "gateway-ref-token"), (control, "agent-a-token-abcdefgh")):
+        rendered = repr(credentials)
+        assert token not in rendered
+        assert "PRIVATE KEY" not in rendered
+        # The certificate material is not secret and stays visible, so the
+        # object is still identifiable in a diagnostic.
+        assert "BEGIN CERTIFICATE" in rendered
+    # The values themselves are still reachable by the code that needs them.
+    assert ingest.token == "gateway-ref-token"
+    assert ingest.client_key == pki["client_key_pem"]
