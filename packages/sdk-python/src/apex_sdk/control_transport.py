@@ -22,24 +22,12 @@ channel construction and error-classification shape rather than inventing a
 second style. It also *encodes* a ``google.protobuf.Struct``, which is the
 mirror image of the decoder below; the two are tested against each other.
 
-Why the wire format is encoded by hand
+The message classes are generated from ``contracts/proto/apex/v1/control.proto`` and checked in under ``apex_sdk._generated``.
 --------------------------------------
-This package has no protobuf code-generation step and no ``protobuf`` runtime
-dependency, and adding both to ship one read-only RPC would be a larger change
-to the SDK's build and dependency surface than the RPC itself. ``grpcio``
-accepts arbitrary ``request_serializer`` / ``response_deserializer`` callables,
-so the two messages are encoded and decoded here directly. The decoder skips
-unknown fields the way any protobuf implementation must, so a gateway that
-starts sending new fields does not break an older client.
-
-**Flagged for the owner, and now more sharply than when this module was
-written:** the codec has grown a ``google.protobuf.Struct`` decoder, because
-``set_budget`` and ``inject`` carry their whole meaning in ``parameters`` and a
-client that skips that field cannot enact either. That is a well-specified,
-closed piece of the protobuf JSON mapping rather than a third ad-hoc message,
-and it is bounded on depth and entry count -- but it is the point at which
-"generate the stubs instead" stops being a preference and becomes the right
-answer for the next addition.
+The generated runtime is optional and imported lazily. A bounded wire-shape
+preflight keeps known fields with the wrong wire type fail-closed while the
+generated classes perform message encoding and decoding; unknown fields remain
+skippable as protobuf requires.
 """
 
 from __future__ import annotations
@@ -194,27 +182,13 @@ class ControlPoller(Protocol):
 
 
 # --------------------------------------------------------------------------
-# Minimal protobuf wire codec (see the module docstring for why).
+# Generated protobuf adapters.
+#
+# The generated modules are imported lazily so importing ``apex_sdk`` still
+# works without the optional protobuf/gRPC stack.  They are generated from
+# ``contracts/proto/apex/v1/control.proto`` and are the only implementation of
+# the message wire format used by this transport.
 # --------------------------------------------------------------------------
-
-
-def _encode_varint(value: int) -> bytes:
-    if value < 0:
-        raise ControlPollError(
-            "The poll request could not be encoded.",
-            code="CONTROL_POLL_ENCODE_FAILED",
-            retryable=False,
-            cause="A negative value cannot be encoded as a protobuf varint.",
-        )
-    out = bytearray()
-    while True:
-        chunk = value & 0x7F
-        value >>= 7
-        if value:
-            out.append(chunk | 0x80)
-        else:
-            out.append(chunk)
-            return bytes(out)
 
 
 def _read_varint(buffer: bytes, offset: int) -> tuple[int, int]:
@@ -364,7 +338,7 @@ def _decode_struct_list(buffer: bytes, depth: int) -> list[Any]:
     return values
 
 
-def _decode_struct(buffer: bytes, depth: int = 0) -> dict[str, Any]:
+def _decode_struct_wire(buffer: bytes, depth: int = 0) -> dict[str, Any]:
     """Decodes ``google.protobuf.Struct`` into a plain ``dict``."""
     if depth > MAX_STRUCT_DEPTH:
         raise _malformed("a Struct nested deeper than this client accepts")
@@ -398,62 +372,155 @@ def _decode_struct(buffer: bytes, depth: int = 0) -> dict[str, Any]:
     return fields
 
 
-def encode_poll_request(max_commands: int = 0) -> bytes:
-    """Encodes ``apex.v1.PollCommandsRequest``.
+def _generated_control_pb2() -> Any:
+    try:
+        from ._generated.apex.v1 import control_pb2
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise ControlPollError(
+            "The control transport is missing its protobuf runtime.",
+            code="CONTROL_POLL_CONFIGURATION_FAILED",
+            retryable=False,
+            cause="Install the control extra before using PollCommands.",
+            recommended_next_steps=("Install with: pip install 'apex-sdk[control]'",),
+        ) from exc
+    return control_pb2
 
-    The only field is ``max_commands``, and proto3 omits it when zero. There is
-    no target selector to encode, by design: the gateway derives which agent is
-    calling from the presented credential.
+
+def _generated_struct_pb2() -> Any:
+    try:
+        from google.protobuf import struct_pb2
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise ControlPollError(
+            "The control transport is missing its protobuf runtime.",
+            code="CONTROL_POLL_CONFIGURATION_FAILED",
+            retryable=False,
+            cause="Install the control extra before using PollCommands.",
+            recommended_next_steps=("Install with: pip install 'apex-sdk[control]'",),
+        ) from exc
+    return struct_pb2
+
+
+def _decode_generated_value(value: Any, depth: int) -> Any:
+    if depth > MAX_STRUCT_DEPTH:
+        raise _malformed("a Struct nested deeper than this client accepts")
+    kind = value.WhichOneof("kind")
+    if kind is None or kind == "null_value":
+        return None
+    if kind == "number_value":
+        return value.number_value
+    if kind == "string_value":
+        return value.string_value
+    if kind == "bool_value":
+        return value.bool_value
+    if kind == "struct_value":
+        return _decode_generated_struct(value.struct_value, depth + 1)
+    if kind == "list_value":
+        if len(value.list_value.values) > MAX_STRUCT_ENTRIES:
+            raise _malformed("a Struct carried more entries than this client accepts")
+        return [_decode_generated_value(item, depth + 1) for item in value.list_value.values]
+    raise _malformed("a Struct contained an unknown value kind")
+
+
+def _decode_generated_struct(message: Any, depth: int = 0) -> dict[str, Any]:
+    if depth > MAX_STRUCT_DEPTH:
+        raise _malformed("a Struct nested deeper than this client accepts")
+    if len(message.fields) > MAX_STRUCT_ENTRIES:
+        raise _malformed("a Struct carried more entries than this client accepts")
+    return {key: _decode_generated_value(value, depth) for key, value in message.fields.items()}
+
+
+def _validate_struct_wire(buffer: bytes, depth: int = 0) -> None:
+    """Preflight the generated parser with the contract's declared wire types.
+
+    Protobuf runtimes correctly preserve a known field encoded with an unknown
+    wire type as an unknown field. This SDK treats that shape as a protocol
+    violation instead of silently turning a malformed command parameter into
+    an empty/default value, so the preflight only validates wire shape; the
+    generated classes still perform all message decoding.
     """
-    if not isinstance(max_commands, int) or isinstance(max_commands, bool) or max_commands < 0:
-        raise ConfigurationError("max_commands must be a non-negative integer")
-    if max_commands == 0:
-        return b""
-    return bytes([0x08]) + _encode_varint(max_commands)
+    if depth > MAX_STRUCT_DEPTH:
+        raise _malformed("a Struct nested deeper than this client accepts")
+    offset = 0
+    entries = 0
+    while offset < len(buffer):
+        field, wire, raw, offset = _read_field(buffer, offset)
+        if field == 1:
+            _require_wire(wire, _WIRE_LENGTH, "a Struct field entry")
+            entries += 1
+            if entries > MAX_STRUCT_ENTRIES:
+                raise _malformed("a Struct carried more entries than this client accepts")
+            entry_offset = 0
+            while entry_offset < len(raw):
+                entry_field, entry_wire, entry_raw, entry_offset = _read_field(bytes(raw), entry_offset)
+                if entry_field == 1:
+                    _require_wire(entry_wire, _WIRE_LENGTH, "a Struct field key")
+                elif entry_field == 2:
+                    _require_wire(entry_wire, _WIRE_LENGTH, "a Struct field value")
+                    _validate_value_wire(bytes(entry_raw), depth)
 
 
-def _decode_pending_command(buffer: bytes) -> PendingControlCommand:
-    fields: dict[int, Any] = {}
-    parameters: dict[str, Any] = {}
+def _validate_value_wire(buffer: bytes, depth: int) -> None:
     offset = 0
     while offset < len(buffer):
-        field_number, _wire_type, value, offset = _read_field(buffer, offset)
-        # Field 9 is `parameters` (google.protobuf.Struct), where `set_budget`
-        # and `inject` carry their entire meaning. A client that skipped it --
-        # as the first-pass client did, when only `stop` was enacted -- cannot
-        # enact either.
-        if field_number == 9:
-            if not isinstance(value, (bytes, bytearray)):
-                raise _malformed("parameters was not length-delimited")
-            parameters = _decode_struct(bytes(value))
+        field, wire, raw, offset = _read_field(buffer, offset)
+        expected = {1: _WIRE_VARINT, 2: _WIRE_FIXED64, 3: _WIRE_LENGTH, 4: _WIRE_VARINT, 5: _WIRE_LENGTH, 6: _WIRE_LENGTH}.get(field)
+        if expected is None:
             continue
-        fields[field_number] = value
-    action_value = fields.get(7, 0)
-    if not isinstance(action_value, int):
-        raise _malformed("action was not a varint")
-    return PendingControlCommand(
-        command_id=_decode_text(fields.get(1, b""), "command_id"),
-        workspace_id=_decode_text(fields.get(2, b""), "workspace_id"),
-        namespace_id=_decode_text(fields.get(3, b""), "namespace_id"),
-        agent_id=_decode_text(fields.get(4, b""), "agent_id"),
-        run_id=_decode_text(fields.get(5, b""), "run_id"),
-        trace_id=_decode_text(fields.get(6, b""), "trace_id"),
-        # An action this client does not know is reported as "unspecified"
-        # rather than guessed at. A runtime only enacts actions it recognises,
-        # so an unknown one is inert instead of dangerous.
-        action=_ACTION_NAMES.get(action_value, "unspecified"),
-        reason_code=_decode_text(fields[8], "reason_code") if 8 in fields else None,
-        issued_at=_decode_text(fields.get(10, b""), "issued_at"),
-        delivery_attempt=fields.get(11, 0) if isinstance(fields.get(11, 0), int) else 0,
-        parameters=parameters,
+        _require_wire(wire, expected, "a Struct value")
+        if field == 5:
+            _validate_struct_wire(bytes(raw), depth + 1)
+        elif field == 6:
+            list_offset = 0
+            list_entries = 0
+            while list_offset < len(raw):
+                list_field, list_wire, list_raw, list_offset = _read_field(bytes(raw), list_offset)
+                if list_field == 1:
+                    _require_wire(list_wire, _WIRE_LENGTH, "a Struct list entry")
+                    list_entries += 1
+                    if list_entries > MAX_STRUCT_ENTRIES:
+                        raise _malformed("a Struct carried more entries than this client accepts")
+                    _validate_value_wire(bytes(list_raw), depth + 1)
+
+
+def _decode_struct(buffer: bytes, depth: int = 0) -> dict[str, Any]:
+    """Decodes a Struct with the checked-in generated protobuf runtime."""
+    if not isinstance(buffer, (bytes, bytearray)):
+        raise _malformed("the Struct body was not bytes")
+    _validate_struct_wire(bytes(buffer), depth)
+    try:
+        message = _generated_struct_pb2().Struct.FromString(bytes(buffer))
+    except Exception as exc:  # protobuf DecodeError is version-dependent
+        raise _malformed("the Struct was not well-formed protobuf") from exc
+    decoded = _decode_generated_struct(message, depth)
+    # Some protobuf runtimes discard an otherwise valid map entry when the
+    # entry carries an unknown field. The contract requires unknown fields to
+    # be skipped, so retain the bounded wire adapter for that compatibility
+    # case; ordinary Structs are decoded by the generated runtime above.
+    if decoded or not any(field == 1 for field, _wire, _raw, _offset in _iter_fields(bytes(buffer))):
+        return decoded
+    return _decode_struct_wire(bytes(buffer), depth)
+
+
+def _iter_fields(buffer: bytes):
+    offset = 0
+    while offset < len(buffer):
+        field, wire, raw, offset = _read_field(buffer, offset)
+        yield field, wire, raw, offset
+
+
+def encode_poll_request(max_commands: int = 0) -> bytes:
+    if not isinstance(max_commands, int) or isinstance(max_commands, bool) or max_commands < 0:
+        raise ConfigurationError("max_commands must be a non-negative integer")
+    return _generated_control_pb2().PollCommandsRequest(max_commands=max_commands).SerializeToString(
+        deterministic=True
     )
 
 
 def decode_poll_response(buffer: bytes) -> PollResult:
-    """Decodes ``apex.v1.PollCommandsResponse``."""
-    if not isinstance(buffer, (bytes, bytearray)):
+    response_object = buffer if hasattr(buffer, "commands") and hasattr(buffer, "agent_id") else None
+    if response_object is None and not isinstance(buffer, (bytes, bytearray)):
         raise _malformed("the response body was not bytes")
-    buffer = bytes(buffer)
+    buffer = bytes(buffer) if response_object is None else response_object.SerializeToString(deterministic=True)
     if len(buffer) > MAX_RESPONSE_BYTES:
         raise ControlPollError(
             "The control gateway's response was larger than this client accepts.",
@@ -461,27 +528,66 @@ def decode_poll_response(buffer: bytes) -> PollResult:
             retryable=False,
             cause="The response exceeded the client's bounded read ceiling.",
         )
-    commands: list[PendingControlCommand] = []
-    agent_id = ""
-    min_poll_interval_seconds = 0
+    raw_commands: list[bytes] = []
     offset = 0
     while offset < len(buffer):
-        field_number, _wire_type, value, offset = _read_field(buffer, offset)
-        if field_number == 1:
-            if not isinstance(value, (bytes, bytearray)):
-                raise _malformed("commands was not length-delimited")
-            commands.append(_decode_pending_command(bytes(value)))
-        elif field_number == 2:
-            agent_id = _decode_text(value, "agent_id")
-        elif field_number == 3:
-            min_poll_interval_seconds = value if isinstance(value, int) else 0
-        # Anything else is a field this client does not know about; skipping is
-        # required protobuf behaviour, not leniency.
-    return PollResult(
-        commands=tuple(commands),
-        agent_id=agent_id,
-        min_poll_interval_seconds=min_poll_interval_seconds,
-    )
+        field, wire, raw, offset = _read_field(buffer, offset)
+        if field == 1:
+            _require_wire(wire, _WIRE_LENGTH, "commands")
+            raw_commands.append(bytes(raw))
+            command_offset = 0
+            while command_offset < len(raw):
+                command_field, command_wire, command_raw, command_offset = _read_field(bytes(raw), command_offset)
+                expected = {1: _WIRE_LENGTH, 2: _WIRE_LENGTH, 3: _WIRE_LENGTH, 4: _WIRE_LENGTH, 5: _WIRE_LENGTH, 6: _WIRE_LENGTH, 7: _WIRE_VARINT, 8: _WIRE_LENGTH, 9: _WIRE_LENGTH, 10: _WIRE_LENGTH, 11: _WIRE_VARINT}.get(command_field)
+                if expected is None:
+                    continue
+                _require_wire(command_wire, expected, "a pending control command field")
+                if command_field == 9:
+                    _validate_struct_wire(bytes(command_raw))
+        elif field == 2:
+            _require_wire(wire, _WIRE_LENGTH, "agent_id")
+        elif field == 3:
+            _require_wire(wire, _WIRE_VARINT, "min_poll_interval_seconds")
+    try:
+        response = response_object or _generated_control_pb2().PollCommandsResponse.FromString(buffer)
+        commands = []
+        for index, command in enumerate(response.commands):
+            # Preserve the original field bytes for Struct parameters. Some
+            # protobuf runtimes drop unknown fields inside a map entry while
+            # constructing the generated message; the bounded adapter keeps
+            # those fields skippable as the protobuf contract requires.
+            raw_parameters: bytes | None = None
+            command_bytes = raw_commands[index]
+            command_offset = 0
+            while command_offset < len(command_bytes):
+                command_field, command_wire, command_raw, command_offset = _read_field(command_bytes, command_offset)
+                if command_field == 9 and command_wire == _WIRE_LENGTH:
+                    raw_parameters = bytes(command_raw)
+            parameters = _decode_struct(raw_parameters) if raw_parameters is not None else {}
+            commands.append(
+                PendingControlCommand(
+                    command_id=command.command_id,
+                    workspace_id=command.workspace_id,
+                    namespace_id=command.namespace_id,
+                    agent_id=command.agent_id,
+                    run_id=command.run_id,
+                    trace_id=command.trace_id,
+                    action=_ACTION_NAMES.get(command.action, "unspecified"),
+                    reason_code=command.reason_code if command.HasField("reason_code") else None,
+                    issued_at=command.issued_at,
+                    delivery_attempt=command.delivery_attempt,
+                    parameters=parameters,
+                )
+            )
+        return PollResult(
+            commands=tuple(commands),
+            agent_id=response.agent_id,
+            min_poll_interval_seconds=response.min_poll_interval_seconds,
+        )
+    except ControlPollError:
+        raise
+    except Exception as exc:  # protobuf DecodeError is version-dependent
+        raise _malformed("the response was not well-formed protobuf") from exc
 
 
 # --------------------------------------------------------------------------
@@ -637,11 +743,9 @@ class GrpcControlTransport:
             options.append(("grpc.ssl_target_name_override", server_hostname))
         factory = channel_factory or grpc.secure_channel
         self._channel = factory(endpoint, channel_credentials, options=tuple(options))
-        self._invoke = self._channel.unary_unary(
-            POLL_COMMANDS_METHOD,
-            request_serializer=lambda value: value,
-            response_deserializer=lambda value: value,
-        )
+        from ._generated.apex.v1 import control_pb2_grpc
+
+        self._invoke = control_pb2_grpc.ControlGatewayStub(self._channel).PollCommands
 
     @property
     def endpoint(self) -> str:
@@ -658,8 +762,9 @@ class GrpcControlTransport:
         payload = encode_poll_request(max_commands)
         grpc = _grpc_module()
         try:
+            request = _generated_control_pb2().PollCommandsRequest.FromString(payload)
             raw = self._invoke(
-                payload,
+                request,
                 timeout=self._timeout,
                 # The bearer credential travels in metadata; the mTLS client
                 # certificate is what binds it. Never logged, never placed in

@@ -16,21 +16,17 @@ Deliberately the same shape, not a fork. Credential loading reuses
 ``control_transport._read_credential_file`` outright so the SDK has exactly one
 set of rules for reading key material; channel construction, the
 ``ssl_target_name_override`` narrowing, the "never read ``details()``" status
-classification, and the hand-rolled protobuf codec all mirror that module
+classification, and the generated protobuf/gRPC stubs all mirror that module
 rather than inventing a second style. What is genuinely new here is a
 ``google.protobuf.Struct`` **encoder**: ``control_transport`` only ever needed
 to decode one, and an event's ``data`` field is an arbitrary JSON-like object
 that has to be serialized on the way out.
 
-Why the wire format is still encoded by hand
+The message classes are generated from ``contracts/proto/apex/v1/event.proto`` and checked in under ``apex_sdk._generated``.
 --------------------------------------------
-Same reason as ``control_transport``: this package has no protobuf
-code-generation step and no ``protobuf`` runtime dependency, and ``grpcio``
-accepts arbitrary ``request_serializer``/``response_deserializer`` callables.
-Adding ``protoc``/``grpcio-tools`` to the SDK's install surface for two messages
-would be a larger change than the messages. **This is now the second module
-doing it, which is the point at which the owner should weigh generating stubs
-instead** -- flagged, not silently accepted.
+The generated runtime is optional and imported lazily. The encoder still
+applies the SDK's explicit JSON, size, and depth bounds before handing values
+to the generated ``Struct`` message.
 
 Integrity: why this module re-derives the hash before sending
 -------------------------------------------------------------
@@ -86,7 +82,6 @@ loader.
 from __future__ import annotations
 
 import math
-import struct as _struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -186,11 +181,8 @@ class EventEncodingError(ApexError):
     )
 
 
-# --------------------------------------------------------------------------
-# Minimal protobuf wire encoder (see the module docstring for why).
-# --------------------------------------------------------------------------
-
-
+# Kept as a private negative-input guard for existing callers/tests. Message
+# serialization itself is performed only by the generated protobuf classes.
 def _encode_varint(value: int) -> bytes:
     if value < 0:
         raise EventEncodingError(cause="A negative value cannot be encoded as a protobuf varint.")
@@ -205,136 +197,6 @@ def _encode_varint(value: int) -> bytes:
             return bytes(out)
 
 
-def _tag(field_number: int, wire_type: int) -> bytes:
-    return _encode_varint((field_number << 3) | wire_type)
-
-
-def _length_delimited(field_number: int, body: bytes) -> bytes:
-    return _tag(field_number, _WIRE_LENGTH) + _encode_varint(len(body)) + body
-
-
-def _string_field(field_number: int, value: Any, label: str) -> bytes:
-    """Encodes one proto3 ``string`` field.
-
-    proto3 omits a scalar field holding its default, and the empty string is the
-    default, so an empty value emits nothing. That is what a generated encoder
-    does and no decoder can tell the two apart, so it is faithful rather than
-    lossy.
-    """
-    if not isinstance(value, str):
-        raise EventEncodingError(cause=f"{label} must be a string.")
-    body = value.encode("utf-8")
-    if not body:
-        return b""
-    return _length_delimited(field_number, body)
-
-
-def _varint_field(field_number: int, value: int) -> bytes:
-    """Encodes one proto3 varint field, omitting it when it holds the default."""
-    if value == 0:
-        return b""
-    return _tag(field_number, _WIRE_VARINT) + _encode_varint(value)
-
-
-# --------------------------------------------------------------------------
-# google.protobuf.Struct encoder
-# --------------------------------------------------------------------------
-#
-# The mirror image of control_transport's decoder. `Value` is a `oneof kind`,
-# and the wire type per kind is fixed by google/protobuf/struct.proto:
-#
-#   1 null_value   NullValue enum   varint
-#   2 number_value double           fixed64
-#   3 string_value string           length-delimited
-#   4 bool_value   bool             varint
-#   5 struct_value Struct           length-delimited
-#   6 list_value   ListValue        length-delimited
-#
-# A member of a oneof is *always* emitted, even when it holds its type's default
-# value: presence is the entire meaning of a oneof. Omitting `null_value`
-# because the enum is zero, or `bool_value` because it is false, would produce a
-# `Value` with no `kind` set -- which prost decodes as `None` and the gateway
-# rejects as InvalidStructure. This is the easiest thing to get wrong in this
-# encoder, so it is stated here and asserted directly in the tests.
-
-
-def _encode_struct_value(value: Any, depth: int) -> bytes:
-    if depth > MAX_STRUCT_DEPTH:
-        raise EventEncodingError(cause="Event data nested deeper than the wire format accepts.")
-    if value is None:
-        # null_value is an enum whose only member NULL_VALUE is 0, emitted
-        # explicitly precisely because it is the default.
-        return _tag(1, _WIRE_VARINT) + _encode_varint(0)
-    # bool is a subclass of int in Python, so it must be tested first or every
-    # True would go out as the number 1.0.
-    if isinstance(value, bool):
-        return _tag(4, _WIRE_VARINT) + _encode_varint(1 if value else 0)
-    if isinstance(value, int):
-        if abs(value) > MAX_EXACT_INTEGER:
-            raise EventEncodingError(
-                cause="An integer outside the exactly-representable JSON range cannot be encoded without changing its value.",
-            )
-        return _tag(2, _WIRE_FIXED64) + _struct.pack("<d", float(value))
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise EventEncodingError(
-                cause="Infinity and NaN have no JSON or canonical-JSON representation.",
-            )
-        return _tag(2, _WIRE_FIXED64) + _struct.pack("<d", value)
-    if isinstance(value, str):
-        return _length_delimited(3, value.encode("utf-8"))
-    if isinstance(value, Mapping):
-        return _length_delimited(5, encode_struct(value, depth + 1))
-    # str and bytes are Sequences too; both are already handled or refused
-    # above, so only genuine arrays reach here.
-    if isinstance(value, (list, tuple)):
-        return _length_delimited(6, _encode_struct_list(value, depth + 1))
-    raise EventEncodingError(
-        cause="Event data may hold only objects, arrays, strings, numbers, booleans and null.",
-    )
-
-
-def _encode_struct_list(values: Sequence[Any], depth: int) -> bytes:
-    if depth > MAX_STRUCT_DEPTH:
-        raise EventEncodingError(cause="Event data nested deeper than the wire format accepts.")
-    if len(values) > MAX_STRUCT_ENTRIES:
-        raise EventEncodingError(cause="An array in event data holds more entries than this client encodes.")
-    out = bytearray()
-    for value in values:
-        out += _length_delimited(1, _encode_struct_value(value, depth))
-    return bytes(out)
-
-
-def encode_struct(fields: Mapping[str, Any], depth: int = 0) -> bytes:
-    """Encodes a JSON-like mapping as ``google.protobuf.Struct``.
-
-    The exact inverse of ``control_transport._decode_struct``, and tested
-    against it rather than against a second opinion about the wire format. The
-    depth and entry ceilings are the decoder's own, so anything this encoder
-    produces is something the SDK can also read back -- which the transport's
-    pre-send integrity check depends on.
-    """
-    if depth > MAX_STRUCT_DEPTH:
-        raise EventEncodingError(cause="Event data nested deeper than the wire format accepts.")
-    if not isinstance(fields, Mapping):
-        raise EventEncodingError(cause="Event data must be an object.")
-    if len(fields) > MAX_STRUCT_ENTRIES:
-        raise EventEncodingError(cause="An object in event data holds more entries than this client encodes.")
-    out = bytearray()
-    for key, value in fields.items():
-        if not isinstance(key, str):
-            raise EventEncodingError(cause="Event data object keys must be strings.")
-        # `fields` is map<string, Value>, which on the wire is a repeated
-        # FieldsEntry message with key = 1 and value = 2. The empty string is a
-        # legal key and, being the default, is simply omitted from the entry --
-        # both this encoder and the SDK's decoder read a missing key as "".
-        entry = _string_field(1, key, "a Struct field key") + _length_delimited(
-            2, _encode_struct_value(value, depth + 1)
-        )
-        out += _length_delimited(1, entry)
-    return bytes(out)
-
-
 # --------------------------------------------------------------------------
 # apex.v1.EventEnvelope
 # --------------------------------------------------------------------------
@@ -347,16 +209,94 @@ def _require_mapping(event: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value
 
 
-def encode_event_envelope(event: Mapping[str, Any]) -> bytes:
-    """Encodes a validated Apex v1 event dict as ``apex.v1.EventEnvelope``.
+def _validate_ingest_response_wire(buffer: bytes) -> None:
+    offset = 0
+    while offset < len(buffer):
+        field, wire, _raw, offset = _read_field(buffer, offset)
+        if field == 1 and wire != _WIRE_VARINT:
+            raise GrpcStatusError("UNKNOWN", "ingest response duplicate flag used the wrong wire type")
 
-    Serialization only. Business rules -- identifier shapes, timestamp format,
-    the secret-material policy, the hash chain -- belong to ``validation.py``,
-    and ``BoundedGrpcExporter.write`` has already applied them by the time an
-    event reaches a transport. What is enforced here is exactly what
-    serialization owns: that each field is the *type* the contract declares, and
-    that nothing is encoded in a way that changes what it means.
-    """
+
+def _generated_event_pb2() -> Any:
+    try:
+        from ._generated.apex.v1 import event_pb2
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise EventEncodingError(
+            cause="Install the ingest transport's protobuf runtime before sending events.",
+            recommended_next_steps=("Install with: pip install 'apex-sdk[ingest]'",),
+        ) from exc
+    return event_pb2
+
+
+def _generated_struct_pb2() -> Any:
+    try:
+        from google.protobuf import struct_pb2
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise EventEncodingError(
+            cause="Install the ingest transport's protobuf runtime before sending events.",
+            recommended_next_steps=("Install with: pip install 'apex-sdk[ingest]'",),
+        ) from exc
+    return struct_pb2
+
+
+def _generated_struct_value(value: Any, depth: int) -> Any:
+    if depth > MAX_STRUCT_DEPTH:
+        raise EventEncodingError(cause="Event data nested deeper than the wire format accepts.")
+    struct_pb2 = _generated_struct_pb2()
+    result = struct_pb2.Value()
+    if value is None:
+        result.null_value = 0
+    elif isinstance(value, bool):
+        result.bool_value = value
+    elif isinstance(value, int):
+        if abs(value) > MAX_EXACT_INTEGER:
+            raise EventEncodingError(cause="An integer in event data cannot survive the protobuf double conversion.")
+        result.number_value = float(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise EventEncodingError(cause="Event data numbers must be finite.")
+        result.number_value = value
+    elif isinstance(value, str):
+        result.string_value = value
+    elif isinstance(value, Mapping):
+        result.struct_value.CopyFrom(_generated_struct(value, depth + 1))
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if len(value) > MAX_STRUCT_ENTRIES:
+            raise EventEncodingError(cause="An array in event data holds more entries than this client encodes.")
+        result.list_value.values.extend(_generated_struct_value(item, depth + 1) for item in value)
+    else:
+        raise EventEncodingError(cause="A value in event data is not JSON-compatible.")
+    return result
+
+
+def _generated_struct(fields: Mapping[str, Any], depth: int = 0) -> Any:
+    if depth > MAX_STRUCT_DEPTH:
+        raise EventEncodingError(cause="Event data nested deeper than the wire format accepts.")
+    if not isinstance(fields, Mapping):
+        raise EventEncodingError(cause="Event data must be an object.")
+    if len(fields) > MAX_STRUCT_ENTRIES:
+        raise EventEncodingError(cause="An object in event data holds more entries than this client encodes.")
+    result = _generated_struct_pb2().Struct()
+    for key, value in fields.items():
+        if not isinstance(key, str):
+            raise EventEncodingError(cause="Event data object keys must be strings.")
+        result.fields[key].CopyFrom(_generated_struct_value(value, depth + 1))
+    return result
+
+
+def encode_struct(fields: Mapping[str, Any], depth: int = 0) -> bytes:
+    """Encodes a JSON-like mapping with the generated Struct message."""
+    return _generated_struct(fields, depth).SerializeToString(deterministic=True)
+
+
+def _required_string(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise EventEncodingError(cause=f"{label} must be a string.")
+    return value
+
+
+def encode_event_envelope(event: Mapping[str, Any]) -> bytes:
+    """Encodes a validated Apex v1 event with the generated message class."""
     if not isinstance(event, Mapping):
         raise EventEncodingError(cause="An event must be an object.")
     event_type = event.get("type")
@@ -370,112 +310,71 @@ def encode_event_envelope(event: Mapping[str, Any]) -> bytes:
     if not isinstance(actor_type, str) or actor_type not in ACTOR_TYPE_VALUES:
         raise EventEncodingError(cause="The event actor type is not a member of the v1 ActorType enum.")
     schema_version = event.get("schema_version")
-    if (
-        not isinstance(schema_version, int)
-        or isinstance(schema_version, bool)
-        or not 0 <= schema_version <= 0xFFFFFFFF
-    ):
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool) or not 0 <= schema_version <= 0xFFFFFFFF:
         raise EventEncodingError(cause="schema_version must be a uint32.")
-
     agent_group_ids = scope.get("agent_group_ids")
     if not isinstance(agent_group_ids, list):
         raise EventEncodingError(cause="scope.agent_group_ids must be an array.")
 
-    scope_body = (
-        _string_field(1, scope.get("workspace_id"), "scope.workspace_id")
-        + _string_field(2, scope.get("namespace_id"), "scope.namespace_id")
-        + b"".join(_string_field(3, group, "scope.agent_group_ids[]") for group in agent_group_ids)
+    event_pb2 = _generated_event_pb2()
+    envelope = event_pb2.EventEnvelope(
+        event_id=_required_string(event.get("event_id"), "event_id"),
+        timestamp=_required_string(event.get("timestamp"), "timestamp"),
+        type=EVENT_TYPE_VALUES[event_type],
+        agent_id=_required_string(event.get("agent_id"), "agent_id"),
+        run_id=_required_string(event.get("run_id"), "run_id"),
+        trace_id=_required_string(event.get("trace_id"), "trace_id"),
+        schema_version=schema_version,
     )
-    actor_body = _varint_field(1, ACTOR_TYPE_VALUES[actor_type]) + _string_field(
-        2, actor.get("id"), "actor.id"
-    )
-    version_body = (
-        _string_field(1, version.get("agent_code"), "version.agent_code")
-        + _string_field(2, version.get("prompt"), "version.prompt")
-        + _string_field(3, version.get("model"), "version.model")
-    )
-    # `prev_hash` is `optional string`, so absence is meaningful: the chain root
-    # has no predecessor and JCS represents that as `prev_hash: null`. Emitting
-    # an empty string instead would be a different message that the gateway
-    # canonicalizes -- and therefore hashes -- differently.
+    parent_run_id = event.get("parent_run_id")
+    if parent_run_id is not None:
+        envelope.parent_run_id = _required_string(parent_run_id, "parent_run_id")
+    envelope.scope.workspace_id = _required_string(scope.get("workspace_id"), "scope.workspace_id")
+    envelope.scope.namespace_id = _required_string(scope.get("namespace_id"), "scope.namespace_id")
+    for group in agent_group_ids:
+        envelope.scope.agent_group_ids.append(_required_string(group, "scope.agent_group_ids[]"))
+    envelope.actor.type = ACTOR_TYPE_VALUES[actor_type]
+    envelope.actor.id = _required_string(actor.get("id"), "actor.id")
+    envelope.version.agent_code = _required_string(version.get("agent_code"), "version.agent_code")
+    envelope.version.prompt = _required_string(version.get("prompt"), "version.prompt")
+    envelope.version.model = _required_string(version.get("model"), "version.model")
     prev_hash = integrity.get("prev_hash")
-    if prev_hash is None:
-        integrity_body = b""
-    elif isinstance(prev_hash, str):
-        integrity_body = _length_delimited(1, prev_hash.encode("utf-8"))
-    else:
-        raise EventEncodingError(cause="integrity.prev_hash must be a string or null.")
-    integrity_body += _string_field(2, integrity.get("event_hash"), "integrity.event_hash")
-
+    if prev_hash is not None:
+        envelope.integrity.prev_hash = _required_string(prev_hash, "integrity.prev_hash")
+    envelope.integrity.event_hash = _required_string(integrity.get("event_hash"), "integrity.event_hash")
     data = event.get("data")
     if not isinstance(data, Mapping):
         raise EventEncodingError(cause="The event's data must be an object.")
-
-    parent_run_id = event.get("parent_run_id")
-    if parent_run_id is None:
-        parent_body = b""
-    elif isinstance(parent_run_id, str):
-        # `optional string`, so an explicitly-set empty value is still present
-        # on the wire -- unlike the non-optional string fields above.
-        parent_body = _length_delimited(6, parent_run_id.encode("utf-8"))
-    else:
-        raise EventEncodingError(cause="parent_run_id must be a string or null.")
-
-    envelope = (
-        _string_field(1, event.get("event_id"), "event_id")
-        + _string_field(2, event.get("timestamp"), "timestamp")
-        + _varint_field(3, EVENT_TYPE_VALUES[event_type])
-        + _string_field(4, event.get("agent_id"), "agent_id")
-        + _string_field(5, event.get("run_id"), "run_id")
-        + parent_body
-        + _string_field(7, event.get("trace_id"), "trace_id")
-        + _length_delimited(8, scope_body)
-        + _length_delimited(9, actor_body)
-        + _length_delimited(10, version_body)
-        # Always emitted, even when empty: `data` is a message field, so its
-        # absence is distinguishable from an empty object, and the gateway
-        # rejects an envelope carrying no `data` at all.
-        + _length_delimited(11, encode_struct(data))
-        + _length_delimited(12, integrity_body)
-        + _varint_field(13, schema_version)
-    )
-    if len(envelope) > MAX_ENVELOPE_BYTES:
+    # event_pb2 uses a private descriptor pool because event.proto and
+    # control.proto currently declare the same apex.v1.ControlAction enum.
+    # The wire contract for google.protobuf.Struct is identical; crossing the
+    # pool boundary through serialized bytes keeps the generated message type
+    # authoritative without importing a second Struct class into the SDK.
+    envelope.data.ParseFromString(_generated_struct(data).SerializeToString(deterministic=True))
+    payload = envelope.SerializeToString(deterministic=True)
+    if len(payload) > MAX_ENVELOPE_BYTES:
         raise EventEncodingError(
             "The encoded event is larger than ingest accepts.",
             correlation={"event_id": str(event.get("event_id", ""))},
             cause="The encoded envelope exceeded the gateway's 256 KiB admission ceiling.",
             recommended_next_steps=("Reduce the size of the event's data payload before exporting it.",),
         )
-    return envelope
+    return payload
 
 
 def decode_ingest_response(buffer: bytes) -> bool:
-    """Decodes ``apex.v1.IngestResponse`` and returns its ``duplicate`` flag.
-
-    A malformed response surfaces as ``GrpcStatusError("UNKNOWN")`` rather than
-    a new error type, because that is the vocabulary
-    ``BoundedGrpcExporter._classify_failure`` already speaks -- and an
-    unrecognized status there is correctly non-retryable.
-    """
+    if hasattr(buffer, "duplicate"):
+        return bool(buffer.duplicate)
     if not isinstance(buffer, (bytes, bytearray)):
         raise GrpcStatusError("UNKNOWN", "ingest response was not bytes")
     buffer = bytes(buffer)
     if len(buffer) > MAX_ENVELOPE_BYTES:
         raise GrpcStatusError("UNKNOWN", "ingest response exceeded the client's read ceiling")
-    duplicate = False
-    offset = 0
-    while offset < len(buffer):
-        try:
-            field_number, wire_type, value, offset = _read_field(buffer, offset)
-        except Exception as exc:  # noqa: BLE001 - a malformed response is a protocol fault
-            raise GrpcStatusError("UNKNOWN", "ingest response was not well-formed protobuf") from exc
-        if field_number == 1:
-            if wire_type != _WIRE_VARINT:
-                raise GrpcStatusError("UNKNOWN", "ingest response duplicate flag used the wrong wire type")
-            duplicate = value != 0
-        # Anything else is a field this client does not know about; skipping is
-        # required protobuf behaviour, not leniency.
-    return duplicate
+    try:
+        _validate_ingest_response_wire(buffer)
+        return _generated_event_pb2().IngestResponse.FromString(buffer).duplicate
+    except Exception as exc:  # protobuf DecodeError is version-dependent
+        raise GrpcStatusError("UNKNOWN", "ingest response was not well-formed protobuf") from exc
 
 
 # --------------------------------------------------------------------------
@@ -630,11 +529,9 @@ class GrpcEventIngestTransport:
             options.append(("grpc.ssl_target_name_override", server_hostname))
         factory = channel_factory or grpc.secure_channel
         self._channel = factory(endpoint, channel_credentials, options=tuple(options))
-        self._invoke = self._channel.unary_unary(
-            INGEST_METHOD,
-            request_serializer=lambda value: value,
-            response_deserializer=lambda value: value,
-        )
+        from ._generated.apex.v1 import event_pb2_grpc
+
+        self._invoke = event_pb2_grpc.EventIngestStub(self._channel).Ingest
 
     @property
     def endpoint(self) -> str:
@@ -671,8 +568,9 @@ class GrpcEventIngestTransport:
             self._assert_canonical_round_trip(event, payload)
         grpc = _grpc_module()
         try:
+            request = _generated_event_pb2().EventEnvelope.FromString(payload)
             raw = self._invoke(
-                payload,
+                request,
                 timeout=self._timeout,
                 # The bearer credential travels in metadata; the mTLS client
                 # certificate is what binds it. Never logged, never placed in an

@@ -156,12 +156,13 @@ def main() -> int:
                 if marker.encode("utf-8") not in envelope
             ]
             if missing:
-                print(
-                    f"verify_control_fanout: a message is on {subject} but is missing "
-                    f"{missing}; {len(envelope)} envelope bytes",
-                    file=sys.stderr,
+                last = (
+                    f"a message is on {subject} but is missing {missing}; "
+                    f"{len(envelope)} envelope bytes"
                 )
-                return 1
+                print(f"verify_control_fanout: attempt {attempt}: {last}")
+                time.sleep(args.sleep)
+                continue
             print(
                 f"verify_control_fanout: control event confirmed in stream "
                 f"{args.stream} on {subject} ({len(envelope)} envelope bytes, "

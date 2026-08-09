@@ -1,0 +1,1 @@
+"""Generated Apex protobuf namespace."""

@@ -3,15 +3,15 @@
 
 This is the live end-to-end proof for ``apex_sdk.GrpcEventIngestTransport``.
 Everything in the path is the product: ``EventBuilder`` builds and hash-chains
-the envelope, ``BoundedGrpcExporter`` drives delivery, and the transport encodes
-``apex.v1.EventEnvelope`` by hand and puts it on a real mTLS gRPC connection to a
+the envelope, ``BoundedGrpcExporter`` drives delivery, and the transport uses
+the generated ``apex.v1.EventEnvelope`` stub on a real mTLS gRPC connection to a
 running ``apex-event-ingest`` container. Nothing here is a mock, a stub, or
 ``InMemoryIdempotentIngest``.
 
 It proves three things, in one causal sequence a reader can re-derive:
 
 1. A first submission of a fresh ``event_id`` is **accepted** -- which means the
-   gateway decoded this client's hand-rolled protobuf, recomputed the RFC 8785
+   gateway decoded this client's generated protobuf, recomputed the RFC 8785
    canonical hash from the bytes it received, and got the same value the SDK
    computed locally. That single fact is the whole contract between the Struct
    encoder and the service; nothing else tests it.

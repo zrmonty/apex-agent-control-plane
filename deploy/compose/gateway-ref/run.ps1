@@ -12,6 +12,18 @@ python -m pip install --user --quiet cryptography
 python .\generate_pki.py --out .\secrets
 python .\render_configs.py
 
+# The ingest gateway binds the bearer token to this exact client leaf. Derive
+# the pin from the freshly generated PEM every time so a local PKI rotation
+# cannot leave the compose environment pointing at a stale fingerprint.
+$ingestClientCert = (Resolve-Path .\secrets\ingest-http-client.pem).Path
+$bearerCertSha256 = (& python -c "from cryptography import x509; from cryptography.hazmat.primitives import hashes; import sys; print(x509.load_pem_x509_certificate(open(sys.argv[1], 'rb').read()).fingerprint(hashes.SHA256()).hex())" $ingestClientCert).Trim().ToLowerInvariant()
+if ($bearerCertSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw 'Could not derive a valid APEX_BEARER_CERT_SHA256 from ingest-http-client.pem'
+}
+$env:APEX_BEARER_CERT_SHA256 = $bearerCertSha256
+Set-Content -Path .\secrets\ingest-http-client.sha256 -Value $bearerCertSha256 -NoNewline -Encoding ascii
+Write-Host "APEX_BEARER_CERT_SHA256=$bearerCertSha256"
+
 # Gateway server identity: reuse NATS server cert for local SAN coverage of hostnames.
 # Bearer token for file resolver.
 if (-not (Test-Path .\secrets\ingest-bearer-token)) {

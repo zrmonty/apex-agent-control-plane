@@ -97,7 +97,7 @@ The shared key reuses `CONTROL_ADMISSION_NAMESPACE` with a `poll-` bucket prefix
 
 A real gRPC+mTLS client -- the first real gRPC transport in this SDK. It reads the agent's workload certificate, key and CA under the same path discipline the Rust services apply (symlink refusal, bounded reads, owner-only permissions on private material, POSIX only where mode bits mean something), opens a channel, calls `PollCommands`, and returns typed results. Errors follow `errors.py`'s taxonomy and `exporter.py`'s classification style rather than a second style invented for one module, and the gRPC `details()` string -- server-controlled text -- is never read into a diagnostic.
 
-**The wire format is encoded by hand.** This package has no protobuf code-generation step and no `protobuf` runtime dependency, and adding both to ship one read-only RPC would be a larger change to the SDK's build and dependency surface than the RPC itself; `grpcio` accepts arbitrary serializer callables. Unknown fields are skipped the way any protobuf implementation must, so a gateway that starts sending new fields does not break an older agent. *Flagged for the owner:* if a second RPC ever needs a Python client, generate the stubs -- one hand-rolled message pair is defensible, three is a maintenance liability.
+**The SDK now uses checked-in generated protobuf/gRPC stubs** under `apex_sdk._generated`, generated from the frozen v1 contracts. The protobuf and gRPC runtimes remain optional extras, and imports stay deferred so importing `apex_sdk` does not require the transport stack. A small bounded preflight preserves the SDK's fail-closed treatment of known fields with the wrong wire type; message encoding and decoding themselves are performed by the generated classes, with unknown fields skipped as protobuf requires.
 
 `grpcio` is an optional extra (`apex-sdk[control]`) and the import is deferred, so importing `apex_sdk` never requires a gRPC stack.
 
@@ -150,7 +150,7 @@ The open item said this needs "a running-total hook into every LLM/tool call, or
 
 ### The wire-format gap this had to close first
 
-`set_budget` carries its entire meaning in `parameters` (a `google.protobuf.Struct`), and the SDK's hand-rolled codec **skipped field 9 by design** -- correct when only `stop` was enacted, since `stop` carries none. A client that skips it receives a budget command with no ceiling in it and can never enforce anything, which is the most dangerous shape of failure available here: an operator sets a cost ceiling, the gateway accepts and records it, the agent retrieves it, and nothing happens. So `control_transport.py` gained a `Struct` decoder.
+`set_budget` carries its entire meaning in `parameters` (a `google.protobuf.Struct`). The generated `PendingControlCommand` stub now preserves that field, and the bounded Struct adapter decodes it for enactment. A client that skips it receives a budget command with no ceiling in it and can never enforce anything, which is the most dangerous shape of failure available here.
 
 It is bounded and strict, because it is recursive and its input arrives over the network:
 
@@ -158,7 +158,7 @@ It is bounded and strict, because it is recursive and its input arrives over the
 - **Wire types are checked against the declared ones**, not merely against what happens to be decodable. A varint-encoded `number_value` would otherwise be reinterpreted as the double with those bits -- a silently wrong budget limit rather than a refused message.
 - **Over-deep or malformed is refused, where an unknown field is skipped.** Those are different situations: an unknown field is a newer contract and must not brick an older agent; a Struct that violates its own encoding is not.
 
-*Flagged for the owner, more sharply than before:* the "generate the stubs if a second RPC needs a Python client" note in `control_transport.py` now reads on a codec that also decodes `Struct`. That is a well-specified closed piece of the protobuf spec rather than a third ad-hoc message, but it is the point at which generating stubs stops being a preference.
+The earlier hand-rolled message codec is closed out. Both transports now use generated stubs, and the bounded `Struct` adapter is tested against the generated message runtime and the frozen `.proto` field/enum declarations.
 
 ### The rules, stated because they are choices
 
@@ -333,7 +333,7 @@ Surfaced 1.056s after submission -- one poll cadence, the same shape as the othe
 
 **Closed by a seventh pass.** The gap this section used to record was real and long-lived: `packages/sdk-python/src/apex_sdk/exporter.py` defined `GrpcIngestTransport` as a `Protocol` with **zero concrete implementation anywhere in this repository**. The only thing satisfying it was `InMemoryIdempotentIngest`, a test double, and every "live" gRPC/mTLS exercise of the ingest path -- including `apps/event-ingest/tests/adversarial_ingest.rs` -- was a Rust stand-in client rather than the product SDK. Nothing anywhere proved this SDK could submit a single event, and the whole suite stayed green regardless.
 
-`packages/sdk-python/src/apex_sdk/ingest_transport.py` is the real implementation. It mirrors `control_transport.py` rather than forking a second style: the same hand-rolled protobuf codec (no `protoc`/`grpcio-tools` in the SDK's install surface), the same `_read_credential_file` discipline, the same `grpc.secure_channel` construction, the same `ssl_target_name_override` narrowing, and the same refusal to read a server-supplied `details()` string into an error.
+`packages/sdk-python/src/apex_sdk/ingest_transport.py` is the real implementation. It mirrors `control_transport.py` rather than forking a second style: the same generated protobuf/gRPC stubs, the same `_read_credential_file` discipline, the same `grpc.secure_channel` construction, the same `ssl_target_name_override` narrowing, and the same refusal to read a server-supplied `details()` string into an error.
 
 ### The `google.protobuf.Struct` encoder
 
@@ -409,7 +409,7 @@ durable rows for 019fe7bd-92da-7123-a504-37b0175bc219: 1
 
 **What each line actually establishes:**
 
-- `ACCEPTED 1` is the whole encoder/service contract in one fact. The gateway decoded this client's hand-rolled protobuf, ran `canonical_event_hash` over the bytes it received (`validation/request.rs:160`), and got `4d97068eea…` -- the value the Python SDK computed locally via `rfc8785`. Any disagreement anywhere in the encoding (an omitted `oneof` member, a wrong enum value, a number that did not survive the double, a `prev_hash` sent as `""` instead of absent) produces `InvalidIntegrity` instead. The payload deliberately exercised every `Struct` kind: string, integer, float, boolean, null, array, nested object.
+- `ACCEPTED 1` is the whole encoder/service contract in one fact. The gateway decoded this client's generated protobuf, ran `canonical_event_hash` over the bytes it received (`validation/request.rs:160`), and got `4d97068eea…` -- the value the Python SDK computed locally via `rfc8785`. Any disagreement anywhere in the encoding (an omitted `oneof` member, a wrong enum value, a number that did not survive the double, a `prev_hash` sent as `""` instead of absent) produces `InvalidIntegrity` instead. The payload deliberately exercised every `Struct` kind: string, integer, float, boolean, null, array, nested object.
 - `DUPLICATE 2` is the idempotency claim, on the byte-identical event.
 - `ACCEPTED 3` is why `DUPLICATE 2` means anything: a different `event_id` is *not* called a duplicate, so `duplicate` is a property of the id rather than a constant returned for everything after the first request.
 
@@ -437,8 +437,8 @@ The CI gate asserts the idempotency journal only. Extending it to the downstream
 
 ### Flagged for the owner
 
-- **Two hand-rolled protobuf codecs now exist in this SDK.** `control_transport.py` already noted that its `Struct` decoder was the point at which "generate the stubs instead" stopped being a preference. This module adds the encoder. Both are bounded, tested against each other, and checked against the frozen `.proto`, but the next addition should come with generated stubs rather than a third hand-rolled message.
-- **`deploy/compose/gateway-ref/run.ps1` never computes `APEX_BEARER_CERT_SHA256`.** The CI workflow recomputes the fingerprint in the same run, so CI is unaffected; a local `run.ps1` bring-up leaves the pin unset or stale and every submission fails `UNAUTHENTICATED` at the resolver with nothing indicating why. This was hit while building the live proof locally (a stale `secrets/ingest-http-client.sha256` left over from an earlier PKI regeneration). Not fixed here because `run.ps1` is outside this change's scope.
+- **The SDK's protobuf surface now uses checked-in generated stubs.** Both transports are generated from the frozen `.proto` contracts, with bounded Struct conversion and wire-shape preflight retained for fail-closed handling of malformed inputs. The generated message classes are tested against the gateway contract and the live ingest proof.
+- **`deploy/compose/gateway-ref/run.ps1` now computes `APEX_BEARER_CERT_SHA256` from the freshly generated `ingest-http-client.pem` on every bring-up.** It writes the matching `.sha256` fixture, exports the compose variable, validates the 64-hex fingerprint, and prints the pin so a local PKI rotation cannot leave the gateway stale or fail closed with no explanation.
 
 ## Containerization
 
@@ -698,7 +698,7 @@ Found during the `inject` enactment pass — **the security review is the featur
 - The credential table refuses every malformed entry shape, preserves a token containing the separator, and has no wildcard form
 - The file inbox refuses a path outside its base and a command with an out-of-grammar identifier or action
 
-`packages/sdk-python/tests/test_control_transport.py` (58 tests): the hand-rolled wire codec exhaustively (every action value, unknown-field skipping, eight malformed-response shapes, oversize refusal), credential loading (missing/empty/oversized/symlinked/directory/world-readable, both-or-neither token sources), endpoint and timeout validation, the missing-`grpcio` path, gRPC status classification, and **a real in-process gRPC server over real mTLS** with a throwaway CA and mandatory client auth -- which is what makes "the transport works" a claim about handshakes and HTTP/2 framing rather than about a mock. `test_reference_runtime.py` adds the enactment cases: the tool never executes, the terminal events are emitted, an action with no enactment yet stays inert, an out-of-grammar reason code still halts the run, a poll failure records an error and does not halt, and a run with no tool step does not poll at all.
+`packages/sdk-python/tests/test_control_transport.py` and `test_ingest_transport.py` cover the generated message surface exhaustively (every action value, unknown-field skipping, malformed-response shapes, oversize refusal), credential loading (missing/empty/oversized/symlinked/directory/world-readable, both-or-neither token sources), endpoint and timeout validation, the missing-`grpcio` path, gRPC status classification, and **real in-process gRPC servers over real mTLS** with throwaway CAs and mandatory client auth -- which is what makes "the transport works" a claim about handshakes and HTTP/2 framing rather than about a mock. `test_reference_runtime.py` adds the enactment cases: the tool never executes, the terminal events are emitted, an action with no enactment yet stays inert, an out-of-grammar reason code still halts the run, a poll failure records an error and does not halt, and a run with no tool step does not poll at all.
 
 `packages/sdk-python/tests/test_reference_runtime.py`, `pause`/`resume` half (new this pass, driven through a `ScriptedPoller` that returns one batch *per poll* -- a runtime's real experience of the channel across many turns, which `InMemoryControlPoller` cannot model because it drains):
 
@@ -866,7 +866,7 @@ What is left of item 0, stated precisely:
 
 **0b. The delivery mechanism is polling only, and the ack state is per-gateway-process.** A JetStream per-agent subject or a long-poll remains open (see the unary-vs-streaming reasoning above), and [[Human-in-the-Loop Approvals]]'s blocking mode likely wants the same infrastructure -- whoever designs it should design it once for both. Concretely, the command inbox has no Postgres backend, so a multi-replica deployment must route each agent to the replica that accepted its commands, and the binary refuses to start otherwise rather than degrade silently.
 
-**0c. ~~There is no real event-ingest transport in the SDK.~~ Closed by the seventh pass.** `apex_sdk.GrpcEventIngestTransport` implements `exporter.GrpcIngestTransport` for real, over mTLS, and is proven live against a running `event-ingest` container and gated in CI. See "The SDK's event-ingest transport" above -- including the two things that section flags for the owner (two hand-rolled protobuf codecs now exist; `gateway-ref/run.ps1` never computes the certificate pin).
+**0c. ~~There is no real event-ingest transport in the SDK.~~ Closed by the seventh pass.** `apex_sdk.GrpcEventIngestTransport` implements `exporter.GrpcIngestTransport` for real, over mTLS, and is proven live against a running `event-ingest` container and gated in CI. See "The SDK's event-ingest transport" above -- including the generated protobuf stubs and the local launcher's per-run certificate-pin derivation.
 
 **0d. The reference runtime has one checkpoint, not a control-integration API.** `ReferenceReasonActLoop` checks before its tool call and nowhere else, which is right for a synthetic single-turn loop and is not a general instrumentation surface. **This is now the largest remaining gap between "the controls work" and "the controls work for your runtime":** all five actions are enacted and gated live, but by this one loop. Any other instrumented runtime has to write the same enactment itself, with the same care about redelivery idempotency, halting precedence and untrusted content. Generalising it -- and deciding the fail-open/fail-closed policy on an unreachable control channel -- is a later pass. One concrete consequence of the single checkpoint: usage accrues on the `llm` event, which precedes it, so a budget-halted or paused turn still counts its model call. A runtime with a checkpoint before the model call would not.
 
