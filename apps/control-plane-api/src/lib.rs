@@ -27,6 +27,7 @@ mod keycloak;
 mod outbox;
 mod replay;
 mod service;
+mod status;
 
 pub use agent_auth::{
     AgentTokenTableError, AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver,
@@ -38,7 +39,10 @@ pub use auth::{
     OperatorTokenAuthenticator, OperatorTokenTableError, StaticOperatorTokenResolver,
     parse_operator_token_table,
 };
-pub use envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
+pub use envelope::{
+    AcceptedCommand, ControlCommandInput, build_control_request,
+    pending_command_from_ingest_request,
+};
 pub use errors::{CommandError, CommandErrorCode};
 pub use inbox::{
     CommandInbox, ControlInboxBackend, DEFAULT_INBOX_CAPACITY, DEFAULT_MAX_COMMANDS_PER_POLL,
@@ -52,11 +56,12 @@ pub use keycloak::{
     KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
 };
 pub use outbox::{ControlOutboxBackend, submit_command};
-pub use replay::spawn_fanout_worker;
+pub use replay::{spawn_fanout_worker, spawn_fanout_worker_with_metrics};
 pub use service::{
     ControlGatewayService, SharedEphemeralStore, bounded_control_gateway_server,
     control_admission_rate_limit_key, control_poll_rate_limit_key,
 };
+pub use status::{GatewayRuntimeMetrics, GatewayRuntimeSnapshot};
 
 /// Maximum admitted `ControlCommandRequest` size, matching the ingest
 /// envelope ceiling (`apex_event_ingest::MAX_ENVELOPE_BYTES`) plus headroom

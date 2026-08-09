@@ -155,6 +155,10 @@ where
     P: EphemeralStore,
     F: EphemeralStore,
 {
+    fn accelerator_sidelined(&self) -> bool {
+        FallbackEphemeralStore::accelerator_sidelined(self)
+    }
+
     fn check_rate_limit(
         &mut self,
         key: &RateLimitKey,

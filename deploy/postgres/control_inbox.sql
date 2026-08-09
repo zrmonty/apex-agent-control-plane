@@ -24,3 +24,7 @@ CREATE TABLE IF NOT EXISTS apex_control_inbox (
 
 CREATE INDEX IF NOT EXISTS apex_control_inbox_delivery_idx
     ON apex_control_inbox (agent_id, sequence);
+
+CREATE INDEX IF NOT EXISTS apex_control_inbox_retention_idx
+    ON apex_control_inbox (last_delivered_millis)
+    WHERE last_delivered_millis IS NOT NULL;

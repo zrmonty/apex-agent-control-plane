@@ -92,6 +92,8 @@ pub const DEFAULT_INBOX_CAPACITY: usize = 1_000_000;
 
 const MAX_INBOX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_INBOX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const INBOX_COMPACTION_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+const INBOX_COMPACTION_DELIVERY_RECORDS: usize = 1_024;
 
 /// One command awaiting (or having received) delivery to its target agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +210,18 @@ pub trait CommandInbox: Send {
     /// Count of commands that have never been delivered. Diagnostics and
     /// tests only; never exposed on the wire.
     fn undelivered_count(&mut self) -> usize;
+
+    /// Retires settled delivery state after the configured idempotency window.
+    /// Implementations must preserve the command identity until that window
+    /// expires, so a retry cannot create a second delivery of the same command.
+    fn maintain(
+        &mut self,
+        _now_millis: u64,
+        _retention_millis: u64,
+        _max_attempts: u32,
+    ) -> Result<(), CommandError> {
+        Ok(())
+    }
 }
 
 impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
@@ -228,6 +242,15 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
     fn undelivered_count(&mut self) -> usize {
         (**self).undelivered_count()
     }
+
+    fn maintain(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+        max_attempts: u32,
+    ) -> Result<(), CommandError> {
+        (**self).maintain(now_millis, retention_millis, max_attempts)
+    }
 }
 
 /// In-memory delivery state, shared by both backends.
@@ -237,11 +260,13 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
 /// into it. Keeping the decision logic in one place means the file backend
 /// cannot drift from the in-memory one on the question that matters -- which
 /// commands a given caller is entitled to see.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct InboxState {
     /// Insertion order, so a poll returns oldest-first without sorting.
     order: Vec<InboxKey>,
     entries: HashMap<InboxKey, Entry>,
+    /// Settled command identities retained for the idempotency window.
+    retired: HashMap<InboxKey, u64>,
     capacity: usize,
 }
 
@@ -257,6 +282,7 @@ impl InboxState {
         Self {
             order: Vec::new(),
             entries: HashMap::new(),
+            retired: HashMap::new(),
             capacity,
         }
     }
@@ -271,15 +297,19 @@ impl InboxState {
 
     fn record(&mut self, command: &PendingCommand) -> Result<RecordResult, CommandError> {
         let key = Self::key(command);
-        if self.entries.contains_key(&key) {
+        if self.entries.contains_key(&key) || self.retired.contains_key(&key) {
             return Ok(RecordResult::AlreadyRecorded);
         }
-        if self.entries.len() >= self.capacity {
+        if self.entries.len().saturating_add(self.retired.len()) >= self.capacity {
             return Err(CommandError::new(
                 CommandErrorCode::Capacity,
                 "The durable command inbox is at capacity. Retry after operator remediation.",
             ));
         }
+        // A tombstone that has just expired may still have its old key in the
+        // insertion-order vector. Remove it before reusing the identity so a
+        // later compaction cannot emit the command twice.
+        self.order.retain(|existing| existing != &key);
         self.order.push(key.clone());
         self.entries.insert(
             key,
@@ -367,6 +397,17 @@ impl InboxState {
             .filter(|entry| entry.attempts == 0)
             .count()
     }
+
+    fn retire(&mut self, key: &InboxKey, retired_at_millis: u64) {
+        self.entries.remove(key);
+        self.retired.insert(key.clone(), retired_at_millis);
+    }
+
+    fn remove_expired_retired(&mut self, cutoff_millis: u64) -> bool {
+        let before = self.retired.len();
+        self.retired.retain(|_, retired_at| *retired_at > cutoff_millis);
+        before != self.retired.len()
+    }
 }
 
 /// Non-durable inbox for unit tests and embedded use.
@@ -424,6 +465,12 @@ enum InboxRecord {
         attempt: u32,
         at_millis: u64,
     },
+    Retired {
+        workspace_id: String,
+        namespace_id: String,
+        command_id: String,
+        retired_at_millis: u64,
+    },
 }
 
 /// Append-only, fsync-backed delivery journal.
@@ -435,10 +482,12 @@ enum InboxRecord {
 /// closed on malformed data rather than silently dropping a pending command.
 #[derive(Debug)]
 pub struct FileCommandInbox {
-    file: File,
+    file: Option<File>,
+    path: std::path::PathBuf,
     // Held for the process lifetime: file journals are single-writer only.
     _writer_lock: File,
     state: InboxState,
+    delivery_records_since_compaction: usize,
 }
 
 impl FileCommandInbox {
@@ -486,16 +535,24 @@ impl FileCommandInbox {
             .map_err(|_| configuration_error())?;
         fs2::FileExt::try_lock_exclusive(&writer_lock).map_err(|_| configuration_error())?;
         let mut inbox = Self {
-            file,
+            file: Some(file),
+            path: path.to_owned(),
             _writer_lock: writer_lock,
             state: InboxState::new(capacity),
+            delivery_records_since_compaction: 0,
         };
         inbox.load()?;
         Ok(inbox)
     }
 
     fn load(&mut self) -> Result<(), CommandError> {
-        let reader = BufReader::new(self.file.try_clone().map_err(|_| configuration_error())?);
+        let reader = BufReader::new(
+            self.file
+                .as_ref()
+                .ok_or_else(configuration_error)?
+                .try_clone()
+                .map_err(|_| configuration_error())?,
+        );
         for line in reader.lines() {
             let line = line.map_err(|_| configuration_error())?;
             if line.len() > MAX_INBOX_RECORD_BYTES {
@@ -532,6 +589,21 @@ impl FileCommandInbox {
                         at_millis,
                     );
                 }
+                InboxRecord::Retired {
+                    workspace_id,
+                    namespace_id,
+                    command_id,
+                    retired_at_millis,
+                } => {
+                    self.state.retire(
+                        &InboxKey {
+                            workspace_id,
+                            namespace_id,
+                            command_id,
+                        },
+                        retired_at_millis,
+                    );
+                }
             }
         }
         Ok(())
@@ -539,6 +611,29 @@ impl FileCommandInbox {
 
     fn append(&mut self, record: &InboxRecord) -> Result<(), CommandError> {
         self.append_batch(std::slice::from_ref(record))
+    }
+
+    fn encode_records(records: &[InboxRecord]) -> Result<Vec<u8>, CommandError> {
+        let mut encoded = Vec::new();
+        for record in records {
+            let mut record_bytes =
+                serde_json::to_vec(record).map_err(|_| CommandError::internal())?;
+            record_bytes.push(b'\n');
+            if record_bytes.len() > MAX_INBOX_RECORD_BYTES {
+                return Err(CommandError::new(
+                    CommandErrorCode::Capacity,
+                    "The durable command inbox is at capacity. Retry after operator remediation.",
+                ));
+            }
+            encoded.extend_from_slice(&record_bytes);
+        }
+        if encoded.len() as u64 > MAX_INBOX_FILE_BYTES {
+            return Err(CommandError::new(
+                CommandErrorCode::Capacity,
+                "The durable command inbox is at capacity. Retry after operator remediation.",
+            ));
+        }
+        Ok(encoded)
     }
 
     /// Append a group of journal records with one durability barrier.
@@ -551,20 +646,11 @@ impl FileCommandInbox {
         if records.is_empty() {
             return Ok(());
         }
-        let mut encoded = Vec::new();
-        for record in records {
-            let mut record_bytes = serde_json::to_vec(record).map_err(|_| CommandError::internal())?;
-            record_bytes.push(b'\n');
-            if record_bytes.len() > MAX_INBOX_RECORD_BYTES {
-                return Err(CommandError::new(
-                    CommandErrorCode::Capacity,
-                    "The durable command inbox is at capacity. Retry after operator remediation.",
-                ));
-            }
-            encoded.extend_from_slice(&record_bytes);
-        }
+        let encoded = Self::encode_records(records)?;
         let current = self
             .file
+            .as_ref()
+            .ok_or_else(configuration_error)?
             .metadata()
             .map_err(|_| configuration_error())?
             .len();
@@ -575,9 +661,131 @@ impl FileCommandInbox {
             ));
         }
         self.file
+            .as_mut()
+            .ok_or_else(configuration_error)?
             .write_all(&encoded)
-            .and_then(|_| self.file.sync_data())
+            .and_then(|_| {
+                self.file
+                    .as_ref()
+                    .ok_or(std::io::Error::other("inbox journal is closed"))?
+                    .sync_data()
+            })
             .map_err(|_| CommandError::internal())
+    }
+
+    fn snapshot_records(&self) -> Vec<InboxRecord> {
+        let mut records = Vec::with_capacity(self.state.entries.len() * 2);
+        for key in &self.state.order {
+            let Some(entry) = self.state.entries.get(key) else {
+                continue;
+            };
+            records.push(InboxRecord::Command(entry.command.clone()));
+            if entry.attempts > 0 {
+                records.push(InboxRecord::Delivered {
+                    workspace_id: key.workspace_id.clone(),
+                    namespace_id: key.namespace_id.clone(),
+                    command_id: key.command_id.clone(),
+                    attempt: entry.attempts,
+                    at_millis: entry.last_delivered_millis.unwrap_or_default(),
+                });
+            }
+        }
+        for (key, retired_at_millis) in &self.state.retired {
+            records.push(InboxRecord::Retired {
+                workspace_id: key.workspace_id.clone(),
+                namespace_id: key.namespace_id.clone(),
+                command_id: key.command_id.clone(),
+                retired_at_millis: *retired_at_millis,
+            });
+        }
+        records
+    }
+
+    /// Rewrites the journal to one command record plus the latest delivery
+    /// record per command. The snapshot is fully durable before the old file
+    /// is replaced, and the writer lock remains held throughout the swap.
+    fn compact(&mut self) -> Result<(), CommandError> {
+        let encoded = Self::encode_records(&self.snapshot_records())?;
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(configuration_error)?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| configuration_error())?
+            .as_nanos();
+        let temp_path = self.path.with_file_name(format!(
+            ".{file_name}.compact-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|_| CommandError::internal())?;
+        let result = temp
+            .write_all(&encoded)
+            .and_then(|_| temp.sync_data())
+            .map_err(|_| CommandError::internal());
+        if result.is_err() {
+            drop(temp);
+            let _ = fs::remove_file(&temp_path);
+            return result;
+        }
+        drop(temp);
+
+        // Closing the old handle is required on Windows before rename can
+        // replace the journal path. The replacement is already durable, so a
+        // failure here can reopen the original and leave it authoritative.
+        let old = self.file.take().ok_or_else(configuration_error)?;
+        drop(old);
+        if let Err(error) = fs::rename(&temp_path, &self.path) {
+            let _ = fs::remove_file(&temp_path);
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .read(true)
+                    .open(&self.path)
+                    .map_err(|_| configuration_error())?,
+            );
+            let _ = error;
+            return Err(CommandError::internal());
+        }
+        self.file = Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&self.path)
+                .map_err(|_| configuration_error())?,
+        );
+        self.state
+            .order
+            .retain(|key| self.state.entries.contains_key(key));
+        // Directory fsync is not supported uniformly on Windows; the file
+        // snapshot and rename are still durable enough for the next replay.
+        self.delivery_records_since_compaction = 0;
+        Ok(())
+    }
+
+    fn compact_if_needed(&mut self) {
+        let Ok(size) = self
+            .file
+            .as_ref()
+            .ok_or_else(configuration_error)
+            .and_then(|file| file.metadata().map_err(|_| configuration_error()))
+            .map(|metadata| metadata.len())
+        else {
+            return;
+        };
+        if size < INBOX_COMPACTION_THRESHOLD_BYTES
+            || self.delivery_records_since_compaction < INBOX_COMPACTION_DELIVERY_RECORDS
+        {
+            return;
+        }
+        let _ = self.compact();
     }
 }
 
@@ -590,7 +798,7 @@ impl CommandInbox for FileCommandInbox {
             ));
         }
         let key = InboxState::key(command);
-        if self.state.entries.contains_key(&key) {
+        if self.state.entries.contains_key(&key) || self.state.retired.contains_key(&key) {
             return Ok(RecordResult::AlreadyRecorded);
         }
         // Journal first, then mutate memory: a crash between the two leaves a
@@ -638,11 +846,49 @@ impl CommandInbox for FileCommandInbox {
                 delivered.push(command);
             }
         }
+        self.delivery_records_since_compaction = self
+            .delivery_records_since_compaction
+            .saturating_add(records.len());
+        self.compact_if_needed();
         Ok(delivered)
     }
 
     fn undelivered_count(&mut self) -> usize {
         self.state.undelivered_count()
+    }
+
+    fn maintain(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+        max_attempts: u32,
+    ) -> Result<(), CommandError> {
+        let cutoff_millis = now_millis.saturating_sub(retention_millis);
+        let previous = self.state.clone();
+        let settled: Vec<_> = self
+            .state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (entry.attempts >= max_attempts
+                    && entry
+                        .last_delivered_millis
+                        .is_some_and(|delivered_at| delivered_at <= cutoff_millis))
+                .then_some(key.clone())
+            })
+            .collect();
+        for key in &settled {
+            self.state.retire(key, now_millis);
+        }
+        let changed = !settled.is_empty() || self.state.remove_expired_retired(cutoff_millis);
+        if !changed {
+            return Ok(());
+        }
+        if let Err(error) = self.compact() {
+            self.state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -983,6 +1229,98 @@ mod tests {
             assert_eq!(again.len(), 2);
             assert!(again.iter().all(|command| command.delivery_attempt == 2));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_inbox_compaction_preserves_latest_delivery_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-compact-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let policy = DeliveryPolicy {
+            redelivery_after: Duration::ZERO,
+            max_attempts: 8,
+        };
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            inbox.record(&command("cmd-1", "agent-a")).unwrap();
+            for attempt in 0..8 {
+                assert_eq!(
+                    inbox
+                        .claim(&target("agent-a"), &acme_prod(), policy, attempt)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            let before = std::fs::metadata(&path).unwrap().len();
+            inbox.compact().unwrap();
+            let after = std::fs::metadata(&path).unwrap().len();
+            assert!(after < before, "compaction must shrink repeated deliveries");
+        }
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64).unwrap();
+        assert_eq!(reopened.undelivered_count(), 0);
+        assert!(
+            reopened
+                .claim(&target("agent-a"), &acme_prod(), policy, 1_000)
+                .unwrap()
+                .is_empty(),
+            "compaction must preserve the settled attempt ceiling"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_inbox_retention_preserves_then_expires_command_idempotency() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-retention-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let policy = DeliveryPolicy {
+            redelivery_after: Duration::ZERO,
+            max_attempts: 1,
+        };
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 2).unwrap();
+            inbox.record(&command("cmd-1", "agent-a")).unwrap();
+            assert_eq!(
+                inbox
+                    .claim(&target("agent-a"), &acme_prod(), policy, 1)
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            // Settlement removes the payload but retains the identity, so a
+            // duplicate submission during the retention window is still a no-op.
+            inbox.maintain(1_000, 100, 1).unwrap();
+        }
+        let mut inbox = FileCommandInbox::open(&path, &dir, 2).unwrap();
+        assert_eq!(
+            inbox.record(&command("cmd-1", "agent-a")).unwrap(),
+            RecordResult::AlreadyRecorded
+        );
+
+        // Once the tombstone itself expires, the identity can be reused and
+        // is treated as a new command delivery.
+        inbox.maintain(2_000, 100, 1).unwrap();
+        assert_eq!(
+            inbox.record(&command("cmd-1", "agent-a")).unwrap(),
+            RecordResult::Recorded
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

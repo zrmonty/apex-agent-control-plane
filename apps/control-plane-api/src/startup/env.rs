@@ -531,6 +531,35 @@ pub(crate) fn fanout_interval_value(raw: Option<&str>) -> Result<Duration, io::E
     Ok(Duration::from_secs(seconds))
 }
 
+/// How long settled command identities remain in the inbox. During this
+/// window a retry with the same `command_id` remains idempotent; after it,
+/// reusing that identity is allowed and creates a new delivery.
+const DEFAULT_COMMAND_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+const MIN_COMMAND_RETENTION_SECS: u64 = 60 * 60;
+const MAX_COMMAND_RETENTION_SECS: u64 = 365 * 24 * 60 * 60;
+
+pub(crate) fn command_retention() -> Result<Duration, io::Error> {
+    command_retention_value(env::var("APEX_CONTROL_COMMAND_RETENTION_SECS").ok().as_deref())
+}
+
+pub(crate) fn command_retention_value(raw: Option<&str>) -> Result<Duration, io::Error> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "APEX_CONTROL_COMMAND_RETENTION_SECS must be an integer from 3600 through 31536000",
+        )
+    };
+    let seconds = raw
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<u64>().map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or(DEFAULT_COMMAND_RETENTION_SECS);
+    if !(MIN_COMMAND_RETENTION_SECS..=MAX_COMMAND_RETENTION_SECS).contains(&seconds) {
+        return Err(invalid());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 /// Bounded publish-retry ladder for the JetStream transport, mirroring
 /// `event-ingest`'s `APEX_RETRY_ATTEMPTS` (same 1..=8 range, same default,
 /// same `RetryingJetStreamTransport` ceiling). Named with this crate's own

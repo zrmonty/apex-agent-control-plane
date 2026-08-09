@@ -12,6 +12,7 @@
 //! retrying until it succeeds.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use apex_event_ingest::{EnqueueResult, EventOutbox, IngestRequest};
 
@@ -71,6 +72,28 @@ impl ControlOutboxBackend {
             }
             _ => self.with_lock(f),
         }
+    }
+
+    pub fn maintain(
+        &self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), CommandError> {
+        self.with_lock(|outbox| outbox.maintain(now_millis, retention_millis))??;
+        Ok(())
+    }
+
+    pub fn pending_batch(&self, limit: usize) -> Result<Vec<IngestRequest>, CommandError> {
+        self.with_lock(|outbox| outbox.pending_batch(limit))
+    }
+
+    pub(crate) fn reschedule(
+        &self,
+        keys: &[apex_event_ingest::OutboxKey],
+        after: Duration,
+    ) -> Result<(), CommandError> {
+        self.with_lock_from_async(|outbox| outbox.reschedule(keys, after))??;
+        Ok(())
     }
 }
 

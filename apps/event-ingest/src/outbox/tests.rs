@@ -463,6 +463,39 @@ fn file_outbox_mark_complete_is_idempotent_and_load_rejects_conflicting_pending(
     remove_dir_all(base).unwrap();
 }
 
+#[test]
+fn file_outbox_retention_compacts_completed_idempotency_state() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-retention-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let event = sample_event("018f5c91-2d88-7c00-0000-000000000099");
+    let before;
+    {
+        let mut outbox = FileOutbox::open(&path, &base, 4).unwrap();
+        outbox.enqueue(&event).unwrap();
+        outbox
+            .mark_complete(&OutboxKey {
+                workspace_id: "acme".into(),
+                namespace_id: "prod".into(),
+                event_id: event.event_id.clone(),
+            })
+            .unwrap();
+        before = std::fs::metadata(&path).unwrap().len();
+        outbox.maintain(u64::MAX, 0).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() < before);
+    }
+    let mut reopened = FileOutbox::open(&path, &base, 4).unwrap();
+    assert_eq!(reopened.enqueue(&event).unwrap(), EnqueueResult::Enqueued);
+    remove_dir_all(base).unwrap();
+}
+
 fn sample_envelope_like(event_id: &str, agent_id: &str) -> proto::EventEnvelope {
     proto::EventEnvelope {
         event_id: event_id.to_owned(),

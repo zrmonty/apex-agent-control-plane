@@ -210,6 +210,7 @@ services:
       APEX_CONTROL_NATS_USERNAME_FILE: /run/secrets/control_nats_username
       APEX_CONTROL_NATS_PASSWORD_FILE: /run/secrets/control_nats_password
       APEX_CONTROL_FANOUT_INTERVAL_SECS: ${APEX_CONTROL_FANOUT_INTERVAL_SECS:-5}
+      APEX_CONTROL_COMMAND_RETENTION_SECS: ${APEX_CONTROL_COMMAND_RETENTION_SECS:-2592000}
       # Per-operator admission ceiling. Without a shared store (see
       # APEX_CONTROL_VALKEY_* in .env.example) this is enforced *per replica*,
       # so N replicas of this service admit N x the limit. A single-replica

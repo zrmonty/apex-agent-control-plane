@@ -249,6 +249,31 @@ impl CommandInbox for PostgresCommandInbox {
             .and_then(|row| row.get::<_, i64>(0).try_into().ok())
             .unwrap_or(0)
     }
+
+    fn maintain(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+        max_attempts: u32,
+    ) -> Result<(), CommandError> {
+        let now_millis = i64::try_from(now_millis).map_err(|_| CommandError::internal())?;
+        let retention_millis = i64::try_from(retention_millis)
+            .map_err(|_| CommandError::internal())?;
+        self.client
+            .execute(
+                "DELETE FROM apex_control_inbox
+                 WHERE attempts >= $1
+                   AND last_delivered_millis IS NOT NULL
+                   AND $2 - last_delivered_millis >= $3",
+                &[
+                    &i64::from(max_attempts),
+                    &now_millis,
+                    &retention_millis,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(())
+    }
 }
 
 fn configuration_error() -> CommandError {

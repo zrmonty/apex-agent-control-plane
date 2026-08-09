@@ -49,6 +49,9 @@
 //!   stop this gateway from starting or from accepting commands (ADR-0006).
 //! - `APEX_CONTROL_FANOUT_INTERVAL_SECS` -- fanout tick, default 5 (1..=3600).
 //!   See `startup::env::DEFAULT_FANOUT_INTERVAL_SECS` for why 5.
+//! - `APEX_CONTROL_COMMAND_RETENTION_SECS` -- settled command-id retention,
+//!   default 30 days (3600..=31536000). Reusing a command_id is rejected
+//!   during this window and allowed after it expires.
 //! - `APEX_CONTROL_NATS_RETRY_ATTEMPTS` -- bounded publish retry ladder,
 //!   default 3 (1..=8), mirroring event-ingest's `APEX_RETRY_ATTEMPTS`.
 //! - `APEX_CONTROL_OPERATOR_TOKENS_FILE` or `APEX_CONTROL_OPERATOR_TOKENS`

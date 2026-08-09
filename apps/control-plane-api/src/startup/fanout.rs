@@ -36,7 +36,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use apex_control_plane_api::{ControlOutboxBackend, spawn_fanout_worker};
+use apex_control_plane_api::{
+    ControlOutboxBackend, GatewayRuntimeMetrics, spawn_fanout_worker_with_metrics,
+};
 use apex_event_ingest::{
     AsyncNatsJetStreamClient, EventPublisher, GatewayError, IngestRequest, JetStreamPublisher,
     NatsJetStreamTransport, NatsTlsConfig, PublishOutcome, RetryingJetStreamTransport,
@@ -173,12 +175,16 @@ impl ControlFanout {
     /// invisible, and a later `abort_on_drop` wrapper or `JoinSet` would
     /// silently switch off command delivery with no code change anywhere near
     /// this file.
-    pub(crate) fn spawn(self, backend: Arc<ControlOutboxBackend>) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn(
+        self,
+        backend: Arc<ControlOutboxBackend>,
+        metrics: Arc<GatewayRuntimeMetrics>,
+    ) -> tokio::task::JoinHandle<()> {
         println!(
             "apex-control-plane-api fanout worker started (tick {}s)",
             self.interval.as_secs()
         );
-        spawn_fanout_worker(backend, self.publisher, self.interval)
+        spawn_fanout_worker_with_metrics(backend, self.publisher, self.interval, Some(metrics))
     }
 }
 

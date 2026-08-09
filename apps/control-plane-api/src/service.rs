@@ -21,10 +21,11 @@ use crate::envelope::{AcceptedCommand, ControlCommandInput, build_control_reques
 use crate::errors::CommandError;
 use crate::inbox::{
     ControlInboxBackend, DeliveryPolicy, InMemoryCommandInbox, PendingCommand, PollTarget,
-    ScopeAuthorizer,
+    RecordResult, ScopeAuthorizer,
 };
 use crate::outbox::{ControlOutboxBackend, submit_command};
 use crate::proto;
+use crate::status::GatewayRuntimeMetrics;
 
 /// Admission rate limit applied per authenticated operator subject, after
 /// auth succeeds. This is a separate control from
@@ -152,6 +153,7 @@ pub struct ControlGatewayService<R: OperatorCredentialResolver> {
     window: Duration,
     poll_limit: u32,
     delivery_policy: DeliveryPolicy,
+    metrics: Arc<GatewayRuntimeMetrics>,
 }
 
 impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
@@ -194,7 +196,13 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             window: DEFAULT_ADMISSION_WINDOW,
             poll_limit: DEFAULT_MAX_POLLS_PER_WINDOW,
             delivery_policy: DeliveryPolicy::default(),
+            metrics: Arc::new(GatewayRuntimeMetrics::default()),
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<GatewayRuntimeMetrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Installs the agent workload credential resolver used by
@@ -421,17 +429,26 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
 
         let outbox = self.outbox.clone();
         let inbox = self.inbox.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
+        let (outcome, delivery_result) = tokio::task::spawn_blocking(move || {
             // Keep the authoritative outbox commit ahead of the delivery
             // record, but perform both synchronous backend operations in one
             // blocking task so the accept path pays one scheduler handoff.
             let outcome = submit_command(&outbox, &ingest_request)?;
-            inbox.with_lock(|inbox| inbox.record(&delivery))??;
-            Ok::<_, CommandError>(outcome)
+            let delivery_result = inbox.with_lock(|inbox| inbox.record(&delivery))??;
+            Ok::<_, CommandError>((outcome, delivery_result))
         })
         .await
         .map_err(|_| CommandError::internal().into_status())?
         .map_err(CommandError::into_status)?;
+
+        self.metrics
+            .submissions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if outcome.duplicate {
+            self.metrics
+                .duplicate_submissions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Recorded *after* the outbox commits, and never conditionally on
         // whether the outbox call said "first acceptance" or "duplicate".
@@ -449,7 +466,11 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         Ok(tonic::Response::new(proto::ControlCommandResponse {
             duplicate: outcome.duplicate,
             command_id,
-            delivered: outcome.delivered,
+            // A reused command_id whose outbox row is complete can still
+            // create a fresh inbox delivery after retention. Describe that
+            // delivery as pending rather than claiming the old trace fanout
+            // covers it.
+            delivered: outcome.delivered && delivery_result == RecordResult::AlreadyRecorded,
         }))
     }
 
@@ -520,6 +541,10 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         .map_err(|_| CommandError::internal().into_status())?
         .map_err(CommandError::into_status)?
         .map_err(CommandError::into_status)?;
+
+        self.metrics
+            .polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(tonic::Response::new(proto::PollCommandsResponse {
             commands: claimed.into_iter().map(pending_to_proto).collect(),

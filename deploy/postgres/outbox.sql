@@ -20,6 +20,10 @@ CREATE INDEX IF NOT EXISTS apex_event_outbox_pending_idx
     ON apex_event_outbox (next_attempt_at, created_at)
     WHERE state = 'pending';
 
+CREATE INDEX IF NOT EXISTS apex_event_outbox_completed_retention_idx
+    ON apex_event_outbox (completed_at)
+    WHERE state = 'complete';
+
 -- Workers claim pending rows with SELECT ... FOR UPDATE SKIP LOCKED, dispatch
 -- the full idempotent fanout, and set complete only after every sink returns
 -- success. A crash leaves the row pending for replay; completed rows are

@@ -15,6 +15,11 @@ use std::time::Duration;
 use apex_event_ingest::{EventPublisher, OutboxKey};
 
 use crate::outbox::ControlOutboxBackend;
+use crate::status::GatewayRuntimeMetrics;
+
+const FANOUT_BATCH_SIZE: usize = 256;
+const MIN_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Spawns a loop that periodically drains pending outbox rows through
 /// `publisher` and marks each complete on success. Failures are logged and
@@ -28,7 +33,20 @@ pub fn spawn_fanout_worker<P>(
 where
     P: EventPublisher + Send + 'static,
 {
+    spawn_fanout_worker_with_metrics(backend, publisher, interval, None)
+}
+
+pub fn spawn_fanout_worker_with_metrics<P>(
+    backend: Arc<ControlOutboxBackend>,
+    publisher: Arc<tokio::sync::Mutex<P>>,
+    interval: Duration,
+    metrics: Option<Arc<GatewayRuntimeMetrics>>,
+) -> tokio::task::JoinHandle<()>
+where
+    P: EventPublisher + Send + 'static,
+{
     tokio::spawn(async move {
+        let mut failure_streak = 0_u32;
         loop {
             tokio::time::sleep(interval).await;
             let backend = backend.clone();
@@ -37,16 +55,28 @@ where
             // and `block_on`, which panics on a tokio worker thread. See that
             // method's doc comment -- this exact call aborted the worker on
             // the first Postgres-backed container start.
-            let pending = match backend.with_lock_from_async(|outbox| outbox.pending()) {
+            let pending = match backend
+                .with_lock_from_async(|outbox| outbox.pending_batch(FANOUT_BATCH_SIZE))
+            {
                 Ok(pending) => pending,
-                Err(_) => continue,
+                Err(_) => {
+                    failure_streak = failure_streak.saturating_add(1);
+                    continue;
+                }
             };
             if pending.is_empty() {
+                failure_streak = 0;
                 continue;
             }
             let mut publisher_guard = publisher.lock().await;
             let mut completed = Vec::new();
+            let mut failed = Vec::new();
             for event in pending {
+                let key = OutboxKey {
+                    workspace_id: event.workspace_id().to_owned(),
+                    namespace_id: event.namespace_id().to_owned(),
+                    event_id: event.event_id().to_owned(),
+                };
                 let publish_result = catch_unwind(AssertUnwindSafe(|| {
                     publisher_guard.publish(&event)
                 }));
@@ -56,28 +86,50 @@ where
                     // previous attempt did and the outbox proved it. Both must
                     // settle the row.
                     Ok(Ok(_outcome)) => {
-                        let key = OutboxKey {
-                            workspace_id: event.workspace_id().to_owned(),
-                            namespace_id: event.namespace_id().to_owned(),
-                            event_id: event.event_id().to_owned(),
-                        };
+                        if let Some(metrics) = &metrics {
+                            metrics
+                                .fanout_successes
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         completed.push(key);
                     }
                     Ok(Err(error)) => {
+                        if let Some(metrics) = &metrics {
+                            metrics
+                                .fanout_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         eprintln!(
                             "control-plane-api fanout deferred: {}: {}",
                             error.code.public_code(),
                             error.summary
                         );
+                        failed.push(key);
                     }
                     Err(_) => {
+                        if let Some(metrics) = &metrics {
+                            metrics
+                                .fanout_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         eprintln!("control-plane-api fanout deferred: panic during publish");
+                        failed.push(key);
                     }
                 }
             }
             if !completed.is_empty() {
                 let _ = backend
                     .with_lock_from_async(|outbox| outbox.mark_complete_many(&completed));
+            }
+            if !failed.is_empty() {
+                failure_streak = failure_streak.saturating_add(1);
+                let multiplier = 1_u64 << failure_streak.min(4);
+                let delay = MIN_RETRY_DELAY
+                    .saturating_mul(multiplier as u32)
+                    .min(MAX_RETRY_DELAY);
+                let _ = backend.reschedule(&failed, delay);
+            } else {
+                failure_streak = 0;
             }
         }
     })

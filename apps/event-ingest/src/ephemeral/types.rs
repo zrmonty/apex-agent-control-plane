@@ -185,6 +185,12 @@ pub(crate) fn window_secs(window: Duration) -> Result<u64, EphemeralError> {
 /// Methods take `&mut self` so remote adapters can use a single connection
 /// without interior mutability.
 pub trait EphemeralStore: Send {
+    /// Whether a fallback wrapper is currently skipping its remote primary.
+    /// Plain stores are always healthy from the wrapper's perspective.
+    fn accelerator_sidelined(&self) -> bool {
+        false
+    }
+
     fn check_rate_limit(
         &mut self,
         key: &RateLimitKey,

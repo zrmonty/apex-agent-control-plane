@@ -8,10 +8,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apex_control_plane_api::{
     BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver, ControlGatewayService,
-    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, KeycloakConfig,
+    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, GatewayRuntimeMetrics,
+    KeycloakConfig,
     KeycloakOperatorCredentialResolver, OperatorTokenAuthenticator, SharedEphemeralStore,
     StaticAgentWorkloadResolver, bounded_control_gateway_server, parse_agent_token_table,
     parse_operator_token_table,
@@ -22,8 +24,8 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
     AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source,
-    control_postgres_url, control_valkey_env, keycloak_env, operator_token_source, path, required,
-    resolve_bind_addr,
+    command_retention, control_postgres_url, control_valkey_env, keycloak_env,
+    operator_token_source, path, required, resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -37,6 +39,9 @@ const MAX_TLS_MATERIAL_BYTES: usize = 1024 * 1024;
 /// bounding what a mounted file can make this process allocate.
 const MAX_OPERATOR_TABLE_BYTES: usize = 64 * 1024;
 const OUTBOX_CAPACITY: usize = 1_000_000;
+const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const INBOX_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5);
+const INBOX_RECONCILIATION_BATCH: usize = 256;
 
 /// Loads the mTLS server identity and the CA that operator client
 /// certificates must chain to.
@@ -303,6 +308,138 @@ fn inbox_base() -> PathBuf {
     }
 }
 
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Periodically removes settled delivery state while retaining command
+/// identities for the configured idempotency window. This runs independently
+/// of JetStream so a broker outage cannot make the local inbox grow forever.
+fn spawn_inbox_retention_worker(
+    outbox: Arc<ControlOutboxBackend>,
+    inbox: Arc<ControlInboxBackend>,
+    retention_millis: u64,
+    metrics: Arc<GatewayRuntimeMetrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(RETENTION_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let outbox = Arc::clone(&outbox);
+            let inbox = Arc::clone(&inbox);
+            let metrics = Arc::clone(&metrics);
+            let _ = tokio::task::spawn_blocking(move || {
+                let now = now_unix_millis();
+                let inbox_failed = inbox
+                    .with_lock(|store| {
+                        store.maintain(
+                            now,
+                            retention_millis,
+                            apex_control_plane_api::DEFAULT_MAX_DELIVERY_ATTEMPTS,
+                        )
+                    })
+                    .map_or(true, |result| result.is_err());
+                // Expire the inbox tombstone first. If a process dies between
+                // these two operations, a reused command_id still gets a
+                // deliverable inbox record attached to the existing audit
+                // event rather than an outbox row with no agent delivery.
+                let outbox_failed = outbox.maintain(now, retention_millis).is_err();
+                if outbox_failed || inbox_failed {
+                    metrics
+                        .retention_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .await;
+        }
+    })
+}
+
+/// Repairs the only non-atomic boundary left by the intentionally separate
+/// outbox and inbox stores: a process can die after the authoritative outbox
+/// commit but before the delivery record. Pending control events are decoded
+/// back into their delivery shape and recorded idempotently. This is harmless
+/// for normal submissions and closes the retry-after-timeout dependency.
+fn spawn_inbox_reconciliation_worker(
+    outbox: Arc<ControlOutboxBackend>,
+    inbox: Arc<ControlInboxBackend>,
+    metrics: Arc<GatewayRuntimeMetrics>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(INBOX_RECONCILIATION_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let outbox = Arc::clone(&outbox);
+            let inbox = Arc::clone(&inbox);
+            let metrics = Arc::clone(&metrics);
+            let _ = tokio::task::spawn_blocking(move || {
+                let Ok(events) = outbox.pending_batch(INBOX_RECONCILIATION_BATCH) else {
+                    metrics
+                        .reconciliation_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("control-plane-api: inbox reconciliation could not read the outbox");
+                    return;
+                };
+                for event in events {
+                    let Ok(delivery) = apex_control_plane_api::pending_command_from_ingest_request(
+                        &event,
+                    ) else {
+                        metrics
+                            .reconciliation_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "control-plane-api: inbox reconciliation skipped a malformed control event"
+                        );
+                        continue;
+                    };
+                    let result = inbox.with_lock(|store| store.record(&delivery));
+                    match result {
+                        Ok(Ok(apex_control_plane_api::RecordResult::Recorded)) => {
+                            metrics
+                                .reconciliation_repairs
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Ok(Ok(apex_control_plane_api::RecordResult::AlreadyRecorded)) => {}
+                        Ok(Err(_)) | Err(_) => {
+                            metrics
+                                .reconciliation_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            eprintln!(
+                                "control-plane-api: inbox reconciliation could not record a pending command"
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+    })
+}
+
+fn spawn_status_logger(
+    metrics: Arc<GatewayRuntimeMetrics>,
+    ephemeral: Option<SharedEphemeralStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let accelerator_sidelined = ephemeral.as_ref().is_some_and(|store| {
+                store
+                    .lock()
+                    .map(|guard| guard.accelerator_sidelined())
+                    .unwrap_or(true)
+            });
+            eprintln!("{}", metrics.status_line(accelerator_sidelined));
+        }
+    })
+}
+
 /// Builds the optional cross-replica admission accelerator.
 ///
 /// Structurally `event-ingest`'s `build_ephemeral_store`, with one deliberate
@@ -456,6 +593,11 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tls = load_server_tls(&trusted_base)?;
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
+    let command_retention = command_retention()?;
+    let retention_millis = command_retention
+        .as_millis()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "command retention is too large"))?;
     let resolver = build_operator_resolver(&trusted_base)?;
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
@@ -468,15 +610,22 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // is synchronous and the wrapper around it must not be constructed on a
     // runtime thread any more than the Postgres client may be.
     let ephemeral = build_ephemeral_store(&trusted_base)?;
-    let mut service = ControlGatewayService::with_inbox(auth, Arc::clone(&outbox), inbox)
-        .with_agent_resolver(agent_resolver)
-        .with_admission_limits(admission_limit, admission_window);
-    if let Some(store) = ephemeral {
+    let metrics = Arc::new(GatewayRuntimeMetrics::default());
+    let mut service =
+        ControlGatewayService::with_inbox(auth, Arc::clone(&outbox), Arc::clone(&inbox))
+            .with_agent_resolver(agent_resolver)
+            .with_admission_limits(admission_limit, admission_window)
+            .with_metrics(Arc::clone(&metrics));
+    if let Some(store) = ephemeral.clone() {
         service = service.with_ephemeral_store(store);
     }
     println!(
         "apex-control-plane-api admission limit: {admission_limit} command(s) per operator per {}s",
         admission_window.as_secs()
+    );
+    println!(
+        "apex-control-plane-api command retention: {}d",
+        command_retention.as_secs() / (24 * 60 * 60)
     );
 
     // Everything above is built without a runtime entered. Same comment, same
@@ -486,18 +635,42 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
+        health_reporter
+            .set_service_status(
+                "apex.v1.ControlGateway",
+                tonic_health::ServingStatus::Serving,
+            )
+            .await;
         // Bound to a named variable, not `_`, and kept alive until `serve`
         // returns: this is the only thing that turns a durably accepted
         // command into an observable `control` event. Nothing on the accept
         // path touches it -- `ControlGatewayService` never sees the publisher
         // -- so a JetStream outage delays `delivered` and defers the trace
         // write without affecting whether a command is accepted (ADR-0006).
-        let _fanout_worker = fanout.map(|fanout| fanout.spawn(outbox));
+        let _fanout_worker = fanout.map(|fanout| {
+            fanout.spawn(Arc::clone(&outbox), Arc::clone(&metrics))
+        });
+        let _inbox_retention_worker =
+            spawn_inbox_retention_worker(
+                Arc::clone(&outbox),
+                Arc::clone(&inbox),
+                retention_millis,
+                Arc::clone(&metrics),
+            );
+        let _inbox_reconciliation_worker =
+            spawn_inbox_reconciliation_worker(
+                Arc::clone(&outbox),
+                Arc::clone(&inbox),
+                Arc::clone(&metrics),
+            );
+        let _status_logger = spawn_status_logger(Arc::clone(&metrics), ephemeral.clone());
         println!(
             "apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)"
         );
         Server::builder()
             .tls_config(tls)?
+            .add_service(health_service)
             .add_service(bounded_control_gateway_server(service))
             .serve(bind_addr)
             .await?;

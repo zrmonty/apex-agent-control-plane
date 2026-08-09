@@ -47,6 +47,7 @@ serde_json = "1"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "transport", "tls-ring"] }
+tonic-health = "0.14"
 tonic-prost = "0.14"
 uuid = { version = "1", features = ["v7"] }
 

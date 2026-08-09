@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use super::env::{
     AgentTokenSource, DEFAULT_BIND_ADDR, OperatorTokenSource, admission_limit_value,
     agent_token_source_value, bounded_secs_value, control_postgres_url_value,
-    control_valkey_host_value, expected_token_typ_value, fanout_interval_value,
+    command_retention_value, control_valkey_host_value, expected_token_typ_value,
+    fanout_interval_value,
     global_subjects_value, nats_retry_attempts_value, operator_token_source_value,
     resolve_bind_addr_value,
 };
@@ -360,6 +361,34 @@ fn nats_retry_attempts_matches_the_transport_ceiling() {
     assert!(nats_retry_attempts_value(Some("0")).is_err());
     assert!(nats_retry_attempts_value(Some("9")).is_err());
     assert!(nats_retry_attempts_value(Some("three")).is_err());
+}
+
+#[test]
+fn command_retention_is_bounded_and_defaults_to_thirty_days() {
+    use std::time::Duration;
+
+    assert_eq!(
+        command_retention_value(None).unwrap(),
+        Duration::from_secs(30 * 24 * 60 * 60)
+    );
+    assert_eq!(
+        command_retention_value(Some("3600")).unwrap(),
+        Duration::from_secs(3600)
+    );
+    assert_eq!(
+        command_retention_value(Some("31536000")).unwrap(),
+        Duration::from_secs(31536000)
+    );
+    for bad in ["", "3599", "31536001", "three", "1.5", " 3600"] {
+        if bad.is_empty() {
+            assert_eq!(
+                command_retention_value(Some(bad)).unwrap(),
+                Duration::from_secs(30 * 24 * 60 * 60)
+            );
+        } else {
+            assert!(command_retention_value(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
 }
 
 #[test]

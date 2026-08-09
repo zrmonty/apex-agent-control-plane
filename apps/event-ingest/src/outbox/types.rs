@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{GatewayError, IngestRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,6 +33,31 @@ pub trait EventOutbox: Send {
         Ok(())
     }
 
+    /// Returns at most `limit` pending events. The default preserves the
+    /// original backend contract; durable backends should override it so a
+    /// large backlog is bounded before it reaches the replay worker.
+    fn pending_batch(&mut self, limit: usize) -> Vec<IngestRequest> {
+        let mut events = self.pending();
+        events.truncate(limit);
+        events
+    }
+
+    /// Releases failed claims for a bounded retry. Backends without leases
+    /// can keep their existing next-cycle behaviour.
+    fn reschedule(&mut self, _keys: &[OutboxKey], _after: Duration) -> Result<(), GatewayError> {
+        Ok(())
+    }
+
+    /// Removes completed idempotency state outside the configured retention
+    /// window and compacts file journals where applicable.
+    fn maintain(
+        &mut self,
+        _now_millis: u64,
+        _retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        Ok(())
+    }
+
     fn pending(&mut self) -> Vec<IngestRequest>;
 }
 
@@ -45,6 +72,22 @@ impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
 
     fn mark_complete_many(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
         (**self).mark_complete_many(keys)
+    }
+
+    fn pending_batch(&mut self, limit: usize) -> Vec<IngestRequest> {
+        (**self).pending_batch(limit)
+    }
+
+    fn reschedule(&mut self, keys: &[OutboxKey], after: Duration) -> Result<(), GatewayError> {
+        (**self).reschedule(keys, after)
+    }
+
+    fn maintain(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        (**self).maintain(now_millis, retention_millis)
     }
 
     fn pending(&mut self) -> Vec<IngestRequest> {

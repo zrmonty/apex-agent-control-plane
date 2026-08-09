@@ -10,6 +10,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apex_event_ingest::{GatewayError, IngestRequest, canonical_event_hash};
+use prost::Message;
 use prost_types::Struct as ProstStruct;
 use prost_types::value::Kind;
 use uuid::Uuid;
@@ -82,6 +83,54 @@ pub struct AcceptedCommand {
     pub command_id: String,
     pub request: IngestRequest,
     pub delivery: PendingCommand,
+}
+
+/// Rebuilds the delivery-side command from a durably accepted control event.
+/// This is used by startup reconciliation when a process crashed after the
+/// outbox commit but before the inbox write. The event has already passed the
+/// ingest validator; the shape checks here defend the cross-store recovery
+/// boundary rather than trusting a raw envelope.
+pub fn pending_command_from_ingest_request(
+    request: &IngestRequest,
+) -> Result<PendingCommand, CommandError> {
+    let envelope = apex_event_ingest::proto::EventEnvelope::decode(request.envelope())
+        .map_err(|_| CommandError::internal())?;
+    if envelope.r#type != 9 {
+        return Err(CommandError::internal());
+    }
+    let data = envelope.data.ok_or_else(CommandError::internal)?;
+    let action = data
+        .fields
+        .get("action")
+        .and_then(|value| value.kind.as_ref())
+        .and_then(|kind| match kind {
+            Kind::StringValue(value) => Some(value.clone()),
+            _ => None,
+        })
+        .ok_or_else(CommandError::internal)?;
+    let reason_code = match data.fields.get("reason_code").and_then(|value| value.kind.as_ref()) {
+        Some(Kind::StringValue(value)) => Some(value.clone()),
+        Some(Kind::NullValue(_)) | None => None,
+        _ => return Err(CommandError::internal()),
+    };
+    let parameters = match data.fields.get("parameters").and_then(|value| value.kind.as_ref()) {
+        Some(Kind::StructValue(value)) => value.encode_to_vec(),
+        _ => return Err(CommandError::internal()),
+    };
+    let scope = envelope.scope.ok_or_else(CommandError::internal)?;
+    Ok(PendingCommand {
+        command_id: envelope.event_id,
+        workspace_id: scope.workspace_id,
+        namespace_id: scope.namespace_id,
+        agent_id: envelope.agent_id,
+        run_id: envelope.run_id,
+        trace_id: envelope.trace_id,
+        action,
+        reason_code,
+        parameters,
+        issued_at: envelope.timestamp,
+        delivery_attempt: 0,
+    })
 }
 
 /// Validates the caller's scope and builds the outbox-ready `IngestRequest`
