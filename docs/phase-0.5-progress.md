@@ -381,46 +381,59 @@ The two services are structurally similar and their credentials are **not** inte
 
 `deploy/compose/gateway-ref/agent_submits_events.py` is a real Python process using `EventBuilder`, `BoundedGrpcExporter` and `GrpcEventIngestTransport` against a running `apex-event-ingest` container over real mTLS. Nothing in the path is a mock, a stub, or `InMemoryIdempotentIngest`.
 
-Run against the `apex-gateway-ref` profile, 2026-08-09:
+Observed in **CI run [31328260195](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/31328260195)**, step *Live proof -- the product SDK submits a real event over real mTLS*, on a GitHub-hosted runner against the container that run built -- not a local machine:
 
 ```
-READY                                                              17:49:50.262354Z
-EVENT     1 019fe7a5-2f36-77cd-9138-78fb7840f94d
-            hash 5bf923189579146a33d00f1bba2724677e2607df56f637063b4da1259d36e77f
-            ts   2026-08-09T17:49:50.262463Z
-ACCEPTED  1 019fe7a5-2f36-77cd-9138-78fb7840f94d                   17:49:50.284765Z
-EVENT     2 019fe7a5-2f36-77cd-9138-78fb7840f94d   (identical id, identical bytes)
-DUPLICATE 2 019fe7a5-2f36-77cd-9138-78fb7840f94d                   17:49:50.286116Z
-EVENT     3 019fe7a5-2f4e-7798-a94b-8cff8717cf74
-            hash 6e8d56e695b294a69c4904b249fa965297edaf5cf769539abea2b574f749f3a4
-ACCEPTED  3 019fe7a5-2f4e-7798-a94b-8cff8717cf74                   17:49:50.296282Z
+READY                                                              18:16:28.603574Z
+EVENT     1 019fe7bd-92bb-7485-9267-a05869a7a98d
+            hash 4d97068eea5408db120ef96c2f0a9f4718daf1d94b8eec5209a67f920ff9747a
+            ts   2026-08-09T18:16:28.603664Z
+ACCEPTED  1 019fe7bd-92bb-7485-9267-a05869a7a98d                   18:16:28.633162Z
+EVENT     2 019fe7bd-92bb-7485-9267-a05869a7a98d   (identical id, identical bytes)
+DUPLICATE 2 019fe7bd-92bb-7485-9267-a05869a7a98d                   18:16:28.634611Z
+EVENT     3 019fe7bd-92da-7123-a504-37b0175bc219
+            hash 8a3f55c3e597f046e46729a342ed2b146e34ee8e19c5f9de58bf253a73ae80a3
+ACCEPTED  3 019fe7bd-92da-7123-a504-37b0175bc219                   18:16:28.641188Z
 STATS attempted=3 delivered=2 duplicates=1 failed=0
-PROOF_COMPLETE                                                     17:49:50.296311Z
+PROOF_COMPLETE                                                     18:16:28.641226Z
+```
+
+The step's own assertions, from the same log:
+
+```
+first=019fe7bd-92bb-7485-9267-a05869a7a98d replayed=019fe7bd-92bb-7485-9267-a05869a7a98d
+                                           second=019fe7bd-92da-7123-a504-37b0175bc219
+durable rows for 019fe7bd-92bb-7485-9267-a05869a7a98d: 1
+durable rows for 019fe7bd-92da-7123-a504-37b0175bc219: 1
 ```
 
 **What each line actually establishes:**
 
-- `ACCEPTED 1` is the whole encoder/service contract in one fact. The gateway decoded this client's hand-rolled protobuf, ran `canonical_event_hash` over the bytes it received, and got `5bf9231895…` -- the value the Python SDK computed locally via `rfc8785`. Any disagreement anywhere in the encoding (an omitted `oneof` member, a wrong enum value, a number that did not survive the double, a `prev_hash` sent as `""` instead of absent) produces `InvalidIntegrity` instead. The payload deliberately exercised every `Struct` kind: string, integer, float, boolean, null, array, nested object.
+- `ACCEPTED 1` is the whole encoder/service contract in one fact. The gateway decoded this client's hand-rolled protobuf, ran `canonical_event_hash` over the bytes it received (`validation/request.rs:160`), and got `4d97068eea…` -- the value the Python SDK computed locally via `rfc8785`. Any disagreement anywhere in the encoding (an omitted `oneof` member, a wrong enum value, a number that did not survive the double, a `prev_hash` sent as `""` instead of absent) produces `InvalidIntegrity` instead. The payload deliberately exercised every `Struct` kind: string, integer, float, boolean, null, array, nested object.
 - `DUPLICATE 2` is the idempotency claim, on the byte-identical event.
 - `ACCEPTED 3` is why `DUPLICATE 2` means anything: a different `event_id` is *not* called a duplicate, so `duplicate` is a property of the id rather than a constant returned for everything after the first request.
 
-**Confirmed against the gateway's own durable state, not the answer it gave.** `duplicate: true` is the service reporting on itself, and this repository has already shipped one bug in exactly that shape. The gateway's file idempotency journal held exactly two rows for the run -- one `committed` per distinct `event_id`, none for the replay:
+**Confirmed against the gateway's own durable state, not the answer it gave.** `duplicate: true` is the service reporting on itself, and this repository has already shipped one bug in exactly that shape. The `durable rows` lines above are the CI step reading the gateway's file idempotency journal directly: exactly one `committed` row per distinct `event_id`, and none added by the replay.
+
+The same properties were checked more widely during a local bring-up before the gate was written (`apex-ingest-sdk-proof` profile, 2026-08-09 17:49:50Z, events `019fe7a5-2f36-77cd-9138-78fb7840f94d` and `019fe7a5-2f4e-7798-a94b-8cff8717cf74`). There the journal rows were read in full --
 
 ```
 {"op":"committed", ..., "event_id":"019fe7a5-2f36-77cd-9138-78fb7840f94d", "payload_hash":[58,93,54,7,...]}
 {"op":"committed", ..., "event_id":"019fe7a5-2f4e-7798-a94b-8cff8717cf74", ...}
 ```
 
-Both events also reached both downstream stores through the real fanout, carrying the same hashes the SDK computed:
+-- and both events were confirmed to have reached both downstream stores through the real fanout, carrying the same hashes the SDK computed:
 
 | store | rows | event ids | recorded hash |
 |---|---|---|---|
 | `clickhouse-projection` (`events`) | 2 | `019fe7a5-2f36-…`, `019fe7a5-2f4e-…` | `5bf9231895…`, `6e8d56e695…` |
 | `archive-provider` (`objects`) | 2 | same | same |
 
+The CI gate asserts the idempotency journal only. Extending it to the downstream stores would duplicate what the adversarial corpus already does for that fan-out, and the claim this gate exists to defend is about the SDK reaching admission, not about a fan-out that was already proven.
+
 `.github/workflows/live-mtls-e2e.yml` gains a **Live proof -- the product SDK submits a real event over real mTLS** step running exactly this against the CI container. It re-asserts the transcript's own correlation (the duplicated id is the id submitted first; the third id differs) and then queries the gateway's idempotency journal for exactly one durable row per distinct id.
 
-**Its placement is load-bearing.** The step must run *after* "Verify control commands reach JetStream", and the first CI run placed it before and failed that gate (run 31327679638, step "Verify control commands reach JetStream"). `verify_control_fanout.py` fetches `last_by_subj` on `apex.events.acme.prod` and treats "a message is on the subject but is not the control event" as an immediate failure rather than a retry -- it was written when the only thing that ever reached that subject was the control event. Every event this proof submits is fanned out to that same subject, so running first displaced the message the verifier looks for. This is the same ordering constraint the workflow already documents for the operator-command proof, discovered a second time from the other direction. Using a different scope is not an escape: the workload credential is bound to `acme/prod` and anything else is `ScopeDenied`. *Flagged for the owner*: making `verify_control_fanout.py` retry on a wrong message instead of failing on it would remove the constraint entirely and lose nothing -- it would still fail once its attempts are exhausted -- but that changes an existing proof's semantics and was left for its own pass.
+**Its placement is load-bearing.** The step must run *after* "Verify control commands reach JetStream", and the first CI run placed it before and failed that gate ([run 31327679638](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/31327679638): *"a message is on apex.events.x61636d65.x70726f64 but is missing ['control', 'live-mtls-agent']; 376 envelope bytes"*). `verify_control_fanout.py` fetches `last_by_subj` on `apex.events.acme.prod` and treats "a message is on the subject but is not the control event" as an immediate failure rather than a retry -- it was written when the only thing that ever reached that subject was the control event. Every event this proof submits is fanned out to that same subject, so running first displaced the message the verifier looks for. This is the same ordering constraint the workflow already documents for the operator-command proof, discovered a second time from the other direction. Using a different scope is not an escape: the workload credential is bound to `acme/prod` and anything else is `ScopeDenied`. *Flagged for the owner*: making `verify_control_fanout.py` retry on a wrong message instead of failing on it would remove the constraint entirely and lose nothing -- it would still fail once its attempts are exhausted -- but that changes an existing proof's semantics and was left for its own pass.
 
 ### Flagged for the owner
 
