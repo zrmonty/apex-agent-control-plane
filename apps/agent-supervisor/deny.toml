@@ -1,0 +1,48 @@
+# cargo-deny configuration for apps/agent-supervisor.
+# Run: cargo deny check
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Mirrors `apps/control-plane-api/deny.toml`'s policy exactly. This process
+# holds the one credential in the system a compromised agent must never read;
+# it does not get a looser dependency policy than the gateway it talks to.
+
+[graph]
+targets = []
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # Never let an OpenSSL variant into the dependency tree: every TLS path
+    # reachable from this crate is deliberately rustls-only, matching
+    # `control-plane-api` and `event-ingest`.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

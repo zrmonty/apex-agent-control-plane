@@ -110,7 +110,7 @@ pub struct PendingCommand {
     pub trace_id: String,
     /// Lowercase action name, exactly as it appears in the emitted `control`
     /// event's `data.action` -- `stop`, `pause`, `resume`, `inject`,
-    /// `set_budget`.
+    /// `set_budget`, `force_stop`.
     pub action: String,
     pub reason_code: Option<String>,
     /// The operator-submitted `parameters` object, prost-encoded. Stored as
@@ -1100,7 +1100,7 @@ fn is_recordable(command: &PendingCommand) -> bool {
         && is_identifier(&command.command_id)
         && matches!(
             command.action.as_str(),
-            "stop" | "pause" | "resume" | "inject" | "set_budget"
+            "stop" | "pause" | "resume" | "inject" | "set_budget" | "force_stop"
         )
         && command.reason_code.as_deref().is_none_or(is_identifier)
         && command.issued_at.len() <= 64
