@@ -13,6 +13,7 @@ use apex_event_ingest::{GatewayError, IngestRequest, canonical_event_hash};
 use prost::Message;
 use prost_types::Struct as ProstStruct;
 use prost_types::value::Kind;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::OperatorCaller;
@@ -270,7 +271,11 @@ fn envelope_with_placeholder_integrity(
     clone
 }
 
-fn action_name(action: proto::ControlAction) -> Option<&'static str> {
+/// Crate-visible so `service.rs` can validate a `SubmitBulkCommand` request's
+/// single, request-level `action` once, up front, rather than letting every
+/// target independently rediscover the same "action is unspecified" failure
+/// through [`build_control_request`].
+pub(crate) fn action_name(action: proto::ControlAction) -> Option<&'static str> {
     Some(match action {
         proto::ControlAction::Stop => "stop",
         proto::ControlAction::Pause => "pause",
@@ -342,6 +347,103 @@ fn command_millis_within_acceptance_window(command_millis: u64, now_millis: u64)
     } else {
         now_millis - command_millis <= MAX_COMMAND_ID_AGE_MS
     }
+}
+
+/// Validates a caller-supplied `SubmitBulkCommand.bulk_id`, or mints a fresh
+/// one when omitted, and returns its embedded UUIDv7 millisecond clock
+/// alongside it.
+///
+/// Same grammar and the same acceptance window as `command_id` in
+/// [`build_control_request`] -- deliberately: `bulk_id` plays exactly the
+/// `command_id` role for a bulk call, one level up. Every per-target
+/// `command_id` a bulk call produces is deterministically derived from this
+/// validated id (see [`derive_target_command_id`]), so validating it here,
+/// once, is what lets every derived id inherit a trustworthy, bounded audit
+/// timestamp without re-deriving and re-checking one per target.
+pub(crate) fn validate_bulk_id(bulk_id: Option<String>) -> Result<(String, u64), CommandError> {
+    let bulk_id = match bulk_id {
+        Some(id) if !id.is_empty() => id,
+        _ => Uuid::now_v7().to_string(),
+    };
+    let millis = uuidv7_unix_millis(&bulk_id).ok_or_else(|| {
+        CommandError::new(
+            crate::errors::CommandErrorCode::InvalidCommand,
+            "bulk_id must be a canonical lowercase UUIDv7.",
+        )
+    })?;
+    if !command_millis_within_acceptance_window(millis, now_unix_millis()) {
+        return Err(CommandError::new(
+            crate::errors::CommandErrorCode::InvalidCommand,
+            "bulk_id's embedded UUIDv7 timestamp is outside the accepted clock window. Generate the bulk_id at submission time.",
+        ));
+    }
+    Ok((bulk_id, millis))
+}
+
+/// Deterministically derives one bulk target's `command_id` from a validated
+/// `bulk_id` and that target's own identity fields.
+///
+/// # Why derived rather than operator-supplied per target
+///
+/// `SubmitCommand` lets an operator choose `command_id` because a human
+/// issuing one command can reasonably generate and remember one idempotency
+/// key. A bulk call fanning out to dozens of targets is exactly the case
+/// where that stops being reasonable: the point of this RPC is that the
+/// operator supplies the target list once, not the target list plus a
+/// matching list of idempotency keys. Deriving each target's id from
+/// `bulk_id` gives the same retry safety `command_id` gives a single
+/// command -- resubmitting the same `bulk_id` against the same targets
+/// reproduces the exact same per-target ids, which the existing
+/// outbox/inbox idempotency machinery (unchanged; see `outbox.rs`/
+/// `inbox.rs`) then recognizes as duplicates on its own -- without asking the
+/// operator to track anything beyond the one id this call already hands
+/// back in [`proto::SubmitBulkCommandResponse::bulk_id`].
+///
+/// This also means two identical targets accidentally listed twice in one
+/// bulk call collapse to the same derived `command_id`: the second occurrence
+/// is reported as an accepted duplicate rather than double-enqueuing the
+/// command, with no special-casing required here.
+///
+/// # Why this is still a valid, trustworthy UUIDv7
+///
+/// The embedded millisecond timestamp is `bulk_id`'s own, already checked
+/// against the gateway's acceptance window by [`validate_bulk_id`]; this
+/// function never invents a timestamp of its own, so a derived id cannot be
+/// used to backdate or postdate the audit record any differently than a
+/// single `command_id` already could. Only the random/counter bits differ per
+/// target, seeded from a SHA-256 digest of `bulk_id` and the target's own
+/// scope/agent/run/trace identity, each field separated by a `0x00` byte so
+/// no concatenation of two fields can collide with a different split of the
+/// same bytes -- deterministic, and as collision-resistant as any other
+/// SHA-256-derived value in this crate.
+/// `uuid::Builder::from_unix_timestamp_millis` sets the version/variant bits
+/// correctly, so the result satisfies the exact same canonical-lowercase-
+/// UUIDv7 grammar [`build_control_request`] already enforces for a
+/// caller-supplied `command_id`.
+pub(crate) fn derive_target_command_id(
+    bulk_id: &str,
+    bulk_millis: u64,
+    target: &proto::BulkCommandTarget,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bulk_id.as_bytes());
+    for field in [
+        target.workspace_id.as_str(),
+        target.namespace_id.as_str(),
+        target.agent_id.as_str(),
+        target.run_id.as_str(),
+        target.trace_id.as_str(),
+    ] {
+        hasher.update([0u8]);
+        hasher.update(field.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut random_bytes = [0u8; 10];
+    random_bytes.copy_from_slice(&digest[..10]);
+    uuid::Builder::from_unix_timestamp_millis(bulk_millis, &random_bytes)
+        .into_uuid()
+        .hyphenated()
+        .to_string()
 }
 
 /// Wall-clock milliseconds since the Unix epoch.
@@ -632,5 +734,105 @@ mod tests {
                 .expect_err("a non-UUIDv7 command_id must be refused outright");
             assert_eq!(error.code, crate::errors::CommandErrorCode::InvalidCommand);
         }
+    }
+
+    fn bulk_target(agent_id: &str) -> proto::BulkCommandTarget {
+        proto::BulkCommandTarget {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_id: agent_id.to_owned(),
+            run_id: "run-1".to_owned(),
+            parent_run_id: None,
+            trace_id: "trace-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn validate_bulk_id_generates_one_when_omitted_and_it_is_a_fresh_canonical_uuidv7() {
+        let (bulk_id, millis) = validate_bulk_id(None).expect("omitted bulk_id must be minted");
+        assert_eq!(uuidv7_unix_millis(&bulk_id), Some(millis));
+        assert!((now_millis().saturating_sub(millis)) < 5_000);
+    }
+
+    #[test]
+    fn validate_bulk_id_accepts_a_current_caller_supplied_id() {
+        let id = Uuid::now_v7().to_string();
+        let (returned, millis) =
+            validate_bulk_id(Some(id.clone())).expect("a fresh caller-supplied id must validate");
+        assert_eq!(returned, id);
+        assert_eq!(Some(millis), uuidv7_unix_millis(&id));
+    }
+
+    #[test]
+    fn validate_bulk_id_rejects_a_backdated_or_non_uuidv7_id() {
+        let epoch_id = "00000000-0000-7000-8000-000000000000";
+        assert_eq!(
+            validate_bulk_id(Some(epoch_id.to_owned()))
+                .unwrap_err()
+                .code,
+            crate::errors::CommandErrorCode::InvalidCommand
+        );
+        assert_eq!(
+            validate_bulk_id(Some("not-a-uuid".to_owned()))
+                .unwrap_err()
+                .code,
+            crate::errors::CommandErrorCode::InvalidCommand
+        );
+    }
+
+    /// The derivation's whole idempotency story: the same `bulk_id` and the
+    /// same target must reproduce the exact same `command_id` every time, so
+    /// a retried bulk submission resolves as a duplicate rather than a fresh
+    /// enqueue for every target.
+    #[test]
+    fn derive_target_command_id_is_deterministic_for_the_same_bulk_id_and_target() {
+        let bulk_id = Uuid::now_v7().to_string();
+        let millis = uuidv7_unix_millis(&bulk_id).unwrap();
+        let target = bulk_target("agent-a");
+        let first = derive_target_command_id(&bulk_id, millis, &target);
+        let second = derive_target_command_id(&bulk_id, millis, &target);
+        assert_eq!(first, second);
+        // The derived id must itself be a well-formed canonical UUIDv7 whose
+        // embedded clock is the bulk_id's, so it satisfies the same grammar
+        // and acceptance window `build_control_request` enforces for a
+        // caller-supplied `command_id`.
+        assert_eq!(uuidv7_unix_millis(&first), Some(millis));
+    }
+
+    /// Different targets under the same bulk_id must not collide, or two
+    /// distinct agents' commands would be recorded as one.
+    #[test]
+    fn derive_target_command_id_differs_across_targets_and_across_bulk_ids() {
+        let bulk_id = Uuid::now_v7().to_string();
+        let millis = uuidv7_unix_millis(&bulk_id).unwrap();
+        let a = derive_target_command_id(&bulk_id, millis, &bulk_target("agent-a"));
+        let b = derive_target_command_id(&bulk_id, millis, &bulk_target("agent-b"));
+        assert_ne!(a, b);
+
+        let other_bulk_id = Uuid::now_v7().to_string();
+        let other_millis = uuidv7_unix_millis(&other_bulk_id).unwrap();
+        let a_again =
+            derive_target_command_id(&other_bulk_id, other_millis, &bulk_target("agent-a"));
+        assert_ne!(a, a_again);
+    }
+
+    /// A field-boundary shift (`workspace_id="ac"`, `namespace_id="meprod"`
+    /// vs. `workspace_id="acme"`, `namespace_id="prod"`) must not derive the
+    /// same id: the `0x00` separator between hashed fields exists precisely
+    /// to prevent this.
+    #[test]
+    fn derive_target_command_id_is_not_confused_by_a_field_boundary_shift() {
+        let bulk_id = Uuid::now_v7().to_string();
+        let millis = uuidv7_unix_millis(&bulk_id).unwrap();
+        let mut shifted = bulk_target("agent-a");
+        shifted.workspace_id = "ac".to_owned();
+        shifted.namespace_id = "meprod".to_owned();
+        let mut unshifted = bulk_target("agent-a");
+        unshifted.workspace_id = "acme".to_owned();
+        unshifted.namespace_id = "prod".to_owned();
+        assert_ne!(
+            derive_target_command_id(&bulk_id, millis, &shifted),
+            derive_target_command_id(&bulk_id, millis, &unshifted)
+        );
     }
 }

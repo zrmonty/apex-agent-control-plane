@@ -60,6 +60,23 @@ service ControlGateway {
   rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
   rpc AckCommand(AckCommandRequest) returns (AckCommandResponse);
   rpc GetCommandStatus(GetCommandStatusRequest) returns (GetCommandStatusResponse);
+
+  // Fans one command out to an explicit, operator-provided list of targets in
+  // a single call -- what would otherwise be that many separate
+  // `SubmitCommand` calls during an incident, issued as one. Not a broadcast:
+  // this gateway has no agent registry and cannot resolve "every agent in
+  // this namespace" on its own, so every target must be named by the caller.
+  // See `MAX_BULK_COMMAND_TARGETS` (control-plane-api/src/service.rs) for the
+  // hard ceiling on how many targets one call may name.
+  //
+  // Partial failure is the normal outcome, not an exceptional one: each
+  // target is authorized and durably recorded independently through the same
+  // path a single `SubmitCommand` uses, so one target being outside the
+  // operator's scope (or any other per-target failure) never blocks the
+  // targets that are valid. The response reports, for every requested
+  // target, whether it was accepted and -- if not -- which of this gateway's
+  // existing error codes (errors.rs) explains why.
+  rpc SubmitBulkCommand(SubmitBulkCommandRequest) returns (SubmitBulkCommandResponse);
 }
 
 message ControlCommandRequest {
@@ -191,4 +208,73 @@ enum ControlAction {
   RESUME = 3;
   INJECT = 4;
   SET_BUDGET = 5;
+}
+
+// One target of a bulk command: everything `ControlCommandRequest` needs to
+// identify a target agent and its run, minus the fields a bulk call hoists up
+// to the request so they apply identically to every target (`action`,
+// `reason_code`, `parameters`).
+//
+// `workspace_id`/`namespace_id` are per-target, not a single request-level
+// pair, on purpose: an operator's authorization is checked independently for
+// every target, and a request-level scope field would make that check
+// trivial rather than real -- see `SubmitBulkCommand`'s own comment. A bulk
+// call whose targets happen to share one workspace/namespace, which is the
+// common "stop everyone in this namespace" incident shape, simply repeats the
+// same two values across its target list.
+message BulkCommandTarget {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string agent_id = 3;
+  string run_id = 4;
+  optional string parent_run_id = 5;
+  string trace_id = 6;
+}
+
+message SubmitBulkCommandRequest {
+  // Caller-supplied lowercase UUIDv7 idempotency key for the *bulk
+  // submission itself*, not per target. Optional: the gateway generates one
+  // when omitted, exactly like `ControlCommandRequest.command_id`. Every
+  // target's own `command_id` is deterministically derived from this id plus
+  // that target's own fields (see
+  // `control-plane-api/src/envelope.rs::derive_target_command_id`), so
+  // resubmitting the same `bulk_id` against the same targets is an idempotent
+  // no-op for every one of them -- the same retry contract `SubmitCommand`
+  // already gives a single target, extended across the batch rather than
+  // reinvented for it. An operator does not have to generate or track one
+  // idempotency key per target.
+  optional string bulk_id = 1;
+  // Bounded by `MAX_BULK_COMMAND_TARGETS`. Must be non-empty.
+  repeated BulkCommandTarget targets = 2;
+  ControlAction action = 3;
+  optional string reason_code = 4;
+  // Action-specific object, applied identically to every target. Same
+  // `inject.content`-is-untrusted-data rule as
+  // `ControlCommandRequest.parameters`.
+  google.protobuf.Struct parameters = 5;
+}
+
+message SubmitBulkCommandResponse {
+  string bulk_id = 1;
+  // One result per requested target, in the same order as
+  // `SubmitBulkCommandRequest.targets`. Always exactly that many results --
+  // there is no target this response is silent about.
+  repeated BulkCommandResult results = 2;
+}
+
+message BulkCommandResult {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string agent_id = 3;
+  bool accepted = 4;
+  // Set when `accepted` is true; mirrors `ControlCommandResponse`.
+  optional string command_id = 5;
+  optional bool duplicate = 6;
+  optional bool delivered = 7;
+  // Set when `accepted` is false. `error_code` is one of this gateway's
+  // existing `CommandErrorCode` values (errors.rs) -- never a bulk-specific
+  // taxonomy -- so a caller that already handles `SubmitCommand` errors
+  // handles a rejected bulk target without a new case.
+  optional string error_code = 8;
+  optional string error_message = 9;
 }

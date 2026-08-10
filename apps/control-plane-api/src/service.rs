@@ -18,8 +18,11 @@ use crate::agent_auth::{
     peer_identity_from_request,
 };
 use crate::auth::{OperatorCredentialResolver, OperatorTokenAuthenticator};
-use crate::envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
-use crate::errors::CommandError;
+use crate::envelope::{
+    AcceptedCommand, ControlCommandInput, build_control_request, derive_target_command_id,
+    validate_bulk_id,
+};
+use crate::errors::{CommandError, CommandErrorCode};
 use crate::inbox::{
     AckResult, ControlInboxBackend, DeliveryPolicy, DeliveryStatus, InMemoryCommandInbox, InboxKey,
     PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
@@ -58,6 +61,26 @@ const MAX_ACCELERATOR_OPERATIONS: usize = 128;
 /// to guess.
 pub(crate) const DEFAULT_MAX_POLLS_PER_WINDOW: u32 = 5;
 const MAX_TRACKED_AGENTS: usize = 8192;
+
+/// Hard ceiling on how many targets one `SubmitBulkCommand` call may name.
+///
+/// **Flagged for the owner, chosen with the same discipline as
+/// `MAX_COMMANDS_PER_POLL`/`MAX_AGENT_SCOPES`.** A bulk request's durable
+/// writes are batched into one `spawn_blocking` task holding a single
+/// `storage_slots` permit for the whole call (see
+/// [`ControlGatewayService::submit_bulk_command`]), so its per-target outbox
+/// commits and inbox records run strictly sequentially, each behind the same
+/// mutexes every other in-flight `SubmitCommand`/`PollCommands`/`AckCommand`
+/// call on this process is also waiting on. That makes one bulk call's worst
+/// case hold time on shared storage roughly `targets.len()` times a single
+/// `SubmitCommand`'s own. 64 matches `MAX_COMMANDS_PER_POLL`'s order of
+/// magnitude: large enough that a real incident's target list clears it in
+/// one call, small enough that the worst case stays comparable to a single
+/// full poll batch rather than becoming its own denial-of-service surface. A
+/// namespace with more targets than this issues a second call -- the ceiling
+/// protects the shared gateway process, it is not an operational limit on how
+/// many agents an incident can stop.
+pub(crate) const MAX_BULK_COMMAND_TARGETS: usize = 64;
 
 /// The `RateLimitKey.namespace` every control-gateway admission counter lives
 /// under.
@@ -733,6 +756,233 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             delivery_attempt,
         }))
     }
+
+    /// Bulk fan-out over the same accept path [`Self::submit_command`] uses:
+    /// one real, independently-tracked command per named target, each with
+    /// its own `command_id`, each independently authorized, quota-checked,
+    /// delivered, ackable and queryable exactly as a normal single-target
+    /// command already is. This method invents no new state in the inbox or
+    /// outbox for "bulk" as a concept -- it is purely a fan-out convenience
+    /// over per-target commands that already work exactly as they do today.
+    ///
+    /// # Why this does not require dual-operator approval
+    ///
+    /// The product vault's RBAC decision ("Ownership and Team Authorization")
+    /// lists "production forced stop or bulk control" as a sensitive action
+    /// requiring a second approver. Read literally -- "bulk" alone, always --
+    /// that would gate every bulk call, including a bulk `pause` used to buy
+    /// an on-call engineer time to look at a runaway namespace, behind a
+    /// second operator being reachable. That would make this feature unusable
+    /// for the exact situation it exists to serve: fast, single-operator
+    /// response during an incident, which is precisely when a second approver
+    /// is least likely to be immediately available. It would also be a
+    /// materially bigger feature than what is built here -- this crate has no
+    /// two-party approval workflow anywhere today (no pending-approval state,
+    /// no second-signer identity, no expiry) -- and bolting a partial version
+    /// of one onto only this RPC would be worse than not having it: a control
+    /// an operator believes is uniformly enforced, actually checked in
+    /// exactly one place, for exactly one action.
+    ///
+    /// The more defensible reading, and the one this gateway implements, is
+    /// that the RBAC row pairs "production forced stop" *and* "bulk control"
+    /// as the sensitive combination it means to gate -- not "bulk" in
+    /// isolation. Under that reading: bulk
+    /// `stop`/`pause`/`resume`/`inject`/`set_budget` keep today's
+    /// single-operator authorization, identical to what issuing the same
+    /// commands one at a time already allows (this is the whole feature --
+    /// gating routine bulk pauses behind two-person approval would defeat
+    /// it). The five actions `ControlAction` defines in this build have no
+    /// non-cooperative "forced" variant, so there is nothing here for a bulk
+    /// call to escalate into.
+    ///
+    /// A `force_stop` action and its own dual-approval gate are being added
+    /// concurrently in a separate worktree. **If `force_stop` lands in the
+    /// shared `ControlAction` enum before this is reconciled, this method
+    /// must not silently accept it as just another bulk-able action.**
+    /// Duplicating whatever approval gate that RPC builds, here, a second
+    /// time, would be worse than not supporting bulk force-stop at all --
+    /// two independent authorization paths for the same sensitive action is
+    /// how one of them quietly rots. The correct fix at reconciliation time is
+    /// to reject a bulk request whose `action` is `force_stop` from *this*
+    /// RPC outright, and require its author's dedicated force-stop path
+    /// (single- or bulk-target) be the only way to reach it -- the same
+    /// discipline `is_recordable` in `inbox.rs` already applies as the single
+    /// place that decides which action names may ever be durably recorded.
+    async fn submit_bulk_command(
+        &self,
+        request: tonic::Request<proto::SubmitBulkCommandRequest>,
+    ) -> Result<tonic::Response<proto::SubmitBulkCommandResponse>, tonic::Status> {
+        // Same independent operator auth boundary as `submit_command`. There
+        // is no separate "bulk operator" credential space -- an operator who
+        // may issue a command into a scope may issue it in bulk, and an
+        // operator who may not is refused per-target below exactly as they
+        // would be refused by a single `SubmitCommand` call.
+        let operator = self
+            .auth
+            .authenticate(request.metadata())
+            .map_err(CommandError::into_status)?;
+
+        let input = request.into_inner();
+        if input.targets.is_empty() {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidCommand,
+                "SubmitBulkCommand requires at least one target.",
+            )
+            .into_status());
+        }
+        if input.targets.len() > MAX_BULK_COMMAND_TARGETS {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidCommand,
+                "SubmitBulkCommand exceeds the maximum number of targets allowed in one call.",
+            )
+            .into_status());
+        }
+        // The action is a single request-level field shared by every target,
+        // not a per-target property, so an unspecified action is a
+        // whole-request failure -- surfaced once, here -- rather than the
+        // same per-target rejection repeated `targets.len()` times.
+        let action = proto::ControlAction::try_from(input.action)
+            .unwrap_or(proto::ControlAction::Unspecified);
+        if crate::envelope::action_name(action).is_none() {
+            return Err(CommandError::new(
+                CommandErrorCode::InvalidCommand,
+                "action must be one of stop, pause, resume, inject, set_budget.",
+            )
+            .into_status());
+        }
+
+        let (bulk_id, bulk_millis) =
+            validate_bulk_id(input.bulk_id).map_err(CommandError::into_status)?;
+
+        // Phase 1: per-target admission and validation. Both are cheap,
+        // synchronous, in-memory operations -- no storage I/O -- so they run
+        // directly on this async task. Scope authorization happens here, via
+        // `build_control_request`'s own `operator.allows_scope` check, run
+        // once per target: an operator scoped to one workspace gets exactly
+        // the same `SCOPE_DENIED` for a target outside it that a standalone
+        // `SubmitCommand` call would give them, and nothing about being
+        // inside a bulk call widens that.
+        //
+        // The admission ceiling is charged once per target -- the same
+        // ceiling `submit_command` charges once per call -- so a bulk call
+        // cannot admit more durable commands per second than the same
+        // operator issuing them one at a time would be allowed to. Checked
+        // sequentially rather than concurrently: `MAX_BULK_COMMAND_TARGETS`
+        // already bounds the total to a size where sequential admission
+        // checks stay well inside the latency this channel already accepts
+        // for a full poll batch, and sequential is simpler to reason about
+        // than parallel admission racing itself over the same operator
+        // bucket.
+        let mut slots: Vec<Option<proto::BulkCommandResult>> = Vec::with_capacity(input.targets.len());
+        let mut pending = Vec::with_capacity(input.targets.len());
+        for target in &input.targets {
+            if let Err(error) = self.admit(operator.subject()).await {
+                slots.push(Some(rejected_bulk_result(target, error)));
+                continue;
+            }
+            let command_id = derive_target_command_id(&bulk_id, bulk_millis, target);
+            let command_input = ControlCommandInput {
+                command_id: Some(command_id),
+                workspace_id: target.workspace_id.clone(),
+                namespace_id: target.namespace_id.clone(),
+                agent_id: target.agent_id.clone(),
+                run_id: target.run_id.clone(),
+                parent_run_id: target.parent_run_id.clone(),
+                trace_id: target.trace_id.clone(),
+                action,
+                reason_code: input.reason_code.clone(),
+                parameters: input.parameters.clone(),
+            };
+            match build_control_request(command_input, &operator) {
+                Ok(accepted) => {
+                    slots.push(None);
+                    pending.push((slots.len() - 1, target.clone(), accepted));
+                }
+                Err(error) => slots.push(Some(rejected_bulk_result(target, error))),
+            }
+        }
+
+        // Phase 2: durable writes for whatever passed phase 1, batched into
+        // one blocking task holding a single storage permit for the whole
+        // call -- see `MAX_BULK_COMMAND_TARGETS`'s own comment for why that
+        // ceiling exists. Skipped entirely when every target already failed
+        // phase 1, so an all-rejected bulk call never touches storage at all.
+        if !pending.is_empty() {
+            let outbox = self.outbox.clone();
+            let inbox = self.inbox.clone();
+            let storage_permit = self
+                .storage_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| CommandError::rate_limited().into_status())?;
+            let write_results = tokio::task::spawn_blocking(move || {
+                let _storage_permit = storage_permit;
+                pending
+                    .into_iter()
+                    .map(|(slot, target, accepted)| {
+                        let AcceptedCommand {
+                            command_id,
+                            request: ingest_request,
+                            delivery,
+                        } = accepted;
+                        // Same ordering as `submit_command`: the outbox
+                        // commit is the authoritative durable acceptance and
+                        // audit record, so it happens before the inbox
+                        // delivery record for this same target.
+                        let result: Result<_, CommandError> = (|| {
+                            let outcome = submit_command(&outbox, &ingest_request)?;
+                            let record = inbox.with_lock(|inbox| inbox.record(&delivery))??;
+                            Ok((outcome, record))
+                        })();
+                        (slot, target, command_id, result)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|_| CommandError::internal().into_status())?;
+
+            // A per-target storage failure here is the same signal
+            // `submit_command` treats as a storage-health flip for its one
+            // target; folded across the whole batch, any failure marks the
+            // gateway unhealthy exactly as it would if that target had
+            // arrived as its own `SubmitCommand` call.
+            let mut any_storage_failure = false;
+            for (slot, target, command_id, result) in write_results {
+                let filled = match result {
+                    Ok((outcome, record)) => {
+                        self.metrics
+                            .submissions
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if outcome.duplicate {
+                            self.metrics
+                                .duplicate_submissions
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        accepted_bulk_result(&target, command_id, outcome, record)
+                    }
+                    Err(error) => {
+                        any_storage_failure = true;
+                        rejected_bulk_result(&target, error)
+                    }
+                };
+                slots[slot] = Some(filled);
+            }
+            self.metrics.storage_healthy.store(
+                !any_storage_failure,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
+        let results = slots
+            .into_iter()
+            .map(|slot| slot.expect("every target index is filled exactly once, by phase 1 or phase 2"))
+            .collect();
+
+        Ok(tonic::Response::new(proto::SubmitBulkCommandResponse {
+            bulk_id,
+            results,
+        }))
+    }
 }
 
 fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliveryState {
@@ -741,6 +991,56 @@ fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliverySta
         DeliveryStatus::Delivered => proto::CommandDeliveryState::CommandDeliveryDelivered,
         DeliveryStatus::Acknowledged => proto::CommandDeliveryState::CommandDeliveryAcknowledged,
         DeliveryStatus::Exhausted => proto::CommandDeliveryState::CommandDeliveryExhausted,
+    }
+}
+
+/// Builds the accepted [`proto::BulkCommandResult`] for one bulk target.
+///
+/// Mirrors `ControlCommandResponse`'s own fields exactly (`command_id`,
+/// `duplicate`, `delivered`), including `submit_command`'s own reasoning for
+/// `delivered`: a reused `command_id` whose outbox row is complete can still
+/// create a fresh inbox delivery after retention, so `delivered` only claims
+/// the old trace fanout covers this attempt when the inbox write itself also
+/// reports `AlreadyRecorded`.
+fn accepted_bulk_result(
+    target: &proto::BulkCommandTarget,
+    command_id: String,
+    outcome: crate::outbox::SubmitOutcome,
+    record: RecordResult,
+) -> proto::BulkCommandResult {
+    proto::BulkCommandResult {
+        workspace_id: target.workspace_id.clone(),
+        namespace_id: target.namespace_id.clone(),
+        agent_id: target.agent_id.clone(),
+        accepted: true,
+        command_id: Some(command_id),
+        duplicate: Some(outcome.duplicate),
+        delivered: Some(outcome.delivered && record == RecordResult::AlreadyRecorded),
+        error_code: None,
+        error_message: None,
+    }
+}
+
+/// Builds the rejected [`proto::BulkCommandResult`] for one bulk target.
+///
+/// `error_code`/`error_message` are this crate's existing, redacted
+/// [`CommandErrorCode`]/message pair (`errors.rs`) -- never a bulk-specific
+/// taxonomy -- so a caller that already handles `SubmitCommand` errors
+/// handles a rejected bulk target without a new case to learn.
+fn rejected_bulk_result(
+    target: &proto::BulkCommandTarget,
+    error: CommandError,
+) -> proto::BulkCommandResult {
+    proto::BulkCommandResult {
+        workspace_id: target.workspace_id.clone(),
+        namespace_id: target.namespace_id.clone(),
+        agent_id: target.agent_id.clone(),
+        accepted: false,
+        command_id: None,
+        duplicate: None,
+        delivered: None,
+        error_code: Some(error.code.as_str().to_owned()),
+        error_message: Some(error.message().to_owned()),
     }
 }
 
@@ -1686,5 +1986,388 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // --- SubmitBulkCommand -----------------------------------------------
+
+    fn bulk_target(
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: &str,
+        run_id: &str,
+        trace_id: &str,
+    ) -> proto::BulkCommandTarget {
+        proto::BulkCommandTarget {
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            run_id: run_id.to_owned(),
+            parent_run_id: None,
+            trace_id: trace_id.to_owned(),
+        }
+    }
+
+    fn bulk_stop_request(targets: Vec<proto::BulkCommandTarget>) -> proto::SubmitBulkCommandRequest {
+        proto::SubmitBulkCommandRequest {
+            bulk_id: None,
+            targets,
+            action: proto::ControlAction::Stop as i32,
+            reason_code: Some("operator.request".to_owned()),
+            parameters: Some(ProstStruct::default()),
+        }
+    }
+
+    fn authed_bulk_request(
+        body: proto::SubmitBulkCommandRequest,
+    ) -> tonic::Request<proto::SubmitBulkCommandRequest> {
+        let mut request = tonic::Request::new(body);
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        request
+    }
+
+    #[tokio::test]
+    async fn submit_bulk_command_accepts_a_well_formed_request_and_fans_out_distinct_command_ids()
+    {
+        let service = service();
+        let targets = vec![
+            bulk_target("acme", "prod", "agent-a", "run-a", "trace-a"),
+            bulk_target("acme", "prod", "agent-b", "run-b", "trace-b"),
+        ];
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(targets)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.bulk_id.is_empty());
+        assert_eq!(response.results.len(), 2);
+        assert!(response.results.iter().all(|result| result.accepted));
+        let ids: std::collections::HashSet<_> = response
+            .results
+            .iter()
+            .map(|result| result.command_id.clone().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2, "every target must get its own command_id");
+    }
+
+    #[tokio::test]
+    async fn submit_bulk_command_rejects_an_empty_target_list() {
+        let service = service();
+        let status = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(vec![])))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// The documented, hard ceiling on how many targets one call may name.
+    #[tokio::test]
+    async fn submit_bulk_command_rejects_a_request_over_the_target_ceiling() {
+        let service = service();
+        let targets: Vec<_> = (0..=MAX_BULK_COMMAND_TARGETS)
+            .map(|index| bulk_target("acme", "prod", &format!("agent-{index}"), "run-1", "trace-1"))
+            .collect();
+        assert_eq!(targets.len(), MAX_BULK_COMMAND_TARGETS + 1);
+        let status = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(targets)))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        // Exactly at the ceiling must still be accepted.
+        let at_ceiling: Vec<_> = (0..MAX_BULK_COMMAND_TARGETS)
+            .map(|index| bulk_target("acme", "prod", &format!("agent-{index}"), "run-1", "trace-1"))
+            .collect();
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(at_ceiling)))
+            .await
+            .expect("exactly the ceiling must be accepted")
+            .into_inner();
+        assert_eq!(response.results.len(), MAX_BULK_COMMAND_TARGETS);
+    }
+
+    #[tokio::test]
+    async fn submit_bulk_command_rejects_an_unspecified_action_up_front() {
+        let service = service();
+        let mut request =
+            bulk_stop_request(vec![bulk_target("acme", "prod", "agent-a", "run-a", "trace-a")]);
+        request.action = proto::ControlAction::Unspecified as i32;
+        let status = service
+            .submit_bulk_command(authed_bulk_request(request))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn submit_bulk_command_rejects_missing_authentication() {
+        let service = service();
+        let request = tonic::Request::new(bulk_stop_request(vec![bulk_target(
+            "acme", "prod", "agent-a", "run-a", "trace-a",
+        )]));
+        let status = service.submit_bulk_command(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// Partial failure is the normal outcome: some targets succeed, others
+    /// fail, and the response says exactly which failed and why -- using this
+    /// gateway's existing error taxonomy, not a bulk-specific one.
+    #[tokio::test]
+    async fn submit_bulk_command_reports_partial_failure_with_the_correct_per_target_reason() {
+        let service = service();
+        let targets = vec![
+            bulk_target("acme", "prod", "agent-a", "run-a", "trace-a"),
+            bulk_target("other-workspace", "prod", "agent-b", "run-b", "trace-b"),
+        ];
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(targets)))
+            .await
+            .expect("a bulk call with at least one authorized target must not fail wholesale")
+            .into_inner();
+        assert_eq!(response.results.len(), 2);
+
+        let ok = &response.results[0];
+        assert!(ok.accepted);
+        assert_eq!(ok.agent_id, "agent-a");
+        assert!(ok.command_id.is_some());
+        assert!(ok.error_code.is_none());
+
+        let denied = &response.results[1];
+        assert!(!denied.accepted);
+        assert_eq!(denied.agent_id, "agent-b");
+        assert!(denied.command_id.is_none());
+        assert_eq!(denied.error_code.as_deref(), Some("SCOPE_DENIED"));
+        assert!(denied.error_message.is_some());
+    }
+
+    /// **The mandatory isolation test.** An operator scoped to exactly one
+    /// workspace/namespace must not be able to reach a different one by
+    /// folding it into a bulk call alongside targets it actually holds. Every
+    /// target's scope is checked independently -- the same
+    /// `operator.allows_scope` check `SubmitCommand` already applies, run
+    /// once per target -- so smuggling an out-of-scope target in among
+    /// in-scope ones changes nothing about whether that target is denied.
+    #[tokio::test]
+    async fn submit_bulk_command_cannot_reach_a_scope_the_operator_could_not_target_individually()
+    {
+        let service = service(); // operator:zack is scoped to exactly acme/prod.
+        let in_scope = bulk_target("acme", "prod", "agent-a", "run-a", "trace-a");
+        let different_namespace = bulk_target("acme", "staging", "agent-b", "run-b", "trace-b");
+        let different_workspace =
+            bulk_target("other-workspace", "prod", "agent-c", "run-c", "trace-c");
+
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(vec![
+                in_scope,
+                different_namespace,
+                different_workspace,
+            ])))
+            .await
+            .expect("the in-scope target must still be accepted")
+            .into_inner();
+
+        assert_eq!(response.results.len(), 3);
+        assert!(
+            response.results[0].accepted,
+            "the in-scope target must be accepted"
+        );
+        for out_of_scope in &response.results[1..] {
+            assert!(
+                !out_of_scope.accepted,
+                "a scope the operator does not hold must never be reachable via bulk: {out_of_scope:?}"
+            );
+            assert_eq!(out_of_scope.error_code.as_deref(), Some("SCOPE_DENIED"));
+        }
+
+        // Cross-check against the single-target path: the same scope is
+        // refused there too, proving bulk grants nothing beyond what N
+        // individual `SubmitCommand` calls would have.
+        let mut single = stop_request();
+        single.workspace_id = "acme".to_owned();
+        single.namespace_id = "staging".to_owned();
+        let status = service
+            .submit_command(authed_request(single))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Every fanned-out command is a real, independently-tracked command:
+    /// each agent polls and sees only its own, each is ackable on its own,
+    /// and `GetCommandStatus` reports each one's own state -- exactly the
+    /// same paths a single-target `SubmitCommand` already exercises.
+    #[tokio::test]
+    async fn each_bulk_fanned_out_command_is_independently_pollable_ackable_and_queryable() {
+        let service = service_with_two_agents();
+        let targets = vec![
+            bulk_target("acme", "prod", "agent-a", "run-a", "trace-a"),
+            bulk_target("acme", "prod", "agent-b", "run-b", "trace-b"),
+        ];
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(targets)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.results.iter().all(|result| result.accepted));
+        let command_id_a = response.results[0].command_id.clone().unwrap();
+        let command_id_b = response.results[1].command_id.clone().unwrap();
+        assert_ne!(command_id_a, command_id_b);
+
+        // Each agent polls and sees only the command fanned out to it.
+        let delivered_a = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered_a.commands.len(), 1);
+        assert_eq!(delivered_a.commands[0].command_id, command_id_a);
+
+        let delivered_b = service
+            .poll_commands(poll_request("agent-b-token-abcdefgh", peer(0xbb)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered_b.commands.len(), 1);
+        assert_eq!(delivered_b.commands[0].command_id, command_id_b);
+
+        // Agent A acks its own delivery.
+        let mut ack_a = tonic::Request::new(proto::AckCommandRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id_a.clone(),
+            delivery_attempt: 1,
+        });
+        ack_a.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-a-token-abcdefgh".parse().unwrap(),
+        );
+        ack_a.extensions_mut().insert(peer(0xaa));
+        let ack_a_result = service.ack_command(ack_a).await.unwrap().into_inner();
+        assert!(ack_a_result.acknowledged);
+
+        // Querying each is independent: A is acknowledged, B is merely
+        // delivered -- acking one fanned-out command must never affect
+        // another's state.
+        let mut status_a = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id_a,
+        });
+        status_a
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        let status_a = service
+            .get_command_status(status_a)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status_a.state,
+            proto::CommandDeliveryState::CommandDeliveryAcknowledged as i32
+        );
+
+        let mut status_b = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id_b,
+        });
+        status_b
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        let status_b = service
+            .get_command_status(status_b)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status_b.state,
+            proto::CommandDeliveryState::CommandDeliveryDelivered as i32
+        );
+    }
+
+    /// Resubmitting the same `bulk_id` against the same targets must be a
+    /// no-op duplicate for every target -- the same idempotency contract
+    /// `SubmitCommand` gives one `command_id`, extended across the batch via
+    /// `derive_target_command_id` rather than requiring the operator to track
+    /// one idempotency key per target.
+    #[tokio::test]
+    async fn resubmitting_the_same_bulk_id_and_targets_is_idempotent_for_every_target() {
+        let service = service_with_two_agents();
+        let mut request = bulk_stop_request(vec![
+            bulk_target("acme", "prod", "agent-a", "run-a", "trace-a"),
+            bulk_target("acme", "prod", "agent-b", "run-b", "trace-b"),
+        ]);
+        request.bulk_id = Some(fresh_command_id(0x900));
+
+        let first = service
+            .submit_bulk_command(authed_bulk_request(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        let second = service
+            .submit_bulk_command(authed_bulk_request(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(first.bulk_id, second.bulk_id);
+        assert_eq!(first.results.len(), second.results.len());
+        for (initial, retry) in first.results.iter().zip(second.results.iter()) {
+            assert!(initial.accepted && retry.accepted);
+            assert_eq!(initial.command_id, retry.command_id);
+            assert_eq!(initial.duplicate, Some(false));
+            assert_eq!(retry.duplicate, Some(true));
+        }
+
+        // And the retry did not queue a second delivery for either agent.
+        let delivered_a = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered_a.commands.len(), 1);
+    }
+
+    /// The per-operator admission ceiling `SubmitCommand` enforces once per
+    /// call is charged once per *target* inside a bulk call -- a bulk call
+    /// cannot admit more durable commands per second than the same operator
+    /// issuing them one at a time already could.
+    #[tokio::test]
+    async fn submit_bulk_command_charges_the_admission_ceiling_once_per_target() {
+        let service = service();
+        // Consume all but 2 units of the operator's per-window budget with
+        // ordinary single-target submissions first.
+        for index in 0..(DEFAULT_MAX_COMMANDS_PER_WINDOW - 2) {
+            let mut request = stop_request();
+            request.command_id = Some(fresh_command_id(u64::from(index)));
+            service
+                .submit_command(authed_request(request))
+                .await
+                .unwrap();
+        }
+
+        let targets = vec![
+            bulk_target("acme", "prod", "agent-a", "run-a", "trace-a"),
+            bulk_target("acme", "prod", "agent-b", "run-b", "trace-b"),
+            bulk_target("acme", "prod", "agent-c", "run-c", "trace-c"),
+        ];
+        let response = service
+            .submit_bulk_command(authed_bulk_request(bulk_stop_request(targets)))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let accepted = response.results.iter().filter(|r| r.accepted).count();
+        assert_eq!(
+            accepted, 2,
+            "only the 2 remaining units of admission budget must be granted"
+        );
+        let denied = response
+            .results
+            .iter()
+            .find(|r| !r.accepted)
+            .expect("the third target must have been rejected");
+        assert_eq!(denied.error_code.as_deref(), Some("RATE_LIMITED"));
     }
 }
