@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS apex_control_inbox (
 ALTER TABLE apex_control_inbox
     ADD COLUMN IF NOT EXISTS acknowledged_at_millis BIGINT;
 
+-- Set only by CancelCommand, and only while attempts = 0 (see
+-- PostgresCommandInbox::cancel in inbox_postgres.rs). Durable and terminal,
+-- the same as acknowledged_at_millis: a restart must still answer a status
+-- query for a cancelled command_id with CANCELLED, not "not found".
+ALTER TABLE apex_control_inbox
+    ADD COLUMN IF NOT EXISTS cancelled_at_millis BIGINT;
+
 CREATE INDEX IF NOT EXISTS apex_control_inbox_delivery_idx
     ON apex_control_inbox (agent_id, sequence);
 

@@ -99,6 +99,14 @@ impl CommandInbox for RecoveringPostgresCommandInbox {
         self.with_retry(|inner| inner.status(key, max_attempts))
     }
 
+    fn cancel(
+        &mut self,
+        key: &super::InboxKey,
+        now_millis: u64,
+    ) -> Result<super::CancelResult, CommandError> {
+        self.with_retry(|inner| inner.cancel(key, now_millis))
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -253,6 +261,7 @@ impl CommandInbox for PostgresCommandInbox {
                      FROM apex_control_inbox
                      WHERE agent_id = $1
                        AND acknowledged_at_millis IS NULL
+                       AND cancelled_at_millis IS NULL
                        AND attempts < $2
                        AND (last_delivered_millis IS NULL
                             OR $3 - last_delivered_millis >= $4)
@@ -421,7 +430,7 @@ impl CommandInbox for PostgresCommandInbox {
         let row = self
             .client
             .query_opt(
-                "SELECT attempts, last_delivered_millis, acknowledged_at_millis
+                "SELECT attempts, last_delivered_millis, acknowledged_at_millis, cancelled_at_millis
                  FROM apex_control_inbox
                  WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3",
                 &[&key.workspace_id, &key.namespace_id, &key.command_id],
@@ -432,7 +441,10 @@ impl CommandInbox for PostgresCommandInbox {
         };
         let attempts = row.get::<_, i64>(0).try_into().unwrap_or(u32::MAX);
         let acknowledged = row.get::<_, Option<i64>>(2).is_some();
-        let state = if acknowledged {
+        let cancelled = row.get::<_, Option<i64>>(3).is_some();
+        let state = if cancelled {
+            super::DeliveryStatus::Cancelled
+        } else if acknowledged {
             super::DeliveryStatus::Acknowledged
         } else if attempts == 0 {
             super::DeliveryStatus::Pending
@@ -442,6 +454,57 @@ impl CommandInbox for PostgresCommandInbox {
             super::DeliveryStatus::Delivered
         };
         Ok(Some((state, attempts)))
+    }
+
+    /// Retracts a never-delivered command. Same shape as `acknowledge`: an
+    /// optimistic `UPDATE ... WHERE` first (atomic and race-safe against a
+    /// concurrent `claim` on the same row -- Postgres re-evaluates the WHERE
+    /// clause against the committed row once any lock it waits on is
+    /// released, so a claim that lands first is always seen), and only on
+    /// that update matching zero rows does a follow-up `SELECT` classify why:
+    /// unknown key, already cancelled, or already delivered.
+    fn cancel(
+        &mut self,
+        key: &super::InboxKey,
+        now_millis: u64,
+    ) -> Result<super::CancelResult, CommandError> {
+        let now_millis = i64::try_from(now_millis).map_err(|_| CommandError::internal())?;
+        let updated = self
+            .client
+            .execute(
+                "UPDATE apex_control_inbox
+                 SET cancelled_at_millis = $1
+                 WHERE workspace_id = $2 AND namespace_id = $3 AND command_id = $4
+                   AND cancelled_at_millis IS NULL
+                   AND attempts = 0",
+                &[
+                    &now_millis,
+                    &key.workspace_id,
+                    &key.namespace_id,
+                    &key.command_id,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if updated > 0 {
+            return Ok(super::CancelResult::Cancelled);
+        }
+        let existing = self
+            .client
+            .query_opt(
+                "SELECT cancelled_at_millis FROM apex_control_inbox
+                 WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3",
+                &[&key.workspace_id, &key.namespace_id, &key.command_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        match existing {
+            None => Ok(super::CancelResult::NotFound),
+            Some(row) if row.get::<_, Option<i64>>(0).is_some() => {
+                Ok(super::CancelResult::AlreadyCancelled)
+            }
+            // Row exists, not cancelled, and the UPDATE above matched zero
+            // rows -- the only remaining reason is `attempts > 0`.
+            Some(_) => Err(CommandError::already_delivered()),
+        }
     }
 
     fn maintain(
@@ -471,4 +534,151 @@ fn configuration_error() -> CommandError {
         CommandErrorCode::Internal,
         "The control gateway failed to process the request.",
     )
+}
+
+/// Opt-in, same pattern `apex_event_ingest`'s `idempotency::postgres_tests`
+/// and `outbox::postgres_tests_cases` use: skip rather than fail when no live
+/// database is configured, so offline unit CI (`cargo test --features
+/// postgres` with no `APEX_POSTGRES_URL`) stays green, while a developer or a
+/// CI job with Postgres available exercises the real backend.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::CommandErrorCode;
+    use crate::inbox::{CancelResult, DeliveryStatus, ExactScope, InboxKey};
+
+    fn url() -> Option<String> {
+        std::env::var("APEX_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+    }
+
+    /// A fresh UUIDv7 per call, so repeated runs against a database that
+    /// retains prior rows (this module never truncates the table) never
+    /// collide with a previous run's command identity.
+    fn fresh_command_id() -> String {
+        uuid::Uuid::now_v7().to_string()
+    }
+
+    fn command(command_id: &str, agent_id: &str) -> PendingCommand {
+        PendingCommand {
+            command_id: command_id.to_owned(),
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_id: agent_id.to_owned(),
+            run_id: "run-1".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: "stop".to_owned(),
+            reason_code: Some("operator.request".to_owned()),
+            parameters: Vec::new(),
+            issued_at: "2026-08-08T00:00:00.000000Z".to_owned(),
+            delivery_attempt: 0,
+        }
+    }
+
+    fn acme_prod() -> ExactScope {
+        ExactScope {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+        }
+    }
+
+    #[test]
+    fn postgres_cancel_of_an_undelivered_command_succeeds_and_it_is_never_polled() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_POSTGRES_URL");
+            return;
+        };
+        let mut inbox = PostgresCommandInbox::connect(&url, 64).expect("connect");
+        let command_id = fresh_command_id();
+        inbox
+            .record(&command(&command_id, "pg-cancel-agent-a"))
+            .unwrap();
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id.clone(),
+        };
+        assert_eq!(inbox.cancel(&key, 1_000).unwrap(), CancelResult::Cancelled);
+        // Idempotent: a retried cancellation must not error.
+        assert_eq!(
+            inbox.cancel(&key, 1_500).unwrap(),
+            CancelResult::AlreadyCancelled
+        );
+        assert_eq!(
+            inbox
+                .status(&key, crate::inbox::DEFAULT_MAX_DELIVERY_ATTEMPTS)
+                .unwrap(),
+            Some((DeliveryStatus::Cancelled, 0))
+        );
+
+        let target = PollTarget {
+            agent_id: "pg-cancel-agent-a".to_owned(),
+            limit: crate::inbox::MAX_COMMANDS_PER_POLL,
+        };
+        let claimed = inbox
+            .claim(&target, &acme_prod(), DeliveryPolicy::default(), 2_000)
+            .unwrap();
+        assert!(
+            claimed
+                .iter()
+                .all(|claimed| claimed.command_id != command_id),
+            "a cancelled command must never reach a poll"
+        );
+    }
+
+    #[test]
+    fn postgres_cancel_of_an_already_delivered_command_is_refused() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_POSTGRES_URL");
+            return;
+        };
+        let mut inbox = PostgresCommandInbox::connect(&url, 64).expect("connect");
+        let command_id = fresh_command_id();
+        inbox
+            .record(&command(&command_id, "pg-cancel-agent-b"))
+            .unwrap();
+        let target = PollTarget {
+            agent_id: "pg-cancel-agent-b".to_owned(),
+            limit: crate::inbox::MAX_COMMANDS_PER_POLL,
+        };
+        let delivered = inbox
+            .claim(&target, &acme_prod(), DeliveryPolicy::default(), 1_000)
+            .unwrap();
+        assert!(
+            delivered
+                .iter()
+                .any(|claimed| claimed.command_id == command_id)
+        );
+
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id.clone(),
+        };
+        let error = inbox.cancel(&key, 2_000).unwrap_err();
+        assert_eq!(error.code, CommandErrorCode::AlreadyDelivered);
+        assert_eq!(
+            inbox
+                .status(&key, crate::inbox::DEFAULT_MAX_DELIVERY_ATTEMPTS)
+                .unwrap(),
+            Some((DeliveryStatus::Delivered, 1)),
+            "a refused cancellation must leave delivery state untouched"
+        );
+    }
+
+    #[test]
+    fn postgres_cancel_of_an_unknown_command_id_is_reported_as_not_found() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_POSTGRES_URL");
+            return;
+        };
+        let mut inbox = PostgresCommandInbox::connect(&url, 64).expect("connect");
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: fresh_command_id(),
+        };
+        assert_eq!(inbox.cancel(&key, 1_000).unwrap(), CancelResult::NotFound);
+    }
 }

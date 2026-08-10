@@ -60,6 +60,20 @@ service ControlGateway {
   rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
   rpc AckCommand(AckCommandRequest) returns (AckCommandResponse);
   rpc GetCommandStatus(GetCommandStatusRequest) returns (GetCommandStatusResponse);
+
+  // Retracts a command an operator issued, before it has reached its target
+  // agent. Operator-authenticated and scope-checked exactly like
+  // GetCommandStatus -- this is the operator's side of the same delivery
+  // question AckCommand answers from the agent's side.
+  //
+  // Cancellation succeeds only while the command has never been delivered
+  // (its delivery attempt count is still zero). Once a poll has handed the
+  // command to its agent even once, the gateway refuses to cancel it: the
+  // agent may already be acting on it, and retracting a command it already
+  // has would recreate exactly the "did the agent get it or not" ambiguity
+  // this whole delivery-tracking design (see control-plane-api/src/inbox.rs)
+  // exists to eliminate. Issue a new command instead.
+  rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
 }
 
 message ControlCommandRequest {
@@ -158,6 +172,12 @@ enum CommandDeliveryState {
   COMMAND_DELIVERY_DELIVERED = 2;
   COMMAND_DELIVERY_ACKNOWLEDGED = 3;
   COMMAND_DELIVERY_EXHAUSTED = 4;
+  // An operator cancelled this command via CancelCommand before it was ever
+  // delivered. Durable and terminal, the same as ACKNOWLEDGED -- a status
+  // query after a restart must still report CANCELLED rather than falling
+  // back to UNSPECIFIED, which would be indistinguishable from a command_id
+  // that was never issued at all.
+  COMMAND_DELIVERY_CANCELLED = 5;
 }
 
 message PendingControlCommand {
@@ -191,4 +211,19 @@ enum ControlAction {
   RESUME = 3;
   INJECT = 4;
   SET_BUDGET = 5;
+}
+
+message CancelCommandRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string command_id = 3;
+}
+
+message CancelCommandResponse {
+  string command_id = 1;
+  // True when this call is the one that cancelled the command.
+  bool cancelled = 2;
+  // True when the command was already cancelled by an earlier call
+  // (idempotent replay of the operator's own cancellation).
+  bool already_cancelled = 3;
 }
