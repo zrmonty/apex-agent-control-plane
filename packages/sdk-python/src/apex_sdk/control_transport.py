@@ -74,6 +74,7 @@ _ACTION_NAMES = {
     3: "resume",
     4: "inject",
     5: "set_budget",
+    6: "resolve_hold",
 }
 
 _WIRE_VARINT = 0

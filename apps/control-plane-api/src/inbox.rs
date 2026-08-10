@@ -110,7 +110,7 @@ pub struct PendingCommand {
     pub trace_id: String,
     /// Lowercase action name, exactly as it appears in the emitted `control`
     /// event's `data.action` -- `stop`, `pause`, `resume`, `inject`,
-    /// `set_budget`.
+    /// `set_budget`, `resolve_hold`.
     pub action: String,
     pub reason_code: Option<String>,
     /// The operator-submitted `parameters` object, prost-encoded. Stored as
@@ -1100,7 +1100,7 @@ fn is_recordable(command: &PendingCommand) -> bool {
         && is_identifier(&command.command_id)
         && matches!(
             command.action.as_str(),
-            "stop" | "pause" | "resume" | "inject" | "set_budget"
+            "stop" | "pause" | "resume" | "inject" | "set_budget" | "resolve_hold"
         )
         && command.reason_code.as_deref().is_none_or(is_identifier)
         && command.issued_at.len() <= 64
@@ -1710,6 +1710,40 @@ mod tests {
         let mut bad_action = command("cmd-2", "agent-a");
         bad_action.action = "self_destruct".to_owned();
         assert!(inbox.record(&bad_action).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `resolve_hold` is the sixth cooperative action, added on top of the
+    /// same delivery mechanism `stop`/`pause`/`resume`/`inject`/`set_budget`
+    /// already use. `is_recordable` (exercised here through
+    /// `FileCommandInbox::record`, the only backend that enforces it) must
+    /// accept it exactly like the other five, and a poll must deliver it like
+    /// any other pending command.
+    #[test]
+    fn a_resolve_hold_command_is_recordable_and_deliverable() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-resolve-hold-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inbox = FileCommandInbox::open(&dir.join("inbox.jsonl"), &dir, 64).unwrap();
+        let mut resolve = command("cmd-resolve-1", "agent-a");
+        resolve.action = "resolve_hold".to_owned();
+        assert_eq!(
+            inbox.record(&resolve).unwrap(),
+            RecordResult::Recorded,
+            "a well-formed resolve_hold command must be recordable like any other action"
+        );
+        let delivered = inbox
+            .claim(&target("agent-a"), &acme_prod(), DeliveryPolicy::default(), 1_000)
+            .unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].command_id, "cmd-resolve-1");
+        assert_eq!(delivered[0].action, "resolve_hold");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

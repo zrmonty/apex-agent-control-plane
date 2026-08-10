@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from typing import Any, Callable
 from uuid import UUID
 
+from collections.abc import Sequence
+
 from .control import ControlAction, ControlCommand, ControlValidationError
 from .event import EventBuilder
 from .observer import BoundedObserver
@@ -106,10 +108,20 @@ class ReferenceReasonActLoop:
        halts, never parsed. Applied before the halting checks so an
        operator's content is recorded even on a turn that will not act on
        it, then acknowledged after the runtime has processed it.
-    4. ``pause``/``resume`` -- if the result is "paused", the turn ends here
+    4. ``resolve_hold`` -- applied against the hold this loop is actually
+       waiting on, if any (see :meth:`enter_hold`). Unblocks either way: an
+       ``approved`` decision lets the turn continue to the remaining checks
+       below (and on to the tool, if nothing else halts it); a ``denied``
+       decision ends the turn without running the tool, the same as
+       ``stop``/``pause`` do, but only for this one held call rather than the
+       whole run.
+    5. ``pause``/``resume`` -- if the result is "paused", the turn ends here
        without executing the tool.
-    5. The budget check -- if accumulated usage has passed the ceiling, the
+    6. The budget check -- if accumulated usage has passed the ceiling, the
        turn ends here without executing the tool.
+    7. The hold check -- if this loop is still waiting on a hold (nothing in
+       this poll resolved it), the turn ends here without executing the
+       tool, repeating every turn exactly as a standing ``pause`` does.
 
     Within one poll, ``pause`` and ``resume`` are folded in delivery order.
     The gateway returns commands oldest-first (``inbox.rs`` preserves
@@ -162,6 +174,10 @@ class ReferenceReasonActLoop:
         self._budget_command_id: str | None = None
         self._used_tokens = 0
         self._used_cost = 0.0
+        # The `hold_token` this loop is waiting on, or `None`. Single-slot,
+        # the same model `_paused_by`/the budget ceiling already use: only one
+        # hold can be in force on this loop at a time.
+        self._held_token: str | None = None
         # Insertion-ordered set. `dict` rather than `set` because eviction has
         # to be oldest-first to be bounded in a useful way.
         self._enacted: dict[str, None] = {}
@@ -172,6 +188,45 @@ class ReferenceReasonActLoop:
     def paused_by(self) -> str | None:
         """The ``command_id`` of the ``pause`` in force, or ``None``."""
         return self._paused_by
+
+    @property
+    def held_token(self) -> str | None:
+        """The ``hold_token`` this loop is currently waiting on, or ``None``."""
+        return self._held_token
+
+    def enter_hold(self) -> str:
+        """Suspends the next tool call pending an operator decision.
+
+        Generates and records this loop's ``hold_token`` locally -- the
+        identifier a later ``resolve_hold`` command must carry to unblock it.
+        Both [[Human-in-the-Loop Approvals]] (blocking mode) and
+        [[Defense-Evasion Interception]] (the hold tier) describe the agent
+        itself minting this identifier when it enters the held state, rather
+        than receiving one from the gateway, and this mirrors that.
+
+        Deciding *when* to call this -- a risk score crossing a threshold, a
+        ruleset match on generated content -- is the client-side
+        interception point those two designs own and is deliberately not
+        built here; this loop only owns getting the operator's decision back
+        to a hold once something else has decided to start one, the delivery
+        primitive both designs are missing.
+
+        Calling this while already held replaces the previous token: only
+        one hold can be in force on this loop at a time, the same
+        single-slot model ``pause``/``set_budget`` already use for "the
+        pause/ceiling in force".
+
+        Generated with :func:`_uuid7`, the same generator every other
+        identifier in this loop uses (``run_id``, ``trace_id``, event ids).
+        Not merely for consistency: the event-data secret-policy heuristic
+        (``validation.py``'s ``_encoded_secret``) treats a bare hex string of
+        this length as possibly-encoded-secret-shaped outside a ``control``
+        event, and a ``held``/``held_denied`` ``turn_end`` carries this token
+        in a non-``control`` event. A hyphenated UUID is exactly the shape
+        ``command_id`` already passes through that same check safely.
+        """
+        self._held_token = _uuid7()
+        return self._held_token
 
     @property
     def budget_kind(self) -> str | None:
@@ -288,6 +343,7 @@ class ReferenceReasonActLoop:
         pause_intent: Any | None = None
         budgets: list[Any] = []
         injects: list[Any] = []
+        resolves: list[Any] = []
         acknowledged: list[Any] = []
         for command in self._poll(emit):
             action = getattr(command, "action", None)
@@ -305,7 +361,7 @@ class ReferenceReasonActLoop:
                 # what makes at-least-once delivery safe here -- in
                 # particular, a `resume` redelivered after a *later* `pause`
                 # must not un-pause the agent.
-                if action in ("pause", "resume", "set_budget", "inject"):
+                if action in ("pause", "resume", "set_budget", "inject", "resolve_hold"):
                     acknowledged.append(command)
                 continue
             if action in ("pause", "resume"):
@@ -316,6 +372,9 @@ class ReferenceReasonActLoop:
                 acknowledged.append(command)
             elif action == "inject":
                 injects.append(command)
+                acknowledged.append(command)
+            elif action == "resolve_hold":
+                resolves.append(command)
                 acknowledged.append(command)
             # Any other action -- including one this SDK decodes as
             # "unspecified" because the gateway is newer than the client -- is
@@ -353,6 +412,7 @@ class ReferenceReasonActLoop:
         ]
         if injected:
             extra["injected_command_ids"] = injected
+        resolve_result = self._apply_resolve_hold(resolves, emit)
         resumed_by = self._apply_pause_intent(pause_intent, emit)
         if self._paused_by is not None:
             # Every turn a paused agent starts still has to *end*, or the
@@ -375,6 +435,32 @@ class ReferenceReasonActLoop:
             # event's `control_command_id` even on a turn that also resumed.
             self._acknowledge(acknowledged, emit)
             return ({"status": "budget_exceeded", **extra, "control_command_id": exceeded}, {}, None)
+        if resolve_result is not None and resolve_result[0] == "denied":
+            # Unblocked, but with a decision that means the held call must
+            # not proceed -- ends this turn only, not the whole run, which is
+            # what distinguishes a denied hold from a `stop`.
+            _decision, resolved_command_id, resolved_reason = resolve_result
+            denied: dict[str, Any] = {
+                "status": "held_denied",
+                "control_command_id": resolved_command_id,
+                **extra,
+            }
+            if resolved_reason is not None:
+                denied["hold_reason"] = resolved_reason
+            self._acknowledge(acknowledged, emit)
+            return (denied, {}, None)
+        if self._held_token is not None:
+            # Still waiting: either nothing in this poll resolved the hold in
+            # force, or nothing has resolved it since `enter_hold` was called.
+            # Repeats every turn exactly as a standing `pause` does.
+            self._acknowledge(acknowledged, emit)
+            return (
+                {"status": "held", "hold_token": self._held_token, **extra},
+                {},
+                None,
+            )
+        if resolve_result is not None:
+            extra["control_command_id"] = resolve_result[1]
         if resumed_by is not None:
             extra["control_command_id"] = resumed_by
         self._acknowledge(acknowledged, emit)
@@ -413,6 +499,73 @@ class ReferenceReasonActLoop:
                         "retryable": True,
                     },
                 )
+
+    def _apply_resolve_hold(
+        self, commands: Sequence[Any], emit: Callable[[str, dict[str, Any]], None]
+    ) -> tuple[str, str, str | None] | None:
+        """Applies the ``resolve_hold`` that matches the hold this loop is
+        actually waiting on, if any. Returns ``(decision, command_id, reason)``
+        for the match, or ``None`` otherwise.
+
+        Every other ``resolve_hold`` in the batch is a **safe no-op**, the
+        same idempotence discipline ``stop`` already has for an
+        already-stopped loop:
+
+        - **Not currently held** (``self._held_token`` is ``None``) -- there
+          is nothing to resolve, so every command here is inert.
+        - **Wrong identifier** -- a ``hold_token`` that does not match
+          ``self._held_token`` is not this hold, whether it names a stale
+          hold from earlier in the run or one this loop was never told
+          about.
+        - **Already resolved / a redelivered duplicate** -- resolving clears
+          ``self._held_token`` immediately, so a second delivery of the same
+          command (or of a *different* command still naming the
+          now-cleared token) can no longer match anything. Combined with
+          ``_first_sight``'s ``command_id`` dedup on the same command, a
+          redelivery is caught twice over.
+
+        Only the first match in delivery order is applied -- one hold can be
+        in force at a time, so there is at most one to find.
+        """
+        for command in commands:
+            if self._held_token is None:
+                break
+            parameters = getattr(command, "parameters", None)
+            hold_token = parameters.get("hold_token") if isinstance(parameters, dict) else None
+            if not isinstance(hold_token, str) or hold_token != self._held_token:
+                continue
+            decision = parameters.get("decision") if isinstance(parameters, dict) else None
+            if decision not in ("approved", "denied"):
+                emit(
+                    "error",
+                    {
+                        "code": "REFERENCE_RESOLVE_HOLD_PARAMETERS_INVALID",
+                        "summary": "A resolve_hold command was retrieved but could not be enacted.",
+                        "cause": "The command's decision was not 'approved' or 'denied'.",
+                        "retryable": False,
+                        "recommended_next_steps": [
+                            "Resubmit resolve_hold with decision set to approved or denied.",
+                            "Treat this hold as still awaiting a valid decision.",
+                        ],
+                    },
+                )
+                continue
+            reason = parameters.get("reason")
+            reason = reason if isinstance(reason, str) and reason else None
+            resolved_token = self._held_token
+            self._held_token = None
+            emit(
+                "control",
+                ControlCommand.create(
+                    ControlAction.RESOLVE_HOLD,
+                    reason_code=self._reason_code(command),
+                    hold_token=resolved_token,
+                    decision=decision,
+                    reason=reason,
+                ).to_event_data(),
+            )
+            return decision, str(getattr(command, "command_id", "")), reason
+        return None
 
     def _apply_pause_intent(
         self, command: Any | None, emit: Callable[[str, dict[str, Any]], None]

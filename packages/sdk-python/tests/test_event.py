@@ -161,6 +161,7 @@ def test_validation_rejects_unsupported_schema_version() -> None:
         ({"action": "pause", "enforcement": "cooperative", "reason_code": None, "parameters": {"unexpected": True}}, "does not accept parameters"),
         ({"action": "inject", "enforcement": "cooperative", "reason_code": None, "parameters": {"content": "hello"}}, "content_classification"),
         ({"action": "set_budget", "enforcement": "cooperative", "reason_code": None, "parameters": {"budget_kind": "tokens", "limit": 0}}, "positive limit"),
+        ({"action": "resolve_hold", "enforcement": "cooperative", "reason_code": None, "parameters": {"hold_token": "hold-1", "decision": "maybe", "reason": None}}, "approved or denied"),
     ],
 )
 def test_control_events_enforce_cooperative_v1_semantics(data: dict, message: str) -> None:
@@ -181,6 +182,9 @@ def test_control_events_enforce_cooperative_v1_semantics(data: dict, message: st
         ({"action": "set_budget", "enforcement": "cooperative", "reason_code": None, "parameters": {"budget_kind": "gpu", "limit": 1}}, "budget_kind"),
         ({"action": "set_budget", "enforcement": "cooperative", "reason_code": None, "parameters": {"budget_kind": "tokens", "limit": True}}, "positive limit"),
         ({"action": "set_budget", "enforcement": "cooperative", "reason_code": None, "parameters": {"budget_kind": "tokens", "limit": 2e15}}, "no greater than 1e15"),
+        ({"action": "resolve_hold", "enforcement": "cooperative", "reason_code": None, "parameters": {"decision": "approved", "reason": None}}, "hold_token, decision, and reason"),
+        ({"action": "resolve_hold", "enforcement": "cooperative", "reason_code": None, "parameters": {"hold_token": "not a safe identifier", "decision": "approved", "reason": None}}, "safe identifier"),
+        ({"action": "resolve_hold", "enforcement": "cooperative", "reason_code": None, "parameters": {"hold_token": "hold-1", "decision": "denied", "reason": ""}}, "non-empty string or null"),
     ],
 )
 def test_control_events_reject_other_invalid_semantics(data: dict, message: str) -> None:
@@ -201,12 +205,34 @@ def test_control_events_reject_oversized_untrusted_injection_content() -> None:
         validate_event(event)
 
 
+def test_control_events_reject_an_oversized_resolve_hold_reason() -> None:
+    event = valid_event()
+    event["type"] = "control"
+    event["data"] = {
+        "action": "resolve_hold",
+        "enforcement": "cooperative",
+        "reason_code": None,
+        "parameters": {"hold_token": "hold-1", "decision": "denied", "reason": "x" * (8 * 1024 + 1)},
+    }
+    event["integrity"]["event_hash"] = event_hash(event)
+
+    with pytest.raises(EventValidationError, match="8 KiB"):
+        validate_event(event)
+
+
 @pytest.mark.parametrize(
     "command",
     [
         ControlCommand.create(ControlAction.STOP),
         ControlCommand.create(ControlAction.INJECT, content="operator observation"),
         ControlCommand.create(ControlAction.SET_BUDGET, budget_kind="cost", limit=12.5),
+        ControlCommand.create(
+            ControlAction.RESOLVE_HOLD,
+            hold_token="018f0000-0000-7000-8000-000000000001",
+            decision="approved",
+            reason="looks legitimate",
+        ),
+        ControlCommand.create(ControlAction.RESOLVE_HOLD, hold_token="hold-1", decision="denied"),
     ],
 )
 def test_control_commands_produce_valid_control_event_data(command: ControlCommand) -> None:

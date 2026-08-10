@@ -147,7 +147,7 @@ pub fn build_control_request(
     let action_name = action_name(input.action).ok_or_else(|| {
         CommandError::new(
             crate::errors::CommandErrorCode::InvalidCommand,
-            "action must be one of stop, pause, resume, inject, set_budget.",
+            "action must be one of stop, pause, resume, inject, set_budget, resolve_hold.",
         )
     })?;
 
@@ -277,6 +277,7 @@ fn action_name(action: proto::ControlAction) -> Option<&'static str> {
         proto::ControlAction::Resume => "resume",
         proto::ControlAction::Inject => "inject",
         proto::ControlAction::SetBudget => "set_budget",
+        proto::ControlAction::ResolveHold => "resolve_hold",
         proto::ControlAction::Unspecified => return None,
     })
 }
@@ -463,6 +464,10 @@ mod tests {
     fn action_name_covers_every_defined_action_and_rejects_unspecified() {
         assert_eq!(action_name(proto::ControlAction::Stop), Some("stop"));
         assert_eq!(action_name(proto::ControlAction::SetBudget), Some("set_budget"));
+        assert_eq!(
+            action_name(proto::ControlAction::ResolveHold),
+            Some("resolve_hold")
+        );
         assert_eq!(action_name(proto::ControlAction::Unspecified), None);
     }
 

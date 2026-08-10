@@ -758,6 +758,7 @@ fn pending_to_proto(command: PendingCommand) -> proto::PendingControlCommand {
         "resume" => proto::ControlAction::Resume,
         "inject" => proto::ControlAction::Inject,
         "set_budget" => proto::ControlAction::SetBudget,
+        "resolve_hold" => proto::ControlAction::ResolveHold,
         _ => proto::ControlAction::Unspecified,
     };
     proto::PendingControlCommand {
@@ -1284,6 +1285,100 @@ mod tests {
         assert_eq!(command.delivery_attempt, 1);
         assert!(!command.issued_at.is_empty());
         assert!(response.min_poll_interval_seconds >= 1);
+    }
+
+    /// `resolve_hold` delivers an operator's approve/deny decision back to an
+    /// agent blocked on a specific hold. Recorded directly against the
+    /// inbox (rather than through `submit_command`) because parameter-shape
+    /// validation for this action's `hold_token`/`decision`/`reason` payload
+    /// lives in `apex_event_ingest::validate_control_data`
+    /// (`apps/event-ingest/src/validation/control.rs`), a shared boundary
+    /// this change deliberately leaves untouched (see the commit message);
+    /// that crate still needs `resolve_hold` added to its own action
+    /// allow-list before `SubmitCommand` accepts one end to end. This test
+    /// proves what is in scope here: the poll/delivery path -- `is_recordable`
+    /// (`inbox.rs`) and the action mapping in `pending_to_proto` below --
+    /// carries a `resolve_hold` command and its parameters through exactly
+    /// like the other five actions.
+    #[tokio::test]
+    async fn an_agent_retrieves_a_directly_recorded_resolve_hold_command() {
+        let service = service_with_two_agents();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "hold_token".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(
+                    "hold-abc123".to_owned(),
+                )),
+            },
+        );
+        fields.insert(
+            "decision".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("approved".to_owned())),
+            },
+        );
+        fields.insert(
+            "reason".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(
+                    "looks legitimate".to_owned(),
+                )),
+            },
+        );
+        let parameters = ProstStruct {
+            fields: fields.into_iter().collect(),
+        };
+        let command = PendingCommand {
+            command_id: fresh_command_id(0x900),
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_id: "agent-a".to_owned(),
+            run_id: "run-1".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: "resolve_hold".to_owned(),
+            reason_code: Some("operator.request".to_owned()),
+            parameters: prost::Message::encode_to_vec(&parameters),
+            issued_at: "2026-08-08T00:00:00.000000Z".to_owned(),
+            delivery_attempt: 0,
+        };
+        service
+            .inbox
+            .with_lock(|inbox| inbox.record(&command))
+            .unwrap()
+            .unwrap();
+
+        let response = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.commands.len(), 1);
+        let delivered = &response.commands[0];
+        assert_eq!(delivered.command_id, command.command_id);
+        assert_eq!(delivered.action, proto::ControlAction::ResolveHold as i32);
+        let delivered_parameters = delivered
+            .parameters
+            .as_ref()
+            .expect("resolve_hold parameters must decode");
+        assert_eq!(
+            delivered_parameters
+                .fields
+                .get("hold_token")
+                .and_then(|value| value.kind.as_ref()),
+            Some(&prost_types::value::Kind::StringValue(
+                "hold-abc123".to_owned()
+            ))
+        );
+        assert_eq!(
+            delivered_parameters
+                .fields
+                .get("decision")
+                .and_then(|value| value.kind.as_ref()),
+            Some(&prost_types::value::Kind::StringValue(
+                "approved".to_owned()
+            ))
+        );
     }
 
     #[tokio::test]
