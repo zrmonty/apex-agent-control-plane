@@ -2,8 +2,12 @@
 //!
 //! Independently authenticated from the `event-ingest` data path (see
 //! [`auth`]), this crate exposes the five cooperative v1 controls --
-//! `stop`/`pause`/`resume`/`inject`/`set_budget` (ADR-0005) -- behind a
-//! durable command outbox (ADR-0006). Every accepted command is validated
+//! `stop`/`pause`/`resume`/`inject`/`set_budget` (ADR-0005) -- plus
+//! `resolve_hold`, the shared delivery primitive a held tool call (HITL
+//! Approvals' blocking mode, Defense-Evasion Interception's hold tier) uses
+//! to get an operator's approve/deny decision back to the agent waiting on
+//! it -- behind a durable command outbox (ADR-0006). Every accepted command
+//! is validated
 //! and canonicalized into a `control` event using the same admission rules
 //! `event-ingest` enforces on its data path
 //! (`apex_event_ingest::IngestRequest::from_validated_transport`), then

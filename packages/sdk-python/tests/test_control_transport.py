@@ -159,7 +159,7 @@ def test_an_empty_response_is_the_normal_case_not_an_error():
 
 
 def test_every_defined_action_decodes_and_an_unknown_one_stays_inert():
-    names = {1: "stop", 2: "pause", 3: "resume", 4: "inject", 5: "set_budget"}
+    names = {1: "stop", 2: "pause", 3: "resume", 4: "inject", 5: "set_budget", 6: "resolve_hold"}
     for value, name in names.items():
         result = decode_poll_response(_poll_response([_pending_command(action=value)]))
         assert result.commands[0].action == name
@@ -232,6 +232,25 @@ def test_a_set_budget_commands_parameters_decode():
     )
     assert result.commands[0].action == "set_budget"
     assert result.commands[0].parameters == {"budget_kind": "cost", "limit": 250.0}
+
+
+def test_a_resolve_hold_commands_parameters_decode():
+    parameters = _struct(
+        {
+            "hold_token": _value(string="018f0000-0000-7000-8000-000000000099"),
+            "decision": _value(string="approved"),
+            "reason": _value(null=None),
+        }
+    )
+    result = decode_poll_response(
+        _poll_response([_pending_command(action=6, extra=_bytes_field(9, parameters))])
+    )
+    assert result.commands[0].action == "resolve_hold"
+    assert result.commands[0].parameters == {
+        "hold_token": "018f0000-0000-7000-8000-000000000099",
+        "decision": "approved",
+        "reason": None,
+    }
 
 
 def test_every_struct_value_kind_decodes():

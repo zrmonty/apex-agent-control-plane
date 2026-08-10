@@ -19,9 +19,14 @@ EVENT_TYPES = frozenset({"turn_start", "llm", "tool", "message", "memory", "deci
 ACTOR_TYPES = frozenset({"user", "agent", "system", "schedule"})
 HASH = re.compile(r"^[0-9a-f]{64}$")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
-CONTROL_ACTIONS = frozenset({"stop", "pause", "resume", "inject", "set_budget"})
+CONTROL_ACTIONS = frozenset({"stop", "pause", "resume", "inject", "set_budget", "resolve_hold"})
 MAX_CONTROL_BUDGET_LIMIT = 1_000_000_000_000_000.0
 MAX_UNTRUSTED_CONTROL_CONTENT_BYTES = 32 * 1024
+#: Bound on `resolve_hold`'s optional operator-supplied `reason`. Smaller than
+#: the untrusted-inject-content ceiling on purpose: this is meant to hold a
+#: short written justification (the audit trail HITL Approvals' own data
+#: model calls for), not arbitrary content.
+MAX_HOLD_REASON_BYTES = 8 * 1024
 
 _SECRET_KEY_NAMES = frozenset(
     {
@@ -97,6 +102,25 @@ def _validate_control_data(data: Mapping[str, Any]) -> None:
             raise EventValidationError("inject content must be valid UTF-8") from exc
         if len(encoded_content) > MAX_UNTRUSTED_CONTROL_CONTENT_BYTES:
             raise EventValidationError("inject content must not exceed 32 KiB")
+        return
+    if action == "resolve_hold":
+        if set(parameters) != {"hold_token", "decision", "reason"}:
+            raise EventValidationError("resolve_hold requires hold_token, decision, and reason")
+        hold_token = parameters["hold_token"]
+        if not isinstance(hold_token, str) or not SAFE_IDENTIFIER.fullmatch(hold_token):
+            raise EventValidationError("resolve_hold hold_token must be a safe identifier")
+        if parameters["decision"] not in ("approved", "denied"):
+            raise EventValidationError("resolve_hold decision must be approved or denied")
+        reason = parameters["reason"]
+        if reason is not None:
+            if not isinstance(reason, str) or not reason:
+                raise EventValidationError("resolve_hold reason must be a non-empty string or null")
+            try:
+                encoded_reason = reason.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise EventValidationError("resolve_hold reason must be valid UTF-8") from exc
+            if len(encoded_reason) > MAX_HOLD_REASON_BYTES:
+                raise EventValidationError("resolve_hold reason must not exceed 8 KiB")
         return
     if set(parameters) != {"budget_kind", "limit"} or parameters["budget_kind"] not in {"tokens", "cost"}:
         raise EventValidationError("set_budget requires budget_kind of tokens or cost")

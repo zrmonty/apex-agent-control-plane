@@ -79,3 +79,74 @@ def test_control_event_data_does_not_expose_mutable_command_parameters() -> None
 def test_stop_rejects_action_parameters() -> None:
     with pytest.raises(ControlValidationError, match="does not accept parameters"):
         ControlCommand.create(ControlAction.STOP, limit=1)
+
+
+def test_resolve_hold_command_carries_the_matching_token_and_decision() -> None:
+    command = ControlCommand.create(
+        ControlAction.RESOLVE_HOLD,
+        hold_token="018f0000-0000-7000-8000-000000000001",
+        decision="approved",
+        reason="looks legitimate",
+    )
+    assert command.to_event_data()["parameters"] == {
+        "hold_token": "018f0000-0000-7000-8000-000000000001",
+        "decision": "approved",
+        "reason": "looks legitimate",
+    }
+
+
+def test_resolve_hold_reason_is_optional() -> None:
+    command = ControlCommand.create(
+        ControlAction.RESOLVE_HOLD, hold_token="hold-1", decision="denied"
+    )
+    assert command.to_event_data()["parameters"] == {
+        "hold_token": "hold-1",
+        "decision": "denied",
+        "reason": None,
+    }
+
+
+def test_resolve_hold_requires_a_safe_identifier_hold_token() -> None:
+    with pytest.raises(ControlValidationError, match="hold_token"):
+        ControlCommand.create(ControlAction.RESOLVE_HOLD, decision="approved")
+    with pytest.raises(ControlValidationError, match="hold_token"):
+        ControlCommand.create(
+            ControlAction.RESOLVE_HOLD, hold_token="not a safe identifier", decision="approved"
+        )
+
+
+def test_resolve_hold_requires_an_approved_or_denied_decision() -> None:
+    with pytest.raises(ControlValidationError, match="approved or denied"):
+        ControlCommand.create(ControlAction.RESOLVE_HOLD, hold_token="hold-1", decision="maybe")
+    with pytest.raises(ControlValidationError, match="approved or denied"):
+        ControlCommand.create(ControlAction.RESOLVE_HOLD, hold_token="hold-1")
+
+
+def test_resolve_hold_rejects_an_oversized_reason() -> None:
+    with pytest.raises(ControlValidationError, match="8 KiB"):
+        ControlCommand.create(
+            ControlAction.RESOLVE_HOLD,
+            hold_token="hold-1",
+            decision="denied",
+            reason="x" * (8 * 1024 + 1),
+        )
+
+
+def test_resolve_hold_rejects_inject_and_budget_parameters() -> None:
+    with pytest.raises(ControlValidationError, match="does not accept"):
+        ControlCommand.create(
+            ControlAction.RESOLVE_HOLD, hold_token="hold-1", decision="approved", content="hello"
+        )
+    with pytest.raises(ControlValidationError, match="does not accept"):
+        ControlCommand.create(
+            ControlAction.RESOLVE_HOLD, hold_token="hold-1", decision="approved", limit=1
+        )
+
+
+def test_inject_and_set_budget_reject_resolve_hold_parameters() -> None:
+    with pytest.raises(ControlValidationError, match="budget parameters"):
+        ControlCommand.create(ControlAction.INJECT, content="hello", decision="approved")
+    with pytest.raises(ControlValidationError, match="does not accept content"):
+        ControlCommand.create(
+            ControlAction.SET_BUDGET, budget_kind="cost", limit=1, hold_token="hold-1"
+        )

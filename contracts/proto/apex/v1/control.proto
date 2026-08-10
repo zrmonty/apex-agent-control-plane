@@ -245,6 +245,17 @@ enum ControlAction {
   RESUME = 3;
   INJECT = 4;
   SET_BUDGET = 5;
+  // Delivers an operator decision (approve/deny) for a specific hold a
+  // waiting agent is blocked on -- the shared delivery primitive
+  // [[Human-in-the-Loop Approvals]]'s blocking mode and
+  // [[Defense-Evasion Interception]]'s hold tier both need to get a decision
+  // back to the tool call that requested it. `parameters` carries
+  // `hold_token` (the identifier the agent generated when it entered the
+  // held state), `decision` (`"approved"` or `"denied"`), and an optional
+  // operator-supplied `reason`. See `resolve_hold` handling in
+  // `apps/control-plane-api/src/envelope.rs` and
+  // `packages/sdk-python/src/apex_sdk/reference_runtime.py`.
+  RESOLVE_HOLD = 6;
 }
 
 message ListCommandsRequest {
