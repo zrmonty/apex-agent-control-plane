@@ -201,6 +201,77 @@ fn control_validation_accepts_safe_actions_and_rejects_unsafe_shapes() {
     assert!(validate_control_data(&control("stop", params)).is_err());
 }
 
+/// `resolve_hold` mirrors `apex_sdk.validation`'s own shape exactly: this
+/// server-side check is not optional just because the SDK already checks
+/// it client-side -- a client-side check is a courtesy, not a boundary.
+#[test]
+fn control_validation_enforces_the_resolve_hold_parameter_shape() {
+    let mut good = Map::new();
+    good.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    good.insert("decision".to_owned(), Value::String("approved".to_owned()));
+    good.insert("reason".to_owned(), Value::Null);
+    assert!(validate_control_data(&control("resolve_hold", good)).is_ok());
+
+    let mut good_with_reason = Map::new();
+    good_with_reason.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    good_with_reason.insert("decision".to_owned(), Value::String("denied".to_owned()));
+    good_with_reason.insert(
+        "reason".to_owned(),
+        Value::String("looked suspicious".to_owned()),
+    );
+    assert!(validate_control_data(&control("resolve_hold", good_with_reason)).is_ok());
+
+    // Missing the required `reason` key entirely (not even `null`) is refused,
+    // same as every other field this validator treats as required.
+    let mut missing_reason = Map::new();
+    missing_reason.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    missing_reason.insert("decision".to_owned(), Value::String("approved".to_owned()));
+    assert!(validate_control_data(&control("resolve_hold", missing_reason)).is_err());
+
+    // hold_token must satisfy the same safe-identifier grammar as a scope
+    // component -- it flows back into a `control` event's audit trail.
+    let mut bad_token = Map::new();
+    bad_token.insert(
+        "hold_token".to_owned(),
+        Value::String("not a safe token".to_owned()),
+    );
+    bad_token.insert("decision".to_owned(), Value::String("approved".to_owned()));
+    bad_token.insert("reason".to_owned(), Value::Null);
+    assert!(validate_control_data(&control("resolve_hold", bad_token)).is_err());
+
+    // decision is a closed vocabulary of exactly two values.
+    let mut bad_decision = Map::new();
+    bad_decision.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    bad_decision.insert("decision".to_owned(), Value::String("maybe".to_owned()));
+    bad_decision.insert("reason".to_owned(), Value::Null);
+    assert!(validate_control_data(&control("resolve_hold", bad_decision)).is_err());
+
+    // An empty (but present) reason is refused -- `null` is how "no reason"
+    // is spelled, not the empty string.
+    let mut empty_reason = Map::new();
+    empty_reason.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    empty_reason.insert("decision".to_owned(), Value::String("approved".to_owned()));
+    empty_reason.insert("reason".to_owned(), Value::String(String::new()));
+    assert!(validate_control_data(&control("resolve_hold", empty_reason)).is_err());
+
+    // Oversized reason (> MAX_HOLD_REASON_BYTES) is refused.
+    let mut oversized_reason = Map::new();
+    oversized_reason.insert("hold_token".to_owned(), Value::String("hold-1".to_owned()));
+    oversized_reason.insert("decision".to_owned(), Value::String("approved".to_owned()));
+    oversized_reason.insert(
+        "reason".to_owned(),
+        Value::String("x".repeat(8 * 1024 + 1)),
+    );
+    assert!(validate_control_data(&control("resolve_hold", oversized_reason)).is_err());
+
+    // force_stop must never validate under its own name here: its audit
+    // event is deliberately recorded as "stop" (see
+    // control-plane-api/src/envelope.rs::build_control_request) precisely
+    // because this validator predates it and is not the place that gap gets
+    // closed by inventing a new accepted literal.
+    assert!(validate_control_data(&control("force_stop", Map::new())).is_err());
+}
+
 #[test]
 fn secret_scanner_detects_high_confidence_shapes_without_hash_field_false_positives() {
     assert!(contains_secret_like_value(&serde_json::json!({
