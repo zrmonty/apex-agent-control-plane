@@ -88,15 +88,37 @@ jobs:
           CARGO_HTTP_MULTIPLEXING: "false"
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+  rust-agent-supervisor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/agent-supervisor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Test
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked
+      - name: Clippy
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: cargo clippy --locked --all-targets -- -D warnings
+
   rust-sast:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Both Rust services carry their own Cargo.lock and deny.toml, so both
-        # need their own advisory/license/ban scan. Auditing only one leaves
-        # the other's dependency tree unscanned.
-        crate: [apps/event-ingest, apps/control-plane-api]
+        # Every Rust crate carries its own Cargo.lock and deny.toml, so each
+        # needs its own advisory/license/ban scan. Auditing only some leaves
+        # the rest's dependency tree unscanned.
+        crate: [apps/event-ingest, apps/control-plane-api, apps/agent-supervisor]
     defaults:
       run:
         working-directory: ${{ matrix.crate }}
