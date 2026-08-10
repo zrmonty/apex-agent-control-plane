@@ -733,6 +733,109 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             delivery_attempt,
         }))
     }
+
+    /// Enumerates commands recorded for a scope -- "what is currently
+    /// pending here" -- for an operator who does not yet know a
+    /// `command_id`, which is exactly the gap `GetCommandStatus` cannot
+    /// close: it requires one.
+    ///
+    /// The security shape mirrors `GetCommandStatus` precisely: the
+    /// *operator* credential space (never the agent one), the same
+    /// `operator.allows_scope(workspace_id, namespace_id)` check performed
+    /// before anything else runs, and no branch anywhere on request data
+    /// except values that only ever *narrow* the result -- `agent_id`,
+    /// `state`, `page_size`, `page_token`. There is no way to ask for
+    /// another workspace/namespace's commands: the scope check runs before
+    /// the query is built, and the query itself is scoped to exactly the
+    /// pair the operator was just authorized against.
+    async fn list_commands(
+        &self,
+        request: tonic::Request<proto::ListCommandsRequest>,
+    ) -> Result<tonic::Response<proto::ListCommandsResponse>, tonic::Status> {
+        let operator = self
+            .auth
+            .authenticate(request.metadata())
+            .map_err(CommandError::into_status)?;
+        let input = request.into_inner();
+        if input.workspace_id.is_empty() || input.namespace_id.is_empty() {
+            return Err(CommandError::invalid_command().into_status());
+        }
+        if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
+            return Err(CommandError::scope_denied().into_status());
+        }
+
+        // A cursor, not an offset: resuming strictly after the last-seen
+        // sequence is what keeps a page stable while commands are
+        // concurrently recorded, delivered, and settled underneath a paging
+        // operator. An unparsable token is refused rather than silently
+        // treated as "start over", which would make a corrupted or forged
+        // token look like an empty scope instead of an error.
+        let after_sequence = if input.page_token.is_empty() {
+            0
+        } else {
+            input
+                .page_token
+                .parse::<u64>()
+                .map_err(|_| CommandError::invalid_command().into_status())?
+        };
+        let requested = input.page_size as usize;
+        let limit = if requested == 0 {
+            crate::inbox::DEFAULT_LIST_COMMANDS_PAGE_SIZE
+        } else {
+            // The hard ceiling: a caller can only ever narrow the page it
+            // asks for, never raise it past MAX_LIST_COMMANDS_PAGE_SIZE.
+            requested.min(crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE)
+        };
+        let state = proto::CommandDeliveryState::try_from(input.state)
+            .ok()
+            .and_then(proto_state_to_delivery_status);
+        let agent_id = input.agent_id.filter(|value| !value.is_empty());
+        let workspace_id = input.workspace_id;
+        let namespace_id = input.namespace_id;
+
+        let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        // `spawn_blocking` for the same reason every other inbox-touching
+        // path here uses it: the inbox is behind a mutex and its durable
+        // backend performs synchronous I/O.
+        let page = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            let query = crate::inbox::ListCommandsQuery {
+                workspace_id: &workspace_id,
+                namespace_id: &namespace_id,
+                agent_id: agent_id.as_deref(),
+                state,
+                after_sequence,
+                limit,
+                max_attempts: crate::DEFAULT_MAX_DELIVERY_ATTEMPTS,
+            };
+            inbox.list_commands(&query)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?;
+
+        let next_page_token = if page.has_more {
+            page.commands
+                .last()
+                .map(|command| command.sequence.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(tonic::Response::new(proto::ListCommandsResponse {
+            commands: page
+                .commands
+                .into_iter()
+                .map(command_summary_to_proto)
+                .collect(),
+            next_page_token,
+        }))
+    }
 }
 
 fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliveryState {
@@ -744,6 +847,50 @@ fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliverySta
     }
 }
 
+/// The inverse of `delivery_status_to_proto`, used to parse `ListCommands`'
+/// `state` filter. `Unspecified` means "no filter" -- the proto3 default for
+/// an unset enum field -- rather than a fifth delivery state.
+fn proto_state_to_delivery_status(state: proto::CommandDeliveryState) -> Option<DeliveryStatus> {
+    match state {
+        proto::CommandDeliveryState::Unspecified => None,
+        proto::CommandDeliveryState::CommandDeliveryPending => Some(DeliveryStatus::Pending),
+        proto::CommandDeliveryState::CommandDeliveryDelivered => Some(DeliveryStatus::Delivered),
+        proto::CommandDeliveryState::CommandDeliveryAcknowledged => {
+            Some(DeliveryStatus::Acknowledged)
+        }
+        proto::CommandDeliveryState::CommandDeliveryExhausted => Some(DeliveryStatus::Exhausted),
+    }
+}
+
+/// Maps a stored action name onto the wire enum. Factored out of
+/// `pending_to_proto` so `ListCommands`'s `CommandSummary` reports the same
+/// action the same way `PollCommands`'s `PendingControlCommand` does, rather
+/// than risking a second mapping that could drift from the first.
+fn action_to_proto(action: &str) -> proto::ControlAction {
+    match action {
+        "stop" => proto::ControlAction::Stop,
+        "pause" => proto::ControlAction::Pause,
+        "resume" => proto::ControlAction::Resume,
+        "inject" => proto::ControlAction::Inject,
+        "set_budget" => proto::ControlAction::SetBudget,
+        _ => proto::ControlAction::Unspecified,
+    }
+}
+
+/// Maps a stored [`crate::inbox::CommandSummary`] onto the wire type. Every
+/// field here is one `GetCommandStatus`/`PendingControlCommand` already
+/// expose; this introduces no new field.
+fn command_summary_to_proto(summary: crate::inbox::CommandSummary) -> proto::CommandSummary {
+    proto::CommandSummary {
+        command_id: summary.command_id,
+        agent_id: summary.agent_id,
+        action: action_to_proto(&summary.action) as i32,
+        state: delivery_status_to_proto(summary.state) as i32,
+        delivery_attempt: summary.delivery_attempt,
+        issued_at: summary.issued_at,
+    }
+}
+
 /// Maps a stored delivery record onto the wire type.
 ///
 /// `parameters` is decoded from the bytes recorded at accept time. A record
@@ -752,14 +899,7 @@ fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliverySta
 /// to deliver a `stop` because an optional parameters blob is unreadable would
 /// be the wrong trade on this channel.
 fn pending_to_proto(command: PendingCommand) -> proto::PendingControlCommand {
-    let action = match command.action.as_str() {
-        "stop" => proto::ControlAction::Stop,
-        "pause" => proto::ControlAction::Pause,
-        "resume" => proto::ControlAction::Resume,
-        "inject" => proto::ControlAction::Inject,
-        "set_budget" => proto::ControlAction::SetBudget,
-        _ => proto::ControlAction::Unspecified,
-    };
+    let action = action_to_proto(&command.action);
     proto::PendingControlCommand {
         command_id: command.command_id,
         workspace_id: command.workspace_id,
@@ -1686,5 +1826,294 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // --- ListCommands -----------------------------------------------------
+
+    fn list_request(
+        bearer: &str,
+        body: proto::ListCommandsRequest,
+    ) -> tonic::Request<proto::ListCommandsRequest> {
+        let mut request = tonic::Request::new(body);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        request
+    }
+
+    fn list_commands_request(
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: Option<&str>,
+        state: proto::CommandDeliveryState,
+        page_size: u32,
+        page_token: &str,
+    ) -> proto::ListCommandsRequest {
+        proto::ListCommandsRequest {
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            agent_id: agent_id.map(str::to_owned),
+            state: state as i32,
+            page_size,
+            page_token: page_token.to_owned(),
+        }
+    }
+
+    /// Seeds a command directly into the inbox's delivery state, bypassing
+    /// `submit_command`'s outbox write and operator admission ceiling. These
+    /// tests need many commands recorded quickly and are exercising
+    /// `ListCommands`, not admission or outbox durability, which are already
+    /// covered elsewhere.
+    fn seed_command(
+        service: &ControlGatewayService<StaticOperatorTokenResolver>,
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: &str,
+        command_id: &str,
+    ) {
+        let command = crate::inbox::PendingCommand {
+            command_id: command_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            run_id: "run-1".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: "stop".to_owned(),
+            reason_code: Some("operator.request".to_owned()),
+            parameters: Vec::new(),
+            issued_at: "2026-08-08T00:00:00.000000Z".to_owned(),
+            delivery_attempt: 0,
+        };
+        service
+            .inbox
+            .with_lock(|inbox| inbox.record(&command))
+            .expect("lock must not be poisoned")
+            .expect("a fresh command_id must record");
+    }
+
+    /// A second page requested with the first page's cursor must return the
+    /// next commands, not a repeat, and the response's `next_page_token`
+    /// must accurately signal whether more are available.
+    #[tokio::test]
+    async fn list_commands_pages_through_results_without_repeats_or_gaps() {
+        let service = service();
+        for index in 0..5 {
+            seed_command(&service, "acme", "prod", "agent-a", &format!("cmd-{index}"));
+        }
+
+        let first = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::Unspecified,
+                    2,
+                    "",
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            first
+                .commands
+                .iter()
+                .map(|c| c.command_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd-0", "cmd-1"]
+        );
+        assert!(!first.next_page_token.is_empty());
+
+        let second = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::Unspecified,
+                    2,
+                    &first.next_page_token,
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            second
+                .commands
+                .iter()
+                .map(|c| c.command_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd-2", "cmd-3"],
+            "the second page must return the *next* commands, not a repeat of the first"
+        );
+        assert!(!second.next_page_token.is_empty());
+
+        let third = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::Unspecified,
+                    2,
+                    &second.next_page_token,
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            third.commands.iter().map(|c| c.command_id.as_str()).collect::<Vec<_>>(),
+            vec!["cmd-4"]
+        );
+        assert!(
+            third.next_page_token.is_empty(),
+            "the last page must not claim more are available"
+        );
+    }
+
+    /// The page-size ceiling is enforced even when a caller asks for more
+    /// than `MAX_LIST_COMMANDS_PAGE_SIZE`.
+    #[tokio::test]
+    async fn list_commands_enforces_the_page_size_ceiling() {
+        let service = service();
+        let total = crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE + 25;
+        for index in 0..total {
+            seed_command(&service, "acme", "prod", "agent-a", &format!("cmd-{index}"));
+        }
+
+        let response = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::Unspecified,
+                    u32::MAX,
+                    "",
+                ),
+            ))
+            .await
+            .expect("a clamped page_size must not be an error")
+            .into_inner();
+        assert_eq!(
+            response.commands.len(),
+            crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE,
+            "asking for more than the ceiling must still be clamped to it"
+        );
+        assert!(
+            !response.next_page_token.is_empty(),
+            "more commands exist past the ceiling, so the response must say so"
+        );
+    }
+
+    /// Mirrors `submit_command_rejects_a_scope_the_operator_does_not_hold`:
+    /// an operator cannot list another workspace's commands.
+    #[tokio::test]
+    async fn list_commands_rejects_a_scope_the_operator_does_not_hold() {
+        let service = service();
+        seed_command(&service, "acme", "prod", "agent-a", "cmd-scoped");
+
+        let status = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "other-workspace",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::Unspecified,
+                    0,
+                    "",
+                ),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// `agent_id` and `state` both narrow the result, independently and
+    /// combined -- and combined means AND, not OR.
+    #[tokio::test]
+    async fn list_commands_filters_by_agent_id_and_state_and_can_combine_both() {
+        let service = service_with_two_agents();
+        seed_command(&service, "acme", "prod", "agent-a", "cmd-a1");
+        // Deliver cmd-a1 so it is no longer Pending, before recording the
+        // rest -- a poll claims every deliverable command for the agent, so
+        // seeding cmd-a2 first would deliver both in one poll.
+        service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap();
+        seed_command(&service, "acme", "prod", "agent-a", "cmd-a2");
+        seed_command(&service, "acme", "prod", "agent-b", "cmd-b1");
+
+        let by_agent = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    Some("agent-a"),
+                    proto::CommandDeliveryState::Unspecified,
+                    0,
+                    "",
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_agent.commands.len(), 2);
+        assert!(by_agent.commands.iter().all(|c| c.agent_id == "agent-a"));
+
+        let by_state = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    None,
+                    proto::CommandDeliveryState::CommandDeliveryPending,
+                    0,
+                    "",
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_state.commands.len(), 2);
+        assert!(
+            by_state
+                .commands
+                .iter()
+                .all(|c| c.state == proto::CommandDeliveryState::CommandDeliveryPending as i32)
+        );
+
+        let combined = service
+            .list_commands(list_request(
+                "op-token",
+                list_commands_request(
+                    "acme",
+                    "prod",
+                    Some("agent-a"),
+                    proto::CommandDeliveryState::CommandDeliveryPending,
+                    0,
+                    "",
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            combined.commands.len(),
+            1,
+            "agent-a AND Pending must match only cmd-a2, not every agent-a command"
+        );
+        assert_eq!(combined.commands[0].command_id, "cmd-a2");
     }
 }

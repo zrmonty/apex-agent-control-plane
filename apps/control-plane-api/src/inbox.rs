@@ -112,6 +112,18 @@ pub const DEFAULT_MAX_DELIVERY_ATTEMPTS: u32 = 8;
 pub const DEFAULT_MAX_COMMANDS_PER_POLL: usize = 16;
 pub const MAX_COMMANDS_PER_POLL: usize = 64;
 
+/// Default and ceiling for how many command summaries one `ListCommands`
+/// page returns. Same discipline as `DEFAULT_MAX_COMMANDS_PER_POLL` /
+/// `MAX_COMMANDS_PER_POLL`: a hard maximum a caller cannot raise by asking
+/// for more, and a sane default when `page_size` is left unspecified. An
+/// operator dashboard scanning a scope mid-incident is still one caller
+/// asking the gateway to do bounded work and return a bounded response --
+/// unbounded pagination would mean an unbounded query and an unbounded
+/// response on the one channel ADR-0006 needs to stay reachable when
+/// everything else is degraded.
+pub const DEFAULT_LIST_COMMANDS_PAGE_SIZE: usize = 50;
+pub const MAX_LIST_COMMANDS_PAGE_SIZE: usize = 200;
+
 /// Ceiling on tracked commands, mirroring the outbox's own capacity bound.
 pub const DEFAULT_INBOX_CAPACITY: usize = 1_000_000;
 
@@ -200,6 +212,70 @@ pub struct PollTarget {
     pub limit: usize,
 }
 
+/// One command summary returned by `ListCommands` -- exactly the fields
+/// `GetCommandStatus` and `PendingControlCommand` already expose for a
+/// command's identity and delivery state, and nothing else: no `parameters`,
+/// no `run_id`/`trace_id`. An operator who needs those already has the
+/// `command_id` this carries and can pull the full record from the
+/// queryable trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSummary {
+    pub command_id: String,
+    pub agent_id: String,
+    pub action: String,
+    pub state: DeliveryStatus,
+    pub delivery_attempt: u32,
+    pub issued_at: String,
+    /// This entry's position in the backend's total order, oldest first.
+    /// `service.rs` never interprets it -- it round-trips it as the opaque
+    /// `next_page_token` string -- but it is what makes resuming a scan
+    /// stable: a caller passes back the last summary's `sequence` and the
+    /// next page resumes strictly after it, so a command recorded,
+    /// delivered, or settled by someone else while this caller pages
+    /// through a large scope can never shift already-returned rows the way
+    /// an offset would.
+    pub sequence: u64,
+}
+
+/// Enumeration parameters for `ListCommands`, scoped to a single
+/// workspace/namespace the caller has already been authorized against by
+/// the same `operator.allows_scope` check `GetCommandStatus` uses.
+///
+/// Unlike `PollTarget`, there is no `ScopeAuthorizer` here: the scope is not
+/// a set the backend re-checks per row, it is the one scope the caller
+/// already proved before this query was built -- exactly as
+/// `GetCommandStatus`'s `InboxKey` already carries an unchecked
+/// `workspace_id`/`namespace_id` pair for the same reason.
+#[derive(Debug, Clone, Copy)]
+pub struct ListCommandsQuery<'a> {
+    pub workspace_id: &'a str,
+    pub namespace_id: &'a str,
+    /// Narrows to one agent's commands. `None` returns every agent's
+    /// commands in scope.
+    pub agent_id: Option<&'a str>,
+    /// Narrows to one delivery state. `None` returns commands in every
+    /// state.
+    pub state: Option<DeliveryStatus>,
+    /// Resume strictly after this sequence. `0` starts from the beginning --
+    /// valid because every backend assigns sequences starting at 1.
+    pub after_sequence: u64,
+    /// Already clamped into `[1, MAX_LIST_COMMANDS_PAGE_SIZE]` by the caller
+    /// (`service.rs`); the inbox trusts it rather than re-clamping, so the
+    /// ceiling is enforced in exactly one place.
+    pub limit: usize,
+    pub max_attempts: u32,
+}
+
+/// One page of [`CommandSummary`] results.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListCommandsPage {
+    pub commands: Vec<CommandSummary>,
+    /// `true` when at least one more command past this page's last entry
+    /// matches the query. The caller resumes with the last summary's
+    /// `sequence` as the next `after_sequence`.
+    pub has_more: bool,
+}
+
 /// Decides whether the authenticated caller holds a given workspace/namespace.
 ///
 /// The inbox deliberately does not know how scope is granted; it asks. The
@@ -262,6 +338,27 @@ pub enum DeliveryStatus {
     Exhausted,
 }
 
+/// The one rule every backend applies to turn attempts/acknowledgement into
+/// a [`DeliveryStatus`]. Used by `status` and `list` below, and by
+/// `PostgresCommandInbox`'s own `status` and `list_commands`. Kept in one
+/// place so "what does DELIVERED mean" cannot drift between backends, or
+/// between the two RPCs (`GetCommandStatus`, `ListCommands`) that report it.
+pub(super) fn resolve_delivery_status(
+    acknowledged: bool,
+    attempts: u32,
+    max_attempts: u32,
+) -> DeliveryStatus {
+    if acknowledged {
+        DeliveryStatus::Acknowledged
+    } else if attempts == 0 {
+        DeliveryStatus::Pending
+    } else if attempts >= max_attempts {
+        DeliveryStatus::Exhausted
+    } else {
+        DeliveryStatus::Delivered
+    }
+}
+
 /// Durable delivery-state store.
 pub trait CommandInbox: Send {
     /// Idempotently records a command as awaiting delivery to its agent.
@@ -300,6 +397,17 @@ pub trait CommandInbox: Send {
         key: &InboxKey,
         max_attempts: u32,
     ) -> Result<Option<(DeliveryStatus, u32)>, CommandError>;
+
+    /// Enumerates commands in a scope for operator visibility -- "what is
+    /// currently pending here" -- without requiring the caller to already
+    /// know a `command_id`. Cursor-paginated: see
+    /// [`ListCommandsQuery::after_sequence`]. Implementations must apply a
+    /// stable, oldest-first order so a caller resuming with a previous
+    /// page's cursor sees the next commands, never a repeat or a gap.
+    fn list_commands(
+        &mut self,
+        query: &ListCommandsQuery<'_>,
+    ) -> Result<ListCommandsPage, CommandError>;
 
     /// Retires settled delivery state after the configured idempotency window.
     /// Implementations must preserve the command identity until that window
@@ -355,6 +463,13 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
         (**self).status(key, max_attempts)
     }
 
+    fn list_commands(
+        &mut self,
+        query: &ListCommandsQuery<'_>,
+    ) -> Result<ListCommandsPage, CommandError> {
+        (**self).list_commands(query)
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -388,6 +503,15 @@ struct InboxState {
     /// so enforcing `scope_quota` in `record` never has to scan the whole
     /// inbox.
     scope_counts: HashMap<(String, String), usize>,
+    /// Monotonically increasing identity assigned to each command at
+    /// `record` time, purely for `list`'s cursor pagination. Never reused --
+    /// not even when a retired command's key is later reused, since a fresh
+    /// `record` always draws the next value -- so a page token issued before
+    /// a retirement can never be confused with a later, unrelated command.
+    /// This is the in-memory/file counterpart to `PostgresCommandInbox`'s
+    /// `sequence` column (`BIGSERIAL`), which starts at 1 for the same
+    /// reason this starts at 1: `0` is left free to mean "from the start".
+    next_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +520,7 @@ struct Entry {
     attempts: u32,
     last_delivered_millis: Option<u64>,
     acknowledged: bool,
+    sequence: u64,
 }
 
 impl InboxState {
@@ -407,6 +532,7 @@ impl InboxState {
             capacity,
             scope_quota,
             scope_counts: HashMap::new(),
+            next_sequence: 1,
         }
     }
 
@@ -481,6 +607,8 @@ impl InboxState {
         // later compaction cannot emit the command twice.
         self.order.retain(|existing| existing != &key);
         self.order.push(key.clone());
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
         self.entries.insert(
             key,
             Entry {
@@ -488,6 +616,7 @@ impl InboxState {
                 attempts: 0,
                 last_delivered_millis: None,
                 acknowledged: false,
+                sequence,
             },
         );
         *self.scope_counts.entry(scope).or_insert(0) += 1;
@@ -604,16 +733,63 @@ impl InboxState {
 
     fn status(&self, key: &InboxKey, max_attempts: u32) -> Option<(DeliveryStatus, u32)> {
         let entry = self.entries.get(key)?;
-        let status = if entry.acknowledged {
-            DeliveryStatus::Acknowledged
-        } else if entry.attempts == 0 {
-            DeliveryStatus::Pending
-        } else if entry.attempts >= max_attempts {
-            DeliveryStatus::Exhausted
-        } else {
-            DeliveryStatus::Delivered
-        };
+        let status = resolve_delivery_status(entry.acknowledged, entry.attempts, max_attempts);
         Some((status, entry.attempts))
+    }
+
+    /// Enumerates stored commands for `ListCommands`, oldest-first by the
+    /// sequence assigned at `record` time -- the same identity `order`
+    /// already preserves insertion order by, made explicit here so a caller
+    /// can resume after the last-seen entry rather than by a position that
+    /// shifts under concurrent inserts and retirements.
+    ///
+    /// Every clause is a server-derived or caller-narrowing predicate, the
+    /// same shape `deliverable` already follows: `workspace_id`/
+    /// `namespace_id` come from a scope the caller was already authorized
+    /// against before this was called (`service.rs`), and `agent_id`/`state`
+    /// can only ever narrow the result further.
+    fn list(&self, query: &ListCommandsQuery<'_>) -> (Vec<CommandSummary>, bool) {
+        let mut collected = Vec::with_capacity(query.limit.min(64));
+        let mut has_more = false;
+        for key in &self.order {
+            let Some(entry) = self.entries.get(key) else {
+                continue;
+            };
+            if entry.sequence <= query.after_sequence {
+                continue;
+            }
+            if entry.command.workspace_id != query.workspace_id
+                || entry.command.namespace_id != query.namespace_id
+            {
+                continue;
+            }
+            if let Some(agent_id) = query.agent_id
+                && entry.command.agent_id != agent_id
+            {
+                continue;
+            }
+            let status =
+                resolve_delivery_status(entry.acknowledged, entry.attempts, query.max_attempts);
+            if let Some(filter) = query.state
+                && filter != status
+            {
+                continue;
+            }
+            if collected.len() >= query.limit {
+                has_more = true;
+                break;
+            }
+            collected.push(CommandSummary {
+                command_id: entry.command.command_id.clone(),
+                agent_id: entry.command.agent_id.clone(),
+                action: entry.command.action.clone(),
+                state: status,
+                delivery_attempt: entry.attempts,
+                issued_at: entry.command.issued_at.clone(),
+                sequence: entry.sequence,
+            });
+        }
+        (collected, has_more)
     }
 
     fn retire(&mut self, key: &InboxKey, retired_at_millis: u64) {
@@ -718,6 +894,14 @@ impl CommandInbox for InMemoryCommandInbox {
         max_attempts: u32,
     ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
         Ok(self.state.status(key, max_attempts))
+    }
+
+    fn list_commands(
+        &mut self,
+        query: &ListCommandsQuery<'_>,
+    ) -> Result<ListCommandsPage, CommandError> {
+        let (commands, has_more) = self.state.list(query);
+        Ok(ListCommandsPage { commands, has_more })
     }
 }
 
@@ -1206,6 +1390,14 @@ impl CommandInbox for FileCommandInbox {
         Ok(self.state.status(key, max_attempts))
     }
 
+    fn list_commands(
+        &mut self,
+        query: &ListCommandsQuery<'_>,
+    ) -> Result<ListCommandsPage, CommandError> {
+        let (commands, has_more) = self.state.list(query);
+        Ok(ListCommandsPage { commands, has_more })
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -1373,6 +1565,13 @@ impl ControlInboxBackend {
         max_attempts: u32,
     ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
         self.with_lock(|inbox| inbox.status(key, max_attempts))?
+    }
+
+    pub fn list_commands(
+        &self,
+        query: &ListCommandsQuery<'_>,
+    ) -> Result<ListCommandsPage, CommandError> {
+        self.with_lock(|inbox| inbox.list_commands(query))?
     }
 }
 
@@ -2047,5 +2246,143 @@ mod tests {
         bad_action.action = "self_destruct".to_owned();
         assert!(inbox.record(&bad_action).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- ListCommands ----------------------------------------------------
+
+    fn list_query(after_sequence: u64, limit: usize) -> ListCommandsQuery<'static> {
+        ListCommandsQuery {
+            workspace_id: "acme",
+            namespace_id: "prod",
+            agent_id: None,
+            state: None,
+            after_sequence,
+            limit,
+            max_attempts: DEFAULT_MAX_DELIVERY_ATTEMPTS,
+        }
+    }
+
+    /// A second page requested with the first page's cursor must return the
+    /// *next* commands, not a repeat, and `has_more` must accurately track
+    /// whether a further page exists.
+    #[test]
+    fn list_commands_pages_through_results_without_repeats_or_gaps() {
+        let mut inbox = InMemoryCommandInbox::new(64);
+        for index in 0..5 {
+            inbox
+                .record(&command(&format!("cmd-{index}"), "agent-a"))
+                .unwrap();
+        }
+
+        let first = inbox.list_commands(&list_query(0, 2)).unwrap();
+        assert_eq!(
+            first
+                .commands
+                .iter()
+                .map(|c| c.command_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd-0", "cmd-1"]
+        );
+        assert!(first.has_more);
+
+        let cursor = first.commands.last().unwrap().sequence;
+        let second = inbox.list_commands(&list_query(cursor, 2)).unwrap();
+        assert_eq!(
+            second
+                .commands
+                .iter()
+                .map(|c| c.command_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd-2", "cmd-3"]
+        );
+        assert!(second.has_more);
+        assert_ne!(second.commands[0].command_id, first.commands[0].command_id);
+        assert_ne!(second.commands[0].command_id, first.commands[1].command_id);
+
+        let cursor = second.commands.last().unwrap().sequence;
+        let third = inbox.list_commands(&list_query(cursor, 2)).unwrap();
+        assert_eq!(third.commands.len(), 1);
+        assert_eq!(third.commands[0].command_id, "cmd-4");
+        assert!(
+            !third.has_more,
+            "the last page must not claim more are available"
+        );
+    }
+
+    #[test]
+    fn list_commands_filters_by_agent_id_and_by_state_and_can_combine_both() {
+        let mut inbox = InMemoryCommandInbox::new(64);
+        inbox.record(&command("cmd-a", "agent-a")).unwrap();
+        inbox.record(&command("cmd-b", "agent-b")).unwrap();
+        // Deliver cmd-a so it is no longer Pending; cmd-b stays Pending.
+        inbox
+            .claim(
+                &target("agent-a"),
+                &acme_prod(),
+                DeliveryPolicy::default(),
+                1_000,
+            )
+            .unwrap();
+
+        let agent_a_only = inbox
+            .list_commands(&ListCommandsQuery {
+                agent_id: Some("agent-a"),
+                ..list_query(0, 16)
+            })
+            .unwrap();
+        assert_eq!(agent_a_only.commands.len(), 1);
+        assert_eq!(agent_a_only.commands[0].command_id, "cmd-a");
+        assert_eq!(agent_a_only.commands[0].state, DeliveryStatus::Delivered);
+
+        let pending_only = inbox
+            .list_commands(&ListCommandsQuery {
+                state: Some(DeliveryStatus::Pending),
+                ..list_query(0, 16)
+            })
+            .unwrap();
+        assert_eq!(pending_only.commands.len(), 1);
+        assert_eq!(pending_only.commands[0].command_id, "cmd-b");
+
+        // Combined: agent-a AND Delivered matches cmd-a; agent-a AND Pending
+        // matches nothing, proving the two filters are ANDed, not ORed.
+        let combined_match = inbox
+            .list_commands(&ListCommandsQuery {
+                agent_id: Some("agent-a"),
+                state: Some(DeliveryStatus::Delivered),
+                ..list_query(0, 16)
+            })
+            .unwrap();
+        assert_eq!(combined_match.commands.len(), 1);
+        assert_eq!(combined_match.commands[0].command_id, "cmd-a");
+
+        let combined_empty = inbox
+            .list_commands(&ListCommandsQuery {
+                agent_id: Some("agent-a"),
+                state: Some(DeliveryStatus::Pending),
+                ..list_query(0, 16)
+            })
+            .unwrap();
+        assert!(combined_empty.commands.is_empty());
+    }
+
+    #[test]
+    fn list_commands_is_scoped_to_workspace_and_namespace() {
+        let mut inbox = InMemoryCommandInbox::new(64);
+        inbox.record(&command("cmd-1", "agent-a")).unwrap(); // acme/prod, via `command()`.
+        for (workspace_id, namespace_id) in
+            [("other", "prod"), ("acme", "staging"), ("other", "staging")]
+        {
+            let page = inbox
+                .list_commands(&ListCommandsQuery {
+                    workspace_id,
+                    namespace_id,
+                    ..list_query(0, 16)
+                })
+                .unwrap();
+            assert!(
+                page.commands.is_empty(),
+                "a query scoped to {workspace_id}/{namespace_id} must not see acme/prod's command"
+            );
+        }
     }
 }
