@@ -85,6 +85,18 @@ impl CommandError {
         Self { code, message }
     }
 
+    /// The static, review-approved message alone, without the `CODE: `
+    /// prefix [`Self::into_status`] adds. Exists for callers that report a
+    /// `code` and a `message` as two separate structured fields rather than
+    /// one gRPC status string -- `SubmitBulkCommand`'s per-target
+    /// `BulkCommandResult` is the first of these, and any future RPC that
+    /// reports one error per item (rather than one error per call) should
+    /// reuse this rather than re-deriving the message from `into_status`'s
+    /// formatted string.
+    pub fn message(&self) -> &'static str {
+        self.message
+    }
+
     pub fn unauthenticated() -> Self {
         Self::new(
             CommandErrorCode::Unauthenticated,
