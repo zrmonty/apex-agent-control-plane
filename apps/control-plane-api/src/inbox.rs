@@ -422,10 +422,33 @@ impl InboxState {
         (command.workspace_id.clone(), command.namespace_id.clone())
     }
 
-    fn record(&mut self, command: &PendingCommand) -> Result<RecordResult, CommandError> {
+    /// Checks whether `command` may be recorded, without mutating any state.
+    ///
+    /// `Ok(Some(result))` means there is nothing left to do -- `command` is
+    /// already present, so recording it is a no-op. `Ok(None)` means `command`
+    /// is new and passed every admission check, so [`Self::insert_recorded`]
+    /// is guaranteed to succeed. `Err` means it was refused.
+    ///
+    /// Split out from the insert step specifically so a caller with a durable
+    /// journal (`FileCommandInbox`) can run this check *before* writing to
+    /// that journal. A rejected command must never reach the journal: replay
+    /// re-runs this same check against a `Command` journal entry via
+    /// `load()`, and because that check depends on how full the scope already
+    /// is, a phantom entry for a command that was refused for capacity would
+    /// very likely still be over-quota at replay time -- and since `load()`
+    /// deliberately fails closed on an admission failure rather than silently
+    /// dropping it (the same rule this crate applies to every malformed
+    /// credential-table entry), a single rejected write could otherwise make
+    /// the journal permanently unreplayable until an operator hand-edited the
+    /// file. Checking first is what keeps a rejected command out of the
+    /// journal in the first place, so replay never has a reason to see one.
+    fn check_recordable(
+        &self,
+        command: &PendingCommand,
+    ) -> Result<Option<RecordResult>, CommandError> {
         let key = Self::key(command);
         if self.entries.contains_key(&key) || self.retired.contains_key(&key) {
-            return Ok(RecordResult::AlreadyRecorded);
+            return Ok(Some(RecordResult::AlreadyRecorded));
         }
         if self.entries.len().saturating_add(self.retired.len()) >= self.capacity {
             return Err(CommandError::new(
@@ -444,6 +467,15 @@ impl InboxState {
                 "This workspace/namespace has reached its share of the durable command inbox. Retry after operator remediation.",
             ));
         }
+        Ok(None)
+    }
+
+    /// Unconditionally inserts a command that [`Self::check_recordable`] has
+    /// already admitted. Never call this without having just checked --
+    /// nothing here re-validates capacity, scope quota, or duplication.
+    fn insert_recorded(&mut self, command: &PendingCommand) {
+        let key = Self::key(command);
+        let scope = Self::scope(command);
         // A tombstone that has just expired may still have its old key in the
         // insertion-order vector. Remove it before reusing the identity so a
         // later compaction cannot emit the command twice.
@@ -459,6 +491,13 @@ impl InboxState {
             },
         );
         *self.scope_counts.entry(scope).or_insert(0) += 1;
+    }
+
+    fn record(&mut self, command: &PendingCommand) -> Result<RecordResult, CommandError> {
+        if let Some(result) = self.check_recordable(command)? {
+            return Ok(result);
+        }
+        self.insert_recorded(command);
         Ok(RecordResult::Recorded)
     }
 
@@ -1065,15 +1104,22 @@ impl CommandInbox for FileCommandInbox {
                 "The command was malformed: check target identifiers, action, and required parameters for the requested action.",
             ));
         }
-        let key = InboxState::key(command);
-        if self.state.entries.contains_key(&key) || self.state.retired.contains_key(&key) {
-            return Ok(RecordResult::AlreadyRecorded);
-        }
-        // Journal first, then mutate memory: a crash between the two leaves a
-        // record that replays into the same state, never a delivery the
-        // journal cannot account for.
-        self.append(&InboxRecord::Command(command.clone()))?;
-        self.state.record(command)
+        // Checked before the journal write, not after: a command this inbox
+        // is about to refuse (a duplicate, or one over the global/per-scope
+        // capacity) must never reach the journal at all. See
+        // `InboxState::check_recordable` for why -- a phantom journal entry
+        // for a refused command could otherwise poison every future replay.
+        let Some(result) = self.state.check_recordable(command)? else {
+            // Journal first, then mutate memory: a crash between the two
+            // leaves a record that replays into the same state, never a
+            // delivery the journal cannot account for. Safe to journal
+            // unconditionally from here: `check_recordable` just confirmed
+            // `insert_recorded` cannot fail.
+            self.append(&InboxRecord::Command(command.clone()))?;
+            self.state.insert_recorded(command);
+            return Ok(RecordResult::Recorded);
+        };
+        Ok(result)
     }
 
     fn claim(
@@ -1638,6 +1684,68 @@ mod tests {
             "once the settled command's identity fully expires, its scope's \
              quota must be freed for a new command"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for a command that is *refused* -- for global capacity
+    /// or, as exercised here, per-scope quota -- never reaching the journal.
+    ///
+    /// Before this was fixed, `FileCommandInbox::record` journaled every
+    /// command before checking whether it could actually be admitted, so a
+    /// rejected command still left a durable `Command` entry behind. Replay
+    /// re-runs the same admission check against every journaled `Command`,
+    /// and fails closed (propagates the error rather than silently dropping
+    /// the entry) on a check that does not pass -- so a single
+    /// rejected-for-quota write could poison every future restart: the
+    /// gateway would fail to come back up at all until an operator
+    /// hand-edited the journal file to remove the phantom line. This test
+    /// proves the fix by actually restarting the inbox from disk after a
+    /// rejection, which is the exact step that used to be able to fail.
+    #[test]
+    fn a_command_refused_for_scope_quota_is_never_journaled_and_does_not_poison_replay() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-refused-not-journaled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 1).unwrap();
+            assert_eq!(
+                inbox.record(&command("cmd-1", "agent-a")).unwrap(),
+                RecordResult::Recorded
+            );
+            let error = inbox.record(&command("cmd-2", "agent-a")).unwrap_err();
+            assert_eq!(
+                error.code,
+                CommandErrorCode::Capacity,
+                "the second command must be refused: the scope is already at its quota of 1"
+            );
+        }
+        // The regression: reopening (replaying the journal from a cold start,
+        // exactly what a restarted gateway does) must succeed, and must see
+        // only the one command that was actually admitted. If `cmd-2` had
+        // been journaled despite being refused, replay would hit the same
+        // over-quota check on it -- still failing, since nothing freed the
+        // scope's one slot in between -- and this `unwrap()` would panic
+        // instead of the gateway ever coming back up.
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64, 1)
+            .expect("a rejected command must never leave a journal entry that fails replay");
+        assert_eq!(
+            reopened.pending_count(),
+            1,
+            "only the admitted command should have survived the restart"
+        );
+        // The scope is still at its quota after restart -- state.record()
+        // recomputes quota from what actually replayed, not from anything
+        // the rejected write might have left behind -- so a third command in
+        // the same scope is refused exactly as it was before the restart.
+        let error = reopened.record(&command("cmd-3", "agent-a")).unwrap_err();
+        assert_eq!(error.code, CommandErrorCode::Capacity);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
