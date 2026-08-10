@@ -65,17 +65,31 @@ mod unix {
             .terminate_tree()
             .expect("terminate_tree must succeed");
 
-        // Bounded polling, not a fixed sleep: the kernel reaps asynchronously
-        // and this only needs to observe that it eventually happens.
-        wait_until_dead(direct_child_pid, Duration::from_secs(10)).await;
-        wait_until_dead(
-            grandchild_pid,
-            Duration::from_secs(10),
-        )
-        .await;
+        // The direct child is reaped via `child.wait()`, not the signal-0
+        // poll `wait_until_dead` below uses for the grandchild: this test
+        // process is the direct child's *real* OS parent, and `kill(pid, 0)`
+        // cannot tell "zombie, SIGKILLed, awaiting reap by its real parent"
+        // apart from "still actually running" -- both return success. Only
+        // this process can reap it, and only `wait()`/`try_wait()` does that;
+        // polling signal-0 without ever reaping would see a zombie forever
+        // and time out even though the kill genuinely succeeded.
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("the killed direct child must be reaped by its real parent promptly")
+            .expect("waiting on the killed direct child must succeed");
+        assert!(
+            !status.success(),
+            "a SIGKILLed process must not report success"
+        );
 
-        // Reap the direct child so the test process does not leak a zombie.
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        // The grandchild is not this process's child -- there is no `wait()`
+        // this process can call on it -- so it's checked the only way it can
+        // be: signal-0 polling. It dies from its own SIGKILL (killpg signals
+        // the whole group independently, not via the direct child relaying
+        // anything), and once reparented to init after the direct child
+        // terminates, init reaps it, at which point the signal-0 check
+        // correctly stops finding it. Bounded polling, not a fixed sleep.
+        wait_until_dead(grandchild_pid, Duration::from_secs(10)).await;
     }
 
     async fn read_leaf_pid(stdout: &mut tokio::process::ChildStdout) -> i32 {
