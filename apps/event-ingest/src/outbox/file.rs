@@ -180,7 +180,7 @@ impl FileOutbox {
         let reader = BufReader::new(
             self.file
                 .as_ref()
-                .ok_or_else(|| GatewayError::invalid_outbox_configuration())?
+                .ok_or_else(GatewayError::invalid_outbox_configuration)?
                 .try_clone()
                 .map_err(|_| GatewayError::invalid_outbox_configuration())?,
         );

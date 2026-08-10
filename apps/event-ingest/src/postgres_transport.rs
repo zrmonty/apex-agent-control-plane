@@ -29,6 +29,14 @@ enum TransportMode {
 /// Connect without allowing a remote plaintext or downgradeable PostgreSQL
 /// session. The connection string is never included in an error because it
 /// can contain database credentials.
+///
+/// `()` is deliberate, not an oversight clippy is catching: a richer error
+/// type is exactly the kind of thing that tends to accumulate context for
+/// debugging, and context here can mean a connection string or credential.
+/// Every caller already discards the specific error and maps to its own
+/// typed, redacted `GatewayError` variant, so there is nothing a richer type
+/// would let a caller do differently -- only something it would risk leaking.
+#[allow(clippy::result_unit_err)]
 pub fn connect_postgres(connection_string: &str) -> Result<Client, ()> {
     let config = parse_and_classify(connection_string, plaintext_explicitly_allowed())?;
     match config.1 {
@@ -63,6 +71,12 @@ pub fn connect_postgres(connection_string: &str) -> Result<Client, ()> {
 /// Serialising the DDL on an advisory lock keyed to the schema removes the
 /// race outright. The lock is session-scoped and released explicitly, so a
 /// caller that dies mid-DDL frees it when its connection closes.
+///
+/// `()` for the same reason `connect_postgres` uses it: every caller already
+/// discards the specific failure and maps to its own typed `GatewayError`,
+/// and a richer type here only adds a place for schema/DDL detail to leak
+/// without adding anything a caller could act on.
+#[allow(clippy::result_unit_err)]
 pub fn apply_postgres_schema(client: &mut Client, lock_key: i64, sql: &str) -> Result<(), ()> {
     client
         .execute("SELECT pg_advisory_lock($1)", &[&lock_key])

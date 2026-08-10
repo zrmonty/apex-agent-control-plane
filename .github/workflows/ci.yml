@@ -58,16 +58,7 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        # Lint the library only. Do not use -D warnings until CI clippy matches local
-        # (dtolnay stable can differ slightly across minutes). Still surface findings.
-        run: |
-          set -eu
-          set -o pipefail
-          cargo clippy --locked --lib --features test-support -- -W clippy::all 2>&1 | tee /tmp/clippy.log
-          # Fail only on hard compiler/clippy errors, not style warnings.
-          if grep -E '^error(\[|:)' /tmp/clippy.log; then
-            exit 1
-          fi
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   rust-control-plane:
     runs-on: ubuntu-latest
@@ -95,16 +86,7 @@ jobs:
         env:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
-        # Mirrors the rust-ingest job: surface every finding, but fail only on
-        # hard compiler/clippy errors, because CI's stable clippy can drift
-        # slightly from the locally pinned toolchain.
-        run: |
-          set -eu
-          set -o pipefail
-          cargo clippy --locked --all-targets --features test-support -- -W clippy::all 2>&1 | tee /tmp/clippy-control.log
-          if grep -E '^error(\[|:)' /tmp/clippy-control.log; then
-            exit 1
-          fi
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   rust-sast:
     runs-on: ubuntu-latest
