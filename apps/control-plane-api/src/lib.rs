@@ -17,6 +17,15 @@
 //! Durability does not have a hard dependency on JetStream/ClickHouse being
 //! reachable: a command is durably accepted once the outbox commits the row,
 //! before any downstream fanout is attempted. See [`replay`].
+//!
+//! A sixth action, `force_stop`, is *not* cooperative (ADR-0005's "Offer
+//! forced stop immediately -- rejected until process isolation and a safety
+//! model exist" is the v1 decision this closes): it is polled and enacted by
+//! a run's `apps/agent-supervisor` process, which holds real OS kill
+//! authority and its own distinct workload credential the agent it
+//! supervises never has access to, and it is the one action `SubmitCommand`
+//! requires two distinct operator approvals to record at all (see the
+//! crate-internal `dual_approval` module).
 
 pub mod proto {
     tonic::include_proto!("apex.v1");
@@ -24,6 +33,7 @@ pub mod proto {
 
 mod agent_auth;
 mod auth;
+mod dual_approval;
 mod envelope;
 mod errors;
 mod inbox;
@@ -37,6 +47,7 @@ pub use agent_auth::{
     AgentRevocationError, AgentRevocationList, AgentTokenTableError, AgentWorkloadAuthenticator,
     BoxedAgentWorkloadResolver, RevocationAwareAgentResolver, StaticAgentWorkloadResolver,
     agent_workload_subject, parse_agent_token_table, peer_identity_from_request,
+    supervisor_agent_id,
 };
 pub use auth::{
     BoxedOperatorCredentialResolver, OperatorCaller, OperatorCredentialResolver,

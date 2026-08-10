@@ -140,6 +140,14 @@ message ControlCommandResponse {
   // durably accepted but fanout is still pending -- for example while the
   // primary data path is degraded. The command is not lost either way.
   bool delivered = 3;
+  // True when `action == FORCE_STOP` and this submission recorded only the
+  // *first* of the two required operator approvals -- the command has NOT
+  // been enqueued and `delivered` is meaningless (always false). A second,
+  // distinct operator must resubmit `SubmitCommand` with the identical
+  // `command_id` and identical fields for the command to be recorded. Always
+  // false for every other action, and false once the second approval has
+  // landed and the `force_stop` was actually recorded.
+  bool awaiting_second_approval = 4;
 }
 
 // A poll carries **no** target selector.
@@ -256,6 +264,16 @@ enum ControlAction {
   // `apps/control-plane-api/src/envelope.rs` and
   // `packages/sdk-python/src/apex_sdk/reference_runtime.py`.
   RESOLVE_HOLD = 6;
+  // Non-cooperative. Delivered to a run's `apps/agent-supervisor` process
+  // (its own distinct workload identity -- never the supervised agent's own
+  // credential) rather than to the agent's own poll loop, and enacted by
+  // killing the agent's whole OS process group rather than by the agent
+  // choosing to honor it. See `apps/agent-supervisor`'s crate docs and
+  // ADR-0005's "Alternatives considered" for why this is a different
+  // enforcement class from the other five actions, and why `SubmitCommand`
+  // requires two distinct operator approvals before recording it (see
+  // `ControlCommandResponse.awaiting_second_approval`).
+  FORCE_STOP = 7;
 }
 
 message ListCommandsRequest {

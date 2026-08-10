@@ -39,6 +39,21 @@ const MAX_COMMAND_ID_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
 /// the emitted `control` event's audit timestamp cannot be set arbitrarily.
 const MAX_COMMAND_ID_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
 
+/// `reason_code` sentinel for a `force_stop` audit event that carried no
+/// operator-supplied reason. See `build_control_request`'s comment on why
+/// `force_stop` is recorded as `action: "stop"` in the shared, ingest-
+/// validated `control` event, and why this marker is what keeps that
+/// substitution honestly recoverable rather than silently lossy.
+const FORCE_STOP_AUDIT_MARKER: &str = "apex.force_stop";
+/// Prefix applied when the operator did supply a reason. Distinct from
+/// [`FORCE_STOP_AUDIT_MARKER`] deliberately: an operator's own reason_code
+/// could coincidentally *be* the marker string, but a still-valid
+/// `is_scope_identifier` value starting with this prefix followed by a colon
+/// is a far less likely accident, and either way this only affects the
+/// narrow crash-recovery reconciliation path
+/// (`pending_command_from_ingest_request`), never ordinary delivery.
+const FORCE_STOP_AUDIT_PREFIX: &str = "apex.force_stop:";
+
 pub struct ControlCommandInput {
     pub command_id: Option<String>,
     pub workspace_id: String,
@@ -119,6 +134,26 @@ pub fn pending_command_from_ingest_request(
         _ => return Err(CommandError::internal()),
     };
     let scope = envelope.scope.ok_or_else(CommandError::internal)?;
+    // Reverses `build_control_request`'s `force_stop` substitution (see its
+    // own comment): a persisted `action: "stop"` event whose `reason_code`
+    // carries the `force_stop:`/`force_stop` marker was really a
+    // `force_stop`, and reconciliation must recover the *true* action, or a
+    // process crash between the outbox commit and the inbox write would
+    // silently recover a force-killed run's command as an ordinary
+    // cooperative `stop` -- recorded correctly in the trace, delivered
+    // wrongly to the one process (`apps/agent-supervisor`) that actually
+    // acts on it.
+    let (action, reason_code) = if action == "stop" && reason_code.as_deref() == Some(FORCE_STOP_AUDIT_MARKER) {
+        ("force_stop".to_owned(), None)
+    } else if let Some(original) = reason_code
+        .as_deref()
+        .filter(|_| action == "stop")
+        .and_then(|value| value.strip_prefix(FORCE_STOP_AUDIT_PREFIX))
+    {
+        ("force_stop".to_owned(), Some(original.to_owned()))
+    } else {
+        (action, reason_code)
+    };
     Ok(PendingCommand {
         command_id: envelope.event_id,
         workspace_id: scope.workspace_id,
@@ -134,25 +169,22 @@ pub fn pending_command_from_ingest_request(
     })
 }
 
-/// Validates the caller's scope and builds the outbox-ready `IngestRequest`
-/// for a control command, together with the delivery record its target agent
-/// will retrieve. Returns the generated/validated `command_id` alongside them
-/// so the caller can echo it in the response.
-pub fn build_control_request(
-    input: ControlCommandInput,
-    operator: &OperatorCaller,
-) -> Result<AcceptedCommand, CommandError> {
-    if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
-        return Err(CommandError::scope_denied());
-    }
-    let action_name = action_name(input.action).ok_or_else(|| {
-        CommandError::new(
-            crate::errors::CommandErrorCode::InvalidCommand,
-            "action must be one of stop, pause, resume, inject, set_budget, resolve_hold.",
-        )
-    })?;
-
-    let command_id = match input.command_id {
+/// Resolves a caller-supplied (or generated) `command_id` to the RFC 3339
+/// timestamp the resulting `control` event will carry, applying the same
+/// generate-or-validate and clock-window rules `build_control_request` always
+/// has.
+///
+/// Factored out so [`crate::service`]'s dual-approval gate for `force_stop`
+/// can resolve and bound-check a `command_id` -- and therefore know what
+/// timestamp the eventual `control` event will carry -- for the *first*
+/// approval, before `build_control_request` is ever called for that command.
+/// The two approvals must agree on one `command_id`; deriving its timestamp
+/// identically in both places is what keeps that agreement meaningful rather
+/// than accidental.
+pub(crate) fn resolve_command_id_and_timestamp(
+    command_id: Option<String>,
+) -> Result<(String, String), CommandError> {
+    let command_id = match command_id {
         Some(id) if !id.is_empty() => id,
         _ => Uuid::now_v7().to_string(),
     };
@@ -186,6 +218,28 @@ pub fn build_control_request(
         ));
     }
     let timestamp = format_rfc3339_micros(u128::from(command_millis) * 1_000);
+    Ok((command_id, timestamp))
+}
+
+/// Validates the caller's scope and builds the outbox-ready `IngestRequest`
+/// for a control command, together with the delivery record its target agent
+/// will retrieve. Returns the generated/validated `command_id` alongside them
+/// so the caller can echo it in the response.
+pub fn build_control_request(
+    input: ControlCommandInput,
+    operator: &OperatorCaller,
+) -> Result<AcceptedCommand, CommandError> {
+    if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
+        return Err(CommandError::scope_denied());
+    }
+    let action_name = action_name(input.action).ok_or_else(|| {
+        CommandError::new(
+            crate::errors::CommandErrorCode::InvalidCommand,
+            "action must be one of stop, pause, resume, inject, set_budget, resolve_hold, force_stop.",
+        )
+    })?;
+
+    let (command_id, timestamp) = resolve_command_id_and_timestamp(input.command_id)?;
 
     // Captured before the envelope consumes the input. The delivery record
     // carries the operator's `parameters` object prost-encoded and otherwise
@@ -210,7 +264,37 @@ pub fn build_control_request(
         delivery_attempt: 0,
     };
 
-    let data = build_control_data(action_name, input.reason_code.as_deref(), input.parameters);
+    // `apex_event_ingest::validation::control::validate_control_data` --
+    // deliberately out of scope for this pass, see this crate's own
+    // instruction not to modify `apps/event-ingest` -- hard-codes the set of
+    // action names and the single `enforcement` literal a `control` event's
+    // `data` may carry, predating `force_stop` by design (ADR-0005
+    // explicitly deferred forced stop past v1). Rather than fabricate a
+    // schema slot that validator does not know about, the *audit* event for
+    // a `force_stop` is recorded under the closest existing category,
+    // `"stop"`, with `enforcement` left at that validator's only accepted
+    // value (see `build_control_data`). Neither is quite accurate taken
+    // alone for a kill enacted from outside the agent process entirely --
+    // what keeps that honest instead of silently misleading is
+    // `reason_code`: free text, not constrained by that validator's fixed
+    // action vocabulary, always prefixed `force_stop:` for this one action
+    // so the queryable trace and any audit tooling reading it can tell a
+    // `force_stop` apart from an ordinary cooperative `stop` at a glance.
+    // This substitution affects only the shared, ingest-validated audit
+    // event: `delivery` above -- what `apps/agent-supervisor` actually polls
+    // and acts on -- already carries the true `force_stop` action and the
+    // operator's own, unprefixed `reason_code` throughout.
+    let is_force_stop = action_name == "force_stop";
+    let audit_action_name = if is_force_stop { "stop" } else { action_name };
+    let audit_reason_code = if is_force_stop {
+        Some(match input.reason_code.as_deref() {
+            Some(reason) => format!("{FORCE_STOP_AUDIT_PREFIX}{reason}"),
+            None => FORCE_STOP_AUDIT_MARKER.to_owned(),
+        })
+    } else {
+        input.reason_code.clone()
+    };
+    let data = build_control_data(audit_action_name, audit_reason_code.as_deref(), input.parameters);
 
     let envelope = apex_event_ingest::proto::EventEnvelope {
         event_id: command_id.clone(),
@@ -283,6 +367,7 @@ pub(crate) fn action_name(action: proto::ControlAction) -> Option<&'static str> 
         proto::ControlAction::Inject => "inject",
         proto::ControlAction::SetBudget => "set_budget",
         proto::ControlAction::ResolveHold => "resolve_hold",
+        proto::ControlAction::ForceStop => "force_stop",
         proto::ControlAction::Unspecified => return None,
     })
 }
@@ -297,6 +382,11 @@ fn build_control_data(
         "action".to_owned(),
         string_value(action),
     );
+    // Always "cooperative": `apex_event_ingest::validation::control::validate_control_data`
+    // (out of scope for this pass -- see `build_control_request`'s own
+    // comment on why `force_stop` is recorded as `action: "stop"` here) hard-
+    // codes this as the *only* literal it accepts for every control action,
+    // `force_stop` included by necessity.
     fields.insert("enforcement".to_owned(), string_value("cooperative"));
     fields.insert(
         "reason_code".to_owned(),
@@ -570,6 +660,7 @@ mod tests {
             action_name(proto::ControlAction::ResolveHold),
             Some("resolve_hold")
         );
+        assert_eq!(action_name(proto::ControlAction::ForceStop), Some("force_stop"));
         assert_eq!(action_name(proto::ControlAction::Unspecified), None);
     }
 

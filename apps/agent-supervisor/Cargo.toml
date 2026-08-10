@@ -1,0 +1,50 @@
+[package]
+name = "apex-agent-supervisor"
+version = "0.1.0"
+edition = "2024"
+# Internal service binary, not a crates.io library -- same rationale
+# `apex-control-plane-api`'s Cargo.toml states for the same field.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "apex-agent-supervisor"
+path = "src/main.rs"
+
+# `src/bin/*.rs` below are auto-discovered by Cargo (autobins stays on:
+# nothing in this manifest disables it). They are test-only process trees --
+# never installed, never referenced by production wiring -- that exist
+# because the credential-isolation and process-group-kill tests in `tests/`
+# need a real, separate OS process to spawn and inspect. Cargo exposes each
+# one to `tests/*.rs` as `env!("CARGO_BIN_EXE_<name>")`.
+
+[dependencies]
+# Client-only: this binary never serves the ControlGateway RPCs, only calls
+# them. `default-features = false` plus this explicit feature list keeps the
+# same rustls/"ring" TLS stack `control-plane-api` and `event-ingest` already
+# standardize on, and nothing else -- see this crate's own `deny.toml` for the
+# same "no openssl variant, anywhere in the tree" rule they enforce.
+tonic = { version = "0.14", default-features = false, features = ["codegen", "transport", "tls-ring"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "signal", "io-util", "sync"] }
+
+[target.'cfg(unix)'.dependencies]
+# Safe wrapper over `killpg(2)`/`kill(2)`/`setsid(2)`. Its public API is
+# ordinary safe Rust -- the `unsafe` FFI calls live inside `nix` itself, never
+# in this crate -- which is what lets this crate keep `unsafe_code = "forbid"`
+# (see `[lints.rust]` below) while still reaching a real POSIX process-group
+# primitive. `default-features = false` because this crate has no use for
+# `nix`'s filesystem/networking/etc. modules, only process/signal.
+nix = { version = "0.31", default-features = false, features = ["process", "signal"] }
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -309,6 +309,47 @@ pub fn parse_agent_token_table(
     Ok(resolver)
 }
 
+/// Naming convention for a process supervisor's own agent-workload identity.
+///
+/// `apps/agent-supervisor` wraps and spawns one agent (`agent_id`) as its OS
+/// child, and separately polls `PollCommands` for `force_stop` using its
+/// *own* credential -- registered in `APEX_CONTROL_AGENT_TOKENS` under this
+/// derived agent_id, with its own token and its own pinned client
+/// certificate, never the wrapped agent's.
+///
+/// This function does not gate or enforce anything here; the table format
+/// already supports an arbitrary `agent_id` with its own credential, so no
+/// change to [`parse_agent_token_table`] was needed to give the supervisor a
+/// distinct identity. What this function fixes is the *naming convention*
+/// deployments should use when provisioning that second credential, so a
+/// supervisor's identity is recognizable as "the supervisor for run X" at a
+/// glance in the credential table, the audit trail, and the
+/// `APEX_CONTROL_AGENT_TOKENS` file -- rather than each deployment inventing
+/// its own ad hoc suffix.
+///
+/// **Why the identity must be distinct at all**, not merely differently
+/// named: if the supervisor authenticated `PollCommands` with the *same*
+/// credential as the agent it wraps, a fully compromised agent process (the
+/// AMSI-bypass scenario `Defense-Evasion Interception.md` documents) could
+/// read that credential out of its own environment or process memory and
+/// poll-and-ack its own `force_stop` before the supervisor's poll loop ever
+/// saw it -- exactly the finding
+/// `OOB Control Gateway — Command Delivery Gap.md` describes for the
+/// cooperative `stop` on a host an attacker already controls. A `force_stop`
+/// is only a real backstop if the credential that can retrieve it is one the
+/// agent process this is meant to kill never has access to. See
+/// `apps/agent-supervisor`'s crate docs for how that separation is enforced
+/// on the spawn side (`env_clear()` plus an explicit re-add allowlist).
+///
+/// A single `.` separator, not `:` or `/`: `is_identifier` (this module) and
+/// the ingest boundary's `is_scope_identifier` both accept `.` in an agent
+/// id, and `is_identifier` refuses `".."`, so `"{agent_id}.supervisor"` can
+/// never collide with a legitimate two-segment identifier scheme an operator
+/// might otherwise choose for `agent_id` itself.
+pub fn supervisor_agent_id(agent_id: &str) -> String {
+    format!("{agent_id}.supervisor")
+}
+
 fn parse_certificate_sha256(value: &str) -> Option<[u8; 32]> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
@@ -1185,6 +1226,41 @@ mod tests {
             Ok(false),
             "removing a fingerprint from the file must un-revoke it, not leave it \
              stuck from an earlier read"
+        );
+    }
+
+    /// The supervisor identity is a distinct, valid agent_id -- registerable
+    /// in the same credential table as the agent it supervises, with its own
+    /// entry -- and is never equal to the agent_id it is derived from. Equal
+    /// would mean "the same identity", which is precisely the property this
+    /// convention exists to avoid.
+    #[test]
+    fn supervisor_agent_id_is_distinct_and_registerable() {
+        let agent_id = "agent-1";
+        let supervisor_id = supervisor_agent_id(agent_id);
+        assert_ne!(supervisor_id, agent_id);
+        assert_eq!(supervisor_id, "agent-1.supervisor");
+        let table = parse_agent_token_table(&format!(
+            "agent-token-abcdefgh|{}|{agent_id}|acme/prod;supervisor-token-abcdefgh|{}|{supervisor_id}|acme/prod",
+            hex32(0xaa),
+            hex32(0xcc)
+        ))
+        .expect("an agent entry and its supervisor entry must both parse");
+        let agent_caller = table
+            .resolve_with_peer("agent-token-abcdefgh", Some(&peer(0xaa)))
+            .expect("the agent's own credential must authenticate");
+        let supervisor_caller = table
+            .resolve_with_peer("supervisor-token-abcdefgh", Some(&peer(0xcc)))
+            .expect("the supervisor's own, separate credential must authenticate");
+        assert_eq!(agent_caller.bound_agent_id(), Some(agent_id));
+        assert_eq!(supervisor_caller.bound_agent_id(), Some(supervisor_id.as_str()));
+        // Neither credential authenticates as the other's identity: the
+        // supervisor's token is pinned to its own certificate, distinct from
+        // the agent's.
+        assert!(
+            table
+                .resolve_with_peer("agent-token-abcdefgh", Some(&peer(0xcc)))
+                .is_err()
         );
     }
 }

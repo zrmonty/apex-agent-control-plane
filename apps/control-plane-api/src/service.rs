@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use apex_event_ingest::{Caller, EphemeralStore, RateLimitKey};
+use apex_event_ingest::{Caller, EphemeralStore, IngestRequest, RateLimitKey};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
@@ -17,10 +17,11 @@ use crate::agent_auth::{
     AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver, StaticAgentWorkloadResolver,
     peer_identity_from_request,
 };
-use crate::auth::{OperatorCredentialResolver, OperatorTokenAuthenticator};
+use crate::auth::{OperatorCaller, OperatorCredentialResolver, OperatorTokenAuthenticator};
+use crate::dual_approval::{ApprovalKey, ApprovalOutcome, DualApprovalGate};
 use crate::envelope::{
     AcceptedCommand, ControlCommandInput, build_control_request, derive_target_command_id,
-    validate_bulk_id,
+    resolve_command_id_and_timestamp, validate_bulk_id,
 };
 use crate::errors::{CommandError, CommandErrorCode};
 use crate::inbox::{
@@ -171,6 +172,10 @@ pub struct ControlGatewayService<R: OperatorCredentialResolver> {
     outbox: Arc<ControlOutboxBackend>,
     /// Delivery state, the dimension the outbox structurally cannot track.
     inbox: Arc<ControlInboxBackend>,
+    /// The two-distinct-operator approval gate applied only to `force_stop`.
+    /// See `dual_approval` for why this is process-local state and every
+    /// other durability guarantee in this struct is unaffected by that.
+    dual_approval: DualApprovalGate,
     admission: Mutex<HashMap<String, AdmissionBucket>>,
     polls: Mutex<HashMap<String, AdmissionBucket>>,
     /// Optional, non-authoritative, cross-replica admission counter. The
@@ -219,6 +224,7 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             )),
             outbox,
             inbox,
+            dual_approval: DualApprovalGate::new(),
             admission: Mutex::new(HashMap::new()),
             polls: Mutex::new(HashMap::new()),
             ephemeral: None,
@@ -394,6 +400,191 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
         let limit = u64::from(self.poll_limit.max(1));
         u32::try_from(window.div_ceil(limit)).unwrap_or(u32::MAX)
     }
+
+    /// The `force_stop` path: validates scope exactly as the single-operator
+    /// path does, then runs the submission through [`DualApprovalGate`]
+    /// instead of straight to [`build_control_request`].
+    ///
+    /// A `command_id` that has *already* been durably recorded (an
+    /// operator's idempotent retry of a `force_stop` that already went
+    /// through) skips the approval dance entirely and falls straight through
+    /// to the ordinary accept path, which recognises it as a duplicate the
+    /// same way every other action's retry already does. Without this check,
+    /// a retried, already-enacted `force_stop` would re-enter
+    /// `AwaitingSecond` -- the approval gate's in-memory slot for that
+    /// `command_id` was cleared the moment the second approval landed -- and
+    /// an operator would be told to find a second approver again for a
+    /// command that already ran.
+    async fn submit_force_stop(
+        &self,
+        input: ControlCommandInput,
+        operator: OperatorCaller,
+    ) -> Result<tonic::Response<proto::ControlCommandResponse>, tonic::Status> {
+        if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
+            return Err(CommandError::scope_denied().into_status());
+        }
+        let (command_id, _timestamp) =
+            resolve_command_id_and_timestamp(input.command_id.clone())
+                .map_err(CommandError::into_status)?;
+
+        let status_key = InboxKey {
+            workspace_id: input.workspace_id.clone(),
+            namespace_id: input.namespace_id.clone(),
+            command_id: command_id.clone(),
+        };
+        let already_recorded = self
+            .inbox_status(&status_key)
+            .await?
+            .is_some();
+
+        let mut input = input;
+        input.command_id = Some(command_id.clone());
+
+        if !already_recorded {
+            let approval_key = ApprovalKey {
+                workspace_id: input.workspace_id.clone(),
+                namespace_id: input.namespace_id.clone(),
+                command_id: command_id.clone(),
+            };
+            let fingerprint = crate::dual_approval::fingerprint(&input);
+            let outcome = self
+                .dual_approval
+                .submit(approval_key, fingerprint, operator.subject())
+                .map_err(CommandError::into_status)?;
+            match outcome {
+                ApprovalOutcome::AwaitingSecond | ApprovalOutcome::AlreadyApprovedBySameOperator => {
+                    return Ok(tonic::Response::new(proto::ControlCommandResponse {
+                        duplicate: false,
+                        command_id,
+                        delivered: false,
+                        awaiting_second_approval: true,
+                    }));
+                }
+                ApprovalOutcome::FieldMismatch => {
+                    return Err(CommandError::new(
+                        crate::errors::CommandErrorCode::IdempotencyConflict,
+                        "command_id was already approved once with different fields. Use a new command_id for a genuinely different force_stop.",
+                    )
+                    .into_status());
+                }
+                ApprovalOutcome::Approved => {}
+            }
+        }
+
+        let AcceptedCommand {
+            command_id,
+            request: ingest_request,
+            delivery,
+        } = build_control_request(input, &operator).map_err(CommandError::into_status)?;
+        self.accept_and_record(command_id, ingest_request, delivery)
+            .await
+    }
+
+    /// Looks up whether `key` has already been durably recorded, off the
+    /// tonic worker thread for the same reason every other inbox read on
+    /// this service is (`get_command_status` is the sibling of this call).
+    async fn inbox_status(
+        &self,
+        key: &InboxKey,
+    ) -> Result<Option<(DeliveryStatus, u32)>, tonic::Status> {
+        let inbox = self.inbox.clone();
+        let key = key.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            inbox.status(&key, crate::DEFAULT_MAX_DELIVERY_ATTEMPTS)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)
+    }
+
+    /// The shared tail of every action's accept path: commit the outbox row,
+    /// then durably record the delivery, then report. Factored out so
+    /// `submit_command`'s single-operator path and `submit_force_stop`'s
+    /// second-approval path -- the only two callers -- describe one command
+    /// identically rather than risking the two accept paths drifting.
+    async fn accept_and_record(
+        &self,
+        command_id: String,
+        ingest_request: IngestRequest,
+        delivery: PendingCommand,
+    ) -> Result<tonic::Response<proto::ControlCommandResponse>, tonic::Status> {
+        let outbox = self.outbox.clone();
+        let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        let accept_result = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            // Keep the authoritative outbox commit ahead of the delivery
+            // record, but perform both synchronous backend operations in one
+            // blocking task so the accept path pays one scheduler handoff.
+            let outcome = submit_command(&outbox, &ingest_request)?;
+            let delivery_result = inbox.with_lock(|inbox| inbox.record(&delivery))??;
+            Ok::<_, CommandError>((outcome, delivery_result))
+        })
+        .await;
+        let (outcome, delivery_result) = match accept_result {
+            Ok(Ok(value)) => {
+                self.metrics
+                    .storage_healthy
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                value
+            }
+            Ok(Err(error)) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(error.into_status());
+            }
+            Err(_) => {
+                self.metrics
+                    .storage_healthy
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(CommandError::internal().into_status());
+            }
+        };
+
+        self.metrics
+            .submissions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if outcome.duplicate {
+            self.metrics
+                .duplicate_submissions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Recorded *after* the outbox commits, and never conditionally on
+        // whether the outbox call said "first acceptance" or "duplicate".
+        //
+        // Order matters: the outbox row is the authoritative durable
+        // acceptance and the audit record, so it commits first. If this
+        // second write then fails, the command is still durable and still
+        // reaches the trace; the operator gets an error and retries the same
+        // `command_id`, which the outbox recognises as a duplicate and which
+        // reaches this line again -- and `record` is idempotent, so the retry
+        // completes the delivery half without double-queueing it. Returning
+        // success here on a failed inbox write is the one thing that would be
+        // wrong: it is exactly the "recorded but never delivered" shape this
+        // whole work item exists to remove.
+        Ok(tonic::Response::new(proto::ControlCommandResponse {
+            duplicate: outcome.duplicate,
+            command_id,
+            // A reused command_id whose outbox row is complete can still
+            // create a fresh inbox delivery after retention. Describe that
+            // delivery as pending rather than claiming the old trace fanout
+            // covers it.
+            delivered: outcome.delivered && delivery_result == RecordResult::AlreadyRecorded,
+            awaiting_second_approval: false,
+        }))
+    }
 }
 
 /// One process-local fixed-window bucket map, shared by the operator
@@ -472,81 +663,24 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             .map_err(CommandError::into_status)?;
 
         let input = ControlCommandInput::from_request(request.into_inner());
+
+        // `force_stop` is the one action that requires two distinct
+        // operators before anything is recorded -- see `dual_approval` for
+        // the gate and `Ownership and Team Authorization.md`'s "Production
+        // forced stop or bulk control" row for the policy it implements.
+        // Every other action keeps the single-operator path below,
+        // unchanged.
+        if input.action == proto::ControlAction::ForceStop {
+            return self.submit_force_stop(input, operator).await;
+        }
+
         let AcceptedCommand {
             command_id,
             request: ingest_request,
             delivery,
         } = build_control_request(input, &operator).map_err(CommandError::into_status)?;
-
-        let outbox = self.outbox.clone();
-        let inbox = self.inbox.clone();
-        let storage_permit = self
-            .storage_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| CommandError::rate_limited().into_status())?;
-        let accept_result = tokio::task::spawn_blocking(move || {
-            let _storage_permit = storage_permit;
-            // Keep the authoritative outbox commit ahead of the delivery
-            // record, but perform both synchronous backend operations in one
-            // blocking task so the accept path pays one scheduler handoff.
-            let outcome = submit_command(&outbox, &ingest_request)?;
-            let delivery_result = inbox.with_lock(|inbox| inbox.record(&delivery))??;
-            Ok::<_, CommandError>((outcome, delivery_result))
-        })
-        .await;
-        let (outcome, delivery_result) = match accept_result {
-            Ok(Ok(value)) => {
-                self.metrics
-                    .storage_healthy
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                value
-            }
-            Ok(Err(error)) => {
-                self.metrics
-                    .storage_healthy
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                return Err(error.into_status());
-            }
-            Err(_) => {
-                self.metrics
-                    .storage_healthy
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                return Err(CommandError::internal().into_status());
-            }
-        };
-
-        self.metrics
-            .submissions
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if outcome.duplicate {
-            self.metrics
-                .duplicate_submissions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        // Recorded *after* the outbox commits, and never conditionally on
-        // whether the outbox call said "first acceptance" or "duplicate".
-        //
-        // Order matters: the outbox row is the authoritative durable
-        // acceptance and the audit record, so it commits first. If this
-        // second write then fails, the command is still durable and still
-        // reaches the trace; the operator gets an error and retries the same
-        // `command_id`, which the outbox recognises as a duplicate and which
-        // reaches this line again -- and `record` is idempotent, so the retry
-        // completes the delivery half without double-queueing it. Returning
-        // success here on a failed inbox write is the one thing that would be
-        // wrong: it is exactly the "recorded but never delivered" shape this
-        // whole work item exists to remove.
-        Ok(tonic::Response::new(proto::ControlCommandResponse {
-            duplicate: outcome.duplicate,
-            command_id,
-            // A reused command_id whose outbox row is complete can still
-            // create a fresh inbox delivery after retention. Describe that
-            // delivery as pending rather than claiming the old trace fanout
-            // covers it.
-            delivered: outcome.delivered && delivery_result == RecordResult::AlreadyRecorded,
-        }))
+        self.accept_and_record(command_id, ingest_request, delivery)
+            .await
     }
 
     /// Returns the commands pending for the **calling agent**.
@@ -1122,6 +1256,7 @@ fn action_to_proto(action: &str) -> proto::ControlAction {
         "inject" => proto::ControlAction::Inject,
         "set_budget" => proto::ControlAction::SetBudget,
         "resolve_hold" => proto::ControlAction::ResolveHold,
+        "force_stop" => proto::ControlAction::ForceStop,
         _ => proto::ControlAction::Unspecified,
     }
 }
@@ -3033,5 +3168,285 @@ mod tests {
             .find(|r| !r.accepted)
             .expect("the third target must have been rejected");
         assert_eq!(denied.error_code.as_deref(), Some("RATE_LIMITED"));
+    }
+
+    // --- force_stop dual approval ---------------------------------------
+
+    /// Two distinct, separately-scoped operator credentials plus one agent
+    /// workload credential ("agent-a"), the shape `apps/agent-supervisor`
+    /// would register its own credential under in a real deployment (a
+    /// distinct agent_id, e.g. `agent-a.supervisor` -- `poll_commands` here
+    /// does not care which agent_id it is, only that the credential is
+    /// distinct, which `service_with_two_agents`'s existing pattern already
+    /// proves the gateway supports).
+    fn service_with_two_operators_and_one_agent()
+    -> ControlGatewayService<StaticOperatorTokenResolver> {
+        let resolver = StaticOperatorTokenResolver::new()
+            .with_token(
+                "op-token-alice",
+                OperatorCaller::scoped("operator:alice", ["acme/prod"]).unwrap(),
+            )
+            .with_token(
+                "op-token-bob",
+                OperatorCaller::scoped("operator:bob", ["acme/prod"]).unwrap(),
+            );
+        let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> =
+            Box::new(InMemoryOutbox::new(64).unwrap());
+        let service = ControlGatewayService::new(
+            OperatorTokenAuthenticator::new(resolver),
+            Arc::new(ControlOutboxBackend::new(outbox)),
+        );
+        let agents = crate::agent_auth::parse_agent_token_table(&format!(
+            "agent-a-token-abcdefgh|{}|agent-a|acme/prod",
+            hex32(0xaa)
+        ))
+        .expect("agent table must parse");
+        service.with_agent_resolver(crate::agent_auth::BoxedAgentWorkloadResolver::new(agents))
+    }
+
+    fn authed_request_as(
+        bearer: &str,
+        body: proto::ControlCommandRequest,
+    ) -> tonic::Request<proto::ControlCommandRequest> {
+        let mut request = tonic::Request::new(body);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        request
+    }
+
+    fn force_stop_request(command_id: &str) -> proto::ControlCommandRequest {
+        proto::ControlCommandRequest {
+            command_id: Some(command_id.to_owned()),
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_id: "agent-a".to_owned(),
+            run_id: "run-1".to_owned(),
+            parent_run_id: None,
+            trace_id: "trace-1".to_owned(),
+            action: proto::ControlAction::ForceStop as i32,
+            reason_code: Some("incident.42".to_owned()),
+            parameters: Some(ProstStruct::default()),
+        }
+    }
+
+    /// The headline property: one operator's approval alone never enqueues a
+    /// `force_stop`, and it takes effect the moment -- and only the moment --
+    /// a second, distinct operator approves the identical command.
+    #[tokio::test]
+    async fn force_stop_requires_two_distinct_operator_approvals() {
+        let service = service_with_two_operators_and_one_agent();
+        let command_id = fresh_command_id(0x9000);
+        let request = force_stop_request(&command_id);
+
+        // First approval: recorded nowhere. The target's poll must see
+        // nothing, and the response must say so rather than `delivered`.
+        let first = service
+            .submit_command(authed_request_as("op-token-alice", request.clone()))
+            .await
+            .expect("a well-formed first approval must be accepted")
+            .into_inner();
+        assert!(first.awaiting_second_approval);
+        assert!(!first.delivered);
+        assert!(!first.duplicate);
+        assert_eq!(first.command_id, command_id);
+        let after_first = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            after_first.commands.is_empty(),
+            "a single operator's approval must never be observable by the target"
+        );
+
+        // The same operator submitting again is not progress.
+        let repeat = service
+            .submit_command(authed_request_as("op-token-alice", request.clone()))
+            .await
+            .expect("a repeated identical submission is not an error")
+            .into_inner();
+        assert!(repeat.awaiting_second_approval);
+        assert!(!repeat.delivered);
+
+        // A second, distinct operator approves the identical command: now it
+        // is recorded and the target agent can retrieve it.
+        let second = service
+            .submit_command(authed_request_as("op-token-bob", request))
+            .await
+            .expect("the second, distinct approval must be accepted")
+            .into_inner();
+        assert!(!second.awaiting_second_approval);
+        assert!(!second.duplicate);
+        assert_eq!(second.command_id, command_id);
+
+        let delivered = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered.commands.len(), 1);
+        assert_eq!(delivered.commands[0].command_id, command_id);
+        assert_eq!(
+            delivered.commands[0].action,
+            proto::ControlAction::ForceStop as i32
+        );
+    }
+
+    /// A second submission under the same `command_id` that describes a
+    /// *different* command is refused, not treated as an approval -- the same
+    /// idempotency-conflict shape every other action already enforces,
+    /// applied before the command is ever recorded.
+    #[tokio::test]
+    async fn force_stop_second_approval_with_different_fields_is_refused() {
+        let service = service_with_two_operators_and_one_agent();
+        let command_id = fresh_command_id(0x9001);
+        let first = force_stop_request(&command_id);
+        service
+            .submit_command(authed_request_as("op-token-alice", first))
+            .await
+            .expect("first approval must be accepted");
+
+        let mut different = force_stop_request(&command_id);
+        different.reason_code = Some("a-completely-different-reason".to_owned());
+        let status = service
+            .submit_command(authed_request_as("op-token-bob", different))
+            .await
+            .expect_err("mismatched fields under a reused command_id must be refused");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        // The original pending approval survives a rejected mismatch, so the
+        // real second approver can still complete it.
+        let matching = force_stop_request(&command_id);
+        let second = service
+            .submit_command(authed_request_as("op-token-bob", matching))
+            .await
+            .expect("the legitimate second approval must still succeed")
+            .into_inner();
+        assert!(!second.awaiting_second_approval);
+    }
+
+    /// Once a `force_stop` has actually been recorded, a later idempotent
+    /// resubmission (the approving operator retrying after a lost response,
+    /// for example -- the realistic retry case, since bob's own client is
+    /// what resubmits its own unacknowledged call) is treated as an ordinary
+    /// duplicate, not sent back through the approval gate a second time.
+    #[tokio::test]
+    async fn an_already_recorded_force_stop_is_idempotent_not_re_gated() {
+        let service = service_with_two_operators_and_one_agent();
+        let command_id = fresh_command_id(0x9002);
+        let request = force_stop_request(&command_id);
+        service
+            .submit_command(authed_request_as("op-token-alice", request.clone()))
+            .await
+            .unwrap();
+        service
+            .submit_command(authed_request_as("op-token-bob", request.clone()))
+            .await
+            .expect("second approval records the command");
+
+        // Bob's own retry of the exact call that recorded it must not reset
+        // the gate and must not require finding a second approver again.
+        let retry = service
+            .submit_command(authed_request_as("op-token-bob", request))
+            .await
+            .expect("an idempotent retry of an already-recorded force_stop must succeed")
+            .into_inner();
+        assert!(
+            !retry.awaiting_second_approval,
+            "an already-recorded command must never re-enter the approval gate"
+        );
+        assert!(retry.duplicate);
+    }
+
+    /// The control property this whole gate exists for: every other action
+    /// keeps its single-operator path completely unchanged. One operator, one
+    /// submission, immediately recorded and immediately visible to the
+    /// target -- contrasted directly against `force_stop` above.
+    #[tokio::test]
+    async fn only_force_stop_requires_dual_approval() {
+        let service = service_with_two_operators_and_one_agent();
+        for action in [
+            proto::ControlAction::Stop,
+            proto::ControlAction::Pause,
+            proto::ControlAction::Resume,
+            proto::ControlAction::Inject,
+            proto::ControlAction::SetBudget,
+        ] {
+            let mut request = force_stop_request(&fresh_command_id(0xA000 + action as u64));
+            request.action = action as i32;
+            if action == proto::ControlAction::Inject {
+                let mut fields = std::collections::BTreeMap::new();
+                fields.insert(
+                    "content".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue("hi".to_owned())),
+                    },
+                );
+                fields.insert(
+                    "content_classification".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue("untrusted".to_owned())),
+                    },
+                );
+                request.parameters = Some(ProstStruct {
+                    fields: fields.into_iter().collect(),
+                });
+            }
+            if action == proto::ControlAction::SetBudget {
+                let mut fields = std::collections::BTreeMap::new();
+                fields.insert(
+                    "budget_kind".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue("tokens".to_owned())),
+                    },
+                );
+                fields.insert(
+                    "limit".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(1000.0)),
+                    },
+                );
+                request.parameters = Some(ProstStruct {
+                    fields: fields.into_iter().collect(),
+                });
+            }
+            let response = service
+                .submit_command(authed_request_as("op-token-alice", request))
+                .await
+                .unwrap_or_else(|status| {
+                    panic!("a single operator must be able to submit {action:?}: {status:?}")
+                })
+                .into_inner();
+            assert!(
+                !response.awaiting_second_approval,
+                "{action:?} must not require a second approval"
+            );
+        }
+        let delivered = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            delivered.commands.len(),
+            5,
+            "every non-force_stop action must be immediately visible after one operator's submission"
+        );
+    }
+
+    /// An operator without scope over the target workspace/namespace cannot
+    /// even register a first approval -- the scope check runs before the
+    /// approval gate, not after.
+    #[tokio::test]
+    async fn force_stop_rejects_a_scope_the_operator_does_not_hold() {
+        let service = service_with_two_operators_and_one_agent();
+        let mut request = force_stop_request(&fresh_command_id(0x9003));
+        request.workspace_id = "other-workspace".to_owned();
+        let status = service
+            .submit_command(authed_request_as("op-token-alice", request))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 }
