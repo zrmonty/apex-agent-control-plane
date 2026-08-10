@@ -105,8 +105,7 @@ class ReferenceReasonActLoop:
     3. ``inject`` -- surfaced into the trace as untrusted content. Never
        halts, never parsed. Applied before the halting checks so an
        operator's content is recorded even on a turn that will not act on
-       it, rather than being retrieved (and therefore acknowledged at the
-       gateway) and then dropped.
+       it, then acknowledged after the runtime has processed it.
     4. ``pause``/``resume`` -- if the result is "paused", the turn ends here
        without executing the tool.
     5. The budget check -- if accumulated usage has passed the ceiling, the
@@ -212,14 +211,12 @@ class ReferenceReasonActLoop:
     def _poll(self, emit: Callable[[str, dict[str, Any]], None]) -> tuple[Any, ...]:
         """Polls the control channel and returns the commands it delivered.
 
-        Retrieval *is* the acknowledgement: the gateway durably records the
-        delivery attempt before it returns a command, so a command this call
-        observes is marked delivered on the gateway side. Delivery is
-        at-least-once, so the same command may be seen again after the
-        gateway's redelivery window -- which is safe because enactment here is
-        idempotent per ``command_id`` (see :meth:`_first_sight`), and because
-        for ``stop`` it is trivially so: a run that has already ended cannot
-        end twice.
+        Retrieval starts an at-least-once delivery lease. If the transport
+        exposes ``acknowledge(command)``, the runtime acknowledges each
+        recognised command after processing it. If that acknowledgement is
+        lost, the gateway's redelivery fallback remains safe because enactment
+        is idempotent per ``command_id`` (see :meth:`_first_sight`), and a
+        ``stop`` cannot end an already-ended run twice.
 
         **A poll failure does not stop the run**, and that is a decision worth
         stating rather than leaving implicit. The alternative -- halt whenever
@@ -291,6 +288,7 @@ class ReferenceReasonActLoop:
         pause_intent: Any | None = None
         budgets: list[Any] = []
         injects: list[Any] = []
+        acknowledged: list[Any] = []
         for command in self._poll(emit):
             action = getattr(command, "action", None)
             if action == "stop":
@@ -299,6 +297,7 @@ class ReferenceReasonActLoop:
                 # there is no state to corrupt by enacting it twice.
                 if stop is None:
                     stop = command
+                acknowledged.append(command)
                 continue
             command_id = str(getattr(command, "command_id", ""))
             if not command_id or not self._first_sight(command_id):
@@ -306,13 +305,18 @@ class ReferenceReasonActLoop:
                 # what makes at-least-once delivery safe here -- in
                 # particular, a `resume` redelivered after a *later* `pause`
                 # must not un-pause the agent.
+                if action in ("pause", "resume", "set_budget", "inject"):
+                    acknowledged.append(command)
                 continue
             if action in ("pause", "resume"):
                 pause_intent = command
+                acknowledged.append(command)
             elif action == "set_budget":
                 budgets.append(command)
+                acknowledged.append(command)
             elif action == "inject":
                 injects.append(command)
+                acknowledged.append(command)
             # Any other action -- including one this SDK decodes as
             # "unspecified" because the gateway is newer than the client -- is
             # inert. A runtime only enacts what it recognises, which is also
@@ -326,6 +330,7 @@ class ReferenceReasonActLoop:
                     ControlAction.STOP, reason_code=self._reason_code(stop)
                 ).to_event_data(),
             )
+            self._acknowledge(acknowledged, emit)
             return (
                 {
                     "status": "stopped",
@@ -358,6 +363,7 @@ class ReferenceReasonActLoop:
             # transition. That is the documented answer to "does a paused
             # agent re-announce itself forever": no, but it does keep saying
             # honestly that it did nothing.
+            self._acknowledge(acknowledged, emit)
             return (
                 {"status": "paused", "control_command_id": self._paused_by, **extra},
                 {},
@@ -367,10 +373,46 @@ class ReferenceReasonActLoop:
         if exceeded is not None:
             # The budget is why this turn ended, so it owns the terminal
             # event's `control_command_id` even on a turn that also resumed.
+            self._acknowledge(acknowledged, emit)
             return ({"status": "budget_exceeded", **extra, "control_command_id": exceeded}, {}, None)
         if resumed_by is not None:
             extra["control_command_id"] = resumed_by
+        self._acknowledge(acknowledged, emit)
         return (None, extra, resumed_by)
+
+    def _acknowledge(
+        self,
+        commands: Sequence[Any],
+        emit: Callable[[str, dict[str, Any]], None],
+    ) -> None:
+        """Settles processed gateway deliveries without making ACK fatal."""
+        acknowledge = getattr(self._control, "acknowledge", None)
+        if not callable(acknowledge):
+            return
+        for command in commands:
+            try:
+                accepted = acknowledge(command)
+            except Exception:  # noqa: BLE001 - delivery remains safe to retry
+                emit(
+                    "error",
+                    {
+                        "code": "CONTROL_ACK_UNAVAILABLE",
+                        "summary": "A processed control command could not be acknowledged.",
+                        "cause": "The runtime will rely on the gateway's bounded redelivery fallback.",
+                        "retryable": True,
+                    },
+                )
+                continue
+            if not accepted:
+                emit(
+                    "error",
+                    {
+                        "code": "CONTROL_ACK_REJECTED",
+                        "summary": "The control gateway did not accept the command acknowledgement.",
+                        "cause": "The command was processed locally but may be redelivered by the gateway.",
+                        "retryable": True,
+                    },
+                )
 
     def _apply_pause_intent(
         self, command: Any | None, emit: Callable[[str, dict[str, Any]], None]

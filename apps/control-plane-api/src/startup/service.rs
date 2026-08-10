@@ -13,21 +13,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use apex_control_plane_api::{
     BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver, ControlGatewayService,
     ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, GatewayRuntimeMetrics,
-    GatewayShutdown,
-    KeycloakConfig,
-    KeycloakOperatorCredentialResolver, OperatorTokenAuthenticator, SharedEphemeralStore,
-    StaticAgentWorkloadResolver, bounded_control_gateway_server, parse_agent_token_table,
-    parse_operator_token_table,
+    GatewayShutdown, KeycloakConfig, KeycloakOperatorCredentialResolver,
+    OperatorTokenAuthenticator, SharedEphemeralStore, StaticAgentWorkloadResolver,
+    bounded_control_gateway_server, parse_agent_token_table, parse_operator_token_table,
 };
 #[cfg(feature = "postgres")]
 use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
-    AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source,
-    command_retention, control_postgres_url, control_valkey_env, keycloak_env,
-    metrics_bind_addr, operator_token_source, path, postgres_pool_size, required,
-    resolve_bind_addr,
+    AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source, command_retention,
+    control_postgres_url, control_valkey_env, keycloak_env, metrics_bind_addr,
+    operator_token_source, path, postgres_pool_size, required, resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -276,8 +273,11 @@ fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
             let mut inboxes = Vec::with_capacity(pool_size);
             for _ in 0..pool_size {
                 let inbox = RecoveringPostgresCommandInbox::connect(&url, OUTBOX_CAPACITY)
-                    .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
-                inboxes.push(Box::new(inbox) as Box<dyn apex_control_plane_api::CommandInbox + Send>);
+                    .map_err(|error| {
+                        format!("failed to open control inbox: {}", error.code.as_str())
+                    })?;
+                inboxes
+                    .push(Box::new(inbox) as Box<dyn apex_control_plane_api::CommandInbox + Send>);
             }
             println!("apex-control-plane-api inbox backend: postgres");
             return ControlInboxBackend::new_pool(inboxes)
@@ -326,9 +326,9 @@ fn now_unix_millis() -> u64 {
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
-        let Ok(mut terminate) = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) else {
+        let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
             let _ = tokio::signal::ctrl_c().await;
             return;
         };
@@ -477,6 +477,7 @@ fn spawn_inbox_reconciliation_worker(
 
 fn spawn_status_logger(
     outbox: Arc<ControlOutboxBackend>,
+    inbox: Arc<ControlInboxBackend>,
     metrics: Arc<GatewayRuntimeMetrics>,
     ephemeral: Option<SharedEphemeralStore>,
     shutdown: GatewayShutdown,
@@ -494,11 +495,47 @@ fn spawn_status_logger(
                     .map(|guard| guard.accelerator_sidelined())
                     .unwrap_or(true)
             });
-            if let Ok(count) = outbox.quarantined_count() {
-                metrics
-                    .quarantined_current
-                    .store(count, std::sync::atomic::Ordering::Relaxed);
-            }
+            let outbox_for_status = Arc::clone(&outbox);
+            let inbox_for_status = Arc::clone(&inbox);
+            let metrics_for_status = Arc::clone(&metrics);
+            let _ = tokio::task::spawn_blocking(move || {
+                let counts = (
+                    outbox_for_status.pending_count(),
+                    outbox_for_status.quarantined_count(),
+                    inbox_for_status.pending_count(),
+                    inbox_for_status.undelivered_count(),
+                );
+                match counts {
+                    (
+                        Ok(outbox_pending),
+                        Ok(quarantined),
+                        Ok(inbox_pending),
+                        Ok(inbox_undelivered),
+                    ) => {
+                        metrics_for_status
+                            .outbox_pending
+                            .store(outbox_pending, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_status
+                            .quarantined_current
+                            .store(quarantined, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_status
+                            .inbox_pending
+                            .store(inbox_pending, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_status
+                            .inbox_undelivered
+                            .store(inbox_undelivered, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    _ => {
+                        metrics_for_status
+                            .outbox_read_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_status
+                            .storage_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+            .await;
             eprintln!("{}", metrics.status_line(accelerator_sidelined));
         }
     })
@@ -636,7 +673,7 @@ async fn serve_metrics_connection(
         (
             "200 OK",
             format!(
-                "# TYPE apex_control_gateway_submissions_total counter\napex_control_gateway_submissions_total {}\n# TYPE apex_control_gateway_duplicate_submissions_total counter\napex_control_gateway_duplicate_submissions_total {}\n# TYPE apex_control_gateway_polls_total counter\napex_control_gateway_polls_total {}\n# TYPE apex_control_gateway_fanout_successes_total counter\napex_control_gateway_fanout_successes_total {}\n# TYPE apex_control_gateway_fanout_failures_total counter\napex_control_gateway_fanout_failures_total {}\n# TYPE apex_control_gateway_quarantined_rows_total counter\napex_control_gateway_quarantined_rows_total {}\n# TYPE apex_control_gateway_quarantined_rows gauge\napex_control_gateway_quarantined_rows {}\n# TYPE apex_control_gateway_storage_healthy gauge\napex_control_gateway_storage_healthy {}\n# TYPE apex_control_gateway_fanout_healthy gauge\napex_control_gateway_fanout_healthy {}\n# TYPE apex_control_gateway_accelerator_configured gauge\napex_control_gateway_accelerator_configured {}\n# TYPE apex_control_gateway_accelerator_sidelined gauge\napex_control_gateway_accelerator_sidelined {}\n",
+                "# TYPE apex_control_gateway_submissions_total counter\napex_control_gateway_submissions_total {}\n# TYPE apex_control_gateway_duplicate_submissions_total counter\napex_control_gateway_duplicate_submissions_total {}\n# TYPE apex_control_gateway_polls_total counter\napex_control_gateway_polls_total {}\n# TYPE apex_control_gateway_fanout_successes_total counter\napex_control_gateway_fanout_successes_total {}\n# TYPE apex_control_gateway_fanout_failures_total counter\napex_control_gateway_fanout_failures_total {}\n# TYPE apex_control_gateway_quarantined_rows_total counter\napex_control_gateway_quarantined_rows_total {}\n# TYPE apex_control_gateway_quarantined_rows gauge\napex_control_gateway_quarantined_rows {}\n# TYPE apex_control_gateway_outbox_pending gauge\napex_control_gateway_outbox_pending {}\n# TYPE apex_control_gateway_inbox_pending gauge\napex_control_gateway_inbox_pending {}\n# TYPE apex_control_gateway_inbox_undelivered gauge\napex_control_gateway_inbox_undelivered {}\n# TYPE apex_control_gateway_storage_healthy gauge\napex_control_gateway_storage_healthy {}\n# TYPE apex_control_gateway_fanout_healthy gauge\napex_control_gateway_fanout_healthy {}\n# TYPE apex_control_gateway_accelerator_configured gauge\napex_control_gateway_accelerator_configured {}\n# TYPE apex_control_gateway_accelerator_sidelined gauge\napex_control_gateway_accelerator_sidelined {}\n",
                 snapshot.submissions,
                 snapshot.duplicate_submissions,
                 snapshot.polls,
@@ -644,6 +681,9 @@ async fn serve_metrics_connection(
                 snapshot.fanout_failures,
                 snapshot.quarantined_rows,
                 snapshot.quarantined_current,
+                snapshot.outbox_pending,
+                snapshot.inbox_pending,
+                snapshot.inbox_undelivered,
                 u8::from(snapshot.storage_healthy),
                 u8::from(snapshot.fanout_healthy),
                 u8::from(snapshot.accelerator_configured),
@@ -762,8 +802,8 @@ fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
             let pool_size = postgres_pool_size()?;
             let mut outboxes = Vec::with_capacity(pool_size);
             for _ in 0..pool_size {
-                let outbox = RecoveringPostgresOutbox::connect(&url, OUTBOX_CAPACITY)
-                    .map_err(|error| {
+                let outbox =
+                    RecoveringPostgresOutbox::connect(&url, OUTBOX_CAPACITY).map_err(|error| {
                         format!("failed to open control outbox: {}", error.code.as_str())
                     })?;
                 outboxes.push(Box::new(outbox) as Box<dyn apex_event_ingest::EventOutbox + Send>);
@@ -822,10 +862,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
     let command_retention = command_retention()?;
-    let retention_millis = command_retention
-        .as_millis()
-        .try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "command retention is too large"))?;
+    let retention_millis = command_retention.as_millis().try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "command retention is too large",
+        )
+    })?;
     let resolver = build_operator_resolver(&trusted_base)?;
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
@@ -899,30 +941,25 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         // -- so a JetStream outage delays `delivered` and defers the trace
         // write without affecting whether a command is accepted (ADR-0006).
         let fanout_worker = fanout.map(|fanout| {
-            fanout.spawn(
-                Arc::clone(&outbox),
-                Arc::clone(&metrics),
-                shutdown.clone(),
-            )
+            fanout.spawn(Arc::clone(&outbox), Arc::clone(&metrics), shutdown.clone())
         });
-        let inbox_retention_worker =
-            spawn_inbox_retention_worker(
-                Arc::clone(&outbox),
-                Arc::clone(&inbox),
-                retention_millis,
-                Arc::clone(&metrics),
-                shutdown.clone(),
-            );
-        let inbox_reconciliation_worker =
-            spawn_inbox_reconciliation_worker(
-                Arc::clone(&outbox),
-                Arc::clone(&inbox),
-                retention_millis,
-                Arc::clone(&metrics),
-                shutdown.clone(),
-            );
+        let inbox_retention_worker = spawn_inbox_retention_worker(
+            Arc::clone(&outbox),
+            Arc::clone(&inbox),
+            retention_millis,
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
+        let inbox_reconciliation_worker = spawn_inbox_reconciliation_worker(
+            Arc::clone(&outbox),
+            Arc::clone(&inbox),
+            retention_millis,
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
         let status_logger = spawn_status_logger(
             Arc::clone(&outbox),
+            Arc::clone(&inbox),
             Arc::clone(&metrics),
             ephemeral.clone(),
             shutdown.clone(),
@@ -933,9 +970,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             ephemeral.clone(),
             shutdown.clone(),
         );
-        let metrics_server = metrics_addr.map(|addr| {
-            spawn_metrics_server(addr, Arc::clone(&metrics), shutdown.clone())
-        });
+        let metrics_server = metrics_addr
+            .map(|addr| spawn_metrics_server(addr, Arc::clone(&metrics), shutdown.clone()));
         println!(
             "apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)"
         );

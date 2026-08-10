@@ -251,6 +251,10 @@ impl EventOutbox for PostgresOutbox {
         PostgresReplayOps::pending_batch(self, limit)
     }
 
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        PostgresReplayOps::pending_count(self)
+    }
+
     fn recent_completed_batch(
         &mut self,
         since_millis: u64,

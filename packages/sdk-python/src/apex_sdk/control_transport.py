@@ -64,6 +64,7 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 #: Fully-qualified method name. Must match ``contracts/proto/apex/v1/control.proto``.
 POLL_COMMANDS_METHOD = "/apex.v1.ControlGateway/PollCommands"
+ACK_COMMAND_METHOD = "/apex.v1.ControlGateway/AckCommand"
 
 #: Wire values of ``apex.v1.ControlAction``.
 _ACTION_NAMES = {
@@ -177,6 +178,8 @@ class ControlPoller(Protocol):
     """
 
     def poll(self, *, max_commands: int = 0) -> PollResult: ...
+
+    def acknowledge(self, command: PendingControlCommand) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -745,7 +748,9 @@ class GrpcControlTransport:
         self._channel = factory(endpoint, channel_credentials, options=tuple(options))
         from ._generated.apex.v1 import control_pb2_grpc
 
-        self._invoke = control_pb2_grpc.ControlGatewayStub(self._channel).PollCommands
+        stub = control_pb2_grpc.ControlGatewayStub(self._channel)
+        self._invoke = stub.PollCommands
+        self._acknowledge = stub.AckCommand
 
     @property
     def endpoint(self) -> str:
@@ -778,6 +783,40 @@ class GrpcControlTransport:
         except Exception as exc:  # noqa: BLE001 - any transport fault must surface typed
             raise ControlPollError(cause="The control transport raised an untyped error.") from exc
         return decode_poll_response(raw)
+
+    def acknowledge(self, command: PendingControlCommand) -> bool:
+        """Acknowledge one successfully enacted command.
+
+        The gateway keeps its redelivery fallback when this call is lost or
+        unavailable, so callers must still enact commands idempotently.
+        """
+        if self._closed:
+            raise ControlPollError(
+                "The control transport is closed.",
+                code="CONTROL_ACK_TRANSPORT_CLOSED",
+                retryable=False,
+                cause="acknowledge() was called after close().",
+            )
+        grpc = _grpc_module()
+        request = _generated_control_pb2().AckCommandRequest(
+            workspace_id=command.workspace_id,
+            namespace_id=command.namespace_id,
+            command_id=command.command_id,
+            delivery_attempt=command.delivery_attempt,
+        )
+        try:
+            response = self._acknowledge(
+                request,
+                timeout=self._timeout,
+                metadata=(("authorization", f"Bearer {self._credentials.token}"),),
+            )
+        except grpc.RpcError as exc:
+            raise self._classify(exc) from None
+        except ControlPollError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ControlPollError(cause="The control gateway acknowledgement failed.") from exc
+        return bool(response.acknowledged or response.already_acknowledged)
 
     def close(self) -> None:
         self._closed = True
@@ -917,6 +956,7 @@ class InMemoryControlPoller:
         self._commands = list(commands)
         self._agent_id = agent_id
         self.polls = 0
+        self.acknowledgements: list[str] = []
         self.closed = False
 
     def poll(self, *, max_commands: int = 0) -> PollResult:
@@ -928,6 +968,10 @@ class InMemoryControlPoller:
             agent_id=self._agent_id,
             min_poll_interval_seconds=1,
         )
+
+    def acknowledge(self, command: PendingControlCommand) -> bool:
+        self.acknowledgements.append(command.command_id)
+        return True
 
     def close(self) -> None:
         self.closed = True

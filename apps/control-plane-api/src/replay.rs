@@ -252,15 +252,15 @@ where
                     retry_groups.entry(delay).or_default().push(key);
                 }
                 for (delay, keys) in retry_groups {
-                    if backend.reschedule(&keys, delay).is_err() {
-                        if let Some(metrics) = &metrics {
-                            metrics
-                                .storage_healthy
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            metrics
-                                .outbox_write_failures
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    if backend.reschedule(&keys, delay).is_err()
+                        && let Some(metrics) = &metrics
+                    {
+                        metrics
+                            .storage_healthy
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        metrics
+                            .outbox_write_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 if !quarantine.is_empty() {

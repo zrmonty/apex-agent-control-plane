@@ -32,6 +32,7 @@ from apex_sdk.control_transport import (
     MAX_CREDENTIAL_BYTES,
     MAX_STRUCT_DEPTH,
     MAX_STRUCT_ENTRIES,
+    ACK_COMMAND_METHOD,
     POLL_COMMANDS_METHOD,
     AgentControlCredentials,
     ControlPollError,
@@ -729,6 +730,35 @@ class _RecordingHandler(grpc.GenericRpcHandler):
         )
 
 
+class _AckRecordingHandler(grpc.GenericRpcHandler):
+    """Serves the generated ``AckCommand`` method over the same TLS path."""
+
+    def __init__(self) -> None:
+        self.seen_metadata: list[tuple[str, str]] = []
+        self.seen_requests: list[bytes] = []
+
+    def service(self, handler_call_details):
+        if handler_call_details.method != ACK_COMMAND_METHOD:
+            return None
+
+        def handle(request: bytes, context):
+            self.seen_metadata = list(context.invocation_metadata())
+            self.seen_requests.append(request)
+            from apex_sdk._generated.apex.v1 import control_pb2
+
+            decoded = control_pb2.AckCommandRequest.FromString(request)
+            return control_pb2.AckCommandResponse(
+                command_id=decoded.command_id,
+                acknowledged=True,
+            ).SerializeToString()
+
+        return grpc.unary_unary_rpc_method_handler(
+            handle,
+            request_deserializer=lambda value: value,
+            response_serializer=lambda value: value,
+        )
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -775,6 +805,32 @@ def test_a_real_mtls_poll_returns_the_stop_and_sends_the_bearer_credential(pki):
     assert handler.seen_requests == [b"\x08\x04"]
     metadata = dict(handler.seen_metadata)
     assert metadata["authorization"] == "Bearer agent-a-token-abcdefgh"
+
+
+def test_a_real_mtls_ack_round_trips_the_generated_request_and_bearer(pki):
+    handler = _AckRecordingHandler()
+    server, port = _serve(pki, handler)
+    command = decode_poll_response(_poll_response([_pending_command()])).commands[0]
+    try:
+        with GrpcControlTransport(
+            f"127.0.0.1:{port}",
+            _credentials(pki),
+            server_hostname="localhost",
+            timeout_seconds=10,
+        ) as transport:
+            assert transport.acknowledge(command) is True
+    finally:
+        server.stop(0).wait()
+
+    from apex_sdk._generated.apex.v1 import control_pb2
+
+    assert len(handler.seen_requests) == 1
+    request = control_pb2.AckCommandRequest.FromString(handler.seen_requests[0])
+    assert request.command_id == command.command_id
+    assert request.workspace_id == command.workspace_id
+    assert request.namespace_id == command.namespace_id
+    assert request.delivery_attempt == command.delivery_attempt
+    assert dict(handler.seen_metadata)["authorization"] == "Bearer agent-a-token-abcdefgh"
 
 
 def test_a_client_with_no_certificate_cannot_complete_the_handshake(pki):

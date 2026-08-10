@@ -58,6 +58,8 @@ service ControlGateway {
   // the gateway's redelivery window, so enactment must be idempotent
   // (stopping an already-stopped loop is a no-op, not an error).
   rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
+  rpc AckCommand(AckCommandRequest) returns (AckCommandResponse);
+  rpc GetCommandStatus(GetCommandStatusRequest) returns (GetCommandStatusResponse);
 }
 
 message ControlCommandRequest {
@@ -123,6 +125,39 @@ message PollCommandsResponse {
   // this caller. A cooperative client that honours it will not be
   // rate-limited; the gateway enforces its own ceiling regardless.
   uint32 min_poll_interval_seconds = 3;
+}
+
+message AckCommandRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string command_id = 3;
+  uint32 delivery_attempt = 4;
+}
+
+message AckCommandResponse {
+  string command_id = 1;
+  bool acknowledged = 2;
+  bool already_acknowledged = 3;
+}
+
+message GetCommandStatusRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string command_id = 3;
+}
+
+message GetCommandStatusResponse {
+  string command_id = 1;
+  CommandDeliveryState state = 2;
+  uint32 delivery_attempt = 3;
+}
+
+enum CommandDeliveryState {
+  COMMAND_DELIVERY_STATE_UNSPECIFIED = 0;
+  COMMAND_DELIVERY_PENDING = 1;
+  COMMAND_DELIVERY_DELIVERED = 2;
+  COMMAND_DELIVERY_ACKNOWLEDGED = 3;
+  COMMAND_DELIVERY_EXHAUSTED = 4;
 }
 
 message PendingControlCommand {

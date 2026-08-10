@@ -42,6 +42,13 @@ pub trait EventOutbox: Send {
         Ok(events)
     }
 
+    /// Returns the number of non-quarantined rows awaiting fanout. Durable
+    /// backends override this with a count query; the default is for small
+    /// embedded stores.
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        Ok(self.pending().len() as u64)
+    }
+
     /// Returns recently completed events so a gateway can repair a delivery
     /// record that was lost after fanout completed. Backends that cannot
     /// reconstruct completed payloads may return an empty batch.
@@ -71,7 +78,11 @@ pub trait EventOutbox: Send {
 
     /// Removes a poison row from the replay work set while retaining its
     /// durable idempotency identity for operator remediation.
-    fn quarantine(&mut self, _keys: &[OutboxKey], _reason: &'static str) -> Result<(), GatewayError> {
+    fn quarantine(
+        &mut self,
+        _keys: &[OutboxKey],
+        _reason: &'static str,
+    ) -> Result<(), GatewayError> {
         Ok(())
     }
 
@@ -94,11 +105,7 @@ pub trait EventOutbox: Send {
 
     /// Removes completed idempotency state outside the configured retention
     /// window and compacts file journals where applicable.
-    fn maintain(
-        &mut self,
-        _now_millis: u64,
-        _retention_millis: u64,
-    ) -> Result<(), GatewayError> {
+    fn maintain(&mut self, _now_millis: u64, _retention_millis: u64) -> Result<(), GatewayError> {
         Ok(())
     }
 
@@ -120,6 +127,10 @@ impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
 
     fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError> {
         (**self).pending_batch(limit)
+    }
+
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        (**self).pending_count()
     }
 
     fn recent_completed_batch(
@@ -157,11 +168,7 @@ impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
         (**self).requeue_quarantined(keys)
     }
 
-    fn maintain(
-        &mut self,
-        now_millis: u64,
-        retention_millis: u64,
-    ) -> Result<(), GatewayError> {
+    fn maintain(&mut self, now_millis: u64, retention_millis: u64) -> Result<(), GatewayError> {
         (**self).maintain(now_millis, retention_millis)
     }
 

@@ -101,16 +101,14 @@ impl EventOutbox for InMemoryOutbox {
         Ok(self
             .pending
             .iter()
-            .filter(|(key, _)| {
-                self.next_attempt_at_millis
-                    .get(*key)
-                    .copied()
-                    .unwrap_or(0)
-                    <= now
-            })
+            .filter(|(key, _)| self.next_attempt_at_millis.get(*key).copied().unwrap_or(0) <= now)
             .take(limit)
             .map(|(_, event)| event.clone())
             .collect())
+    }
+
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        Ok(self.pending.len() as u64)
     }
 
     fn recent_completed_batch(
@@ -134,7 +132,11 @@ impl EventOutbox for InMemoryOutbox {
         Ok(self.pending.values().take(limit).cloned().collect())
     }
 
-    fn reschedule(&mut self, keys: &[OutboxKey], after: std::time::Duration) -> Result<(), GatewayError> {
+    fn reschedule(
+        &mut self,
+        keys: &[OutboxKey],
+        after: std::time::Duration,
+    ) -> Result<(), GatewayError> {
         // The replay worker owns the in-process monotonic deadline. This
         // backend is test/embedded durability and has no restart contract for
         // retry timing; keeping scheduling here would bind paused-clock tests
@@ -143,7 +145,11 @@ impl EventOutbox for InMemoryOutbox {
         Ok(())
     }
 
-    fn quarantine(&mut self, keys: &[OutboxKey], _reason: &'static str) -> Result<(), GatewayError> {
+    fn quarantine(
+        &mut self,
+        keys: &[OutboxKey],
+        _reason: &'static str,
+    ) -> Result<(), GatewayError> {
         for key in keys {
             self.next_attempt_at_millis.remove(key);
             if let Some(event) = self.pending.remove(key) {

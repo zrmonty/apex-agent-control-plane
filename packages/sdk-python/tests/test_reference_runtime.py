@@ -209,6 +209,7 @@ def test_a_pending_stop_halts_the_run_before_the_tool_executes():
         "control_command_id": "018f0000-0000-7000-8000-000000000001",
     }
     assert poller.polls == 1
+    assert poller.acknowledgements == ["018f0000-0000-7000-8000-000000000001"]
 
 
 def test_an_empty_control_channel_leaves_the_run_untouched():

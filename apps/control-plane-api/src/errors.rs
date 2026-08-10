@@ -107,6 +107,13 @@ impl CommandError {
         )
     }
 
+    pub fn invalid_command() -> Self {
+        Self::new(
+            CommandErrorCode::InvalidCommand,
+            "The command was malformed: check the command identity and delivery fields.",
+        )
+    }
+
     pub fn internal() -> Self {
         Self::new(
             CommandErrorCode::Internal,

@@ -15,7 +15,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use apex_event_ingest::{EnqueueResult, EventOutbox, GatewayError, GatewayErrorCode, IngestRequest};
+use apex_event_ingest::{
+    EnqueueResult, EventOutbox, GatewayError, GatewayErrorCode, IngestRequest,
+};
 
 use crate::errors::CommandError;
 
@@ -109,17 +111,17 @@ impl ControlOutboxBackend {
         }
     }
 
-    pub fn maintain(
-        &self,
-        now_millis: u64,
-        retention_millis: u64,
-    ) -> Result<(), CommandError> {
+    pub fn maintain(&self, now_millis: u64, retention_millis: u64) -> Result<(), CommandError> {
         self.with_lock(|outbox| outbox.maintain(now_millis, retention_millis))??;
         Ok(())
     }
 
     pub fn pending_batch(&self, limit: usize) -> Result<Vec<IngestRequest>, CommandError> {
         Ok(self.with_lock(|outbox| outbox.pending_batch(limit))??)
+    }
+
+    pub fn pending_count(&self) -> Result<u64, CommandError> {
+        Ok(self.with_lock(|outbox| outbox.pending_count())??)
     }
 
     pub fn recent_completed_batch(

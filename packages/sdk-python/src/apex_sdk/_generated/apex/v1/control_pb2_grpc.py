@@ -50,6 +50,16 @@ class ControlGatewayStub(object):
                 request_serializer=apex_dot_v1_dot_control__pb2.PollCommandsRequest.SerializeToString,
                 response_deserializer=apex_dot_v1_dot_control__pb2.PollCommandsResponse.FromString,
                 )
+        self.AckCommand = channel.unary_unary(
+                '/apex.v1.ControlGateway/AckCommand',
+                request_serializer=apex_dot_v1_dot_control__pb2.AckCommandRequest.SerializeToString,
+                response_deserializer=apex_dot_v1_dot_control__pb2.AckCommandResponse.FromString,
+                )
+        self.GetCommandStatus = channel.unary_unary(
+                '/apex.v1.ControlGateway/GetCommandStatus',
+                request_serializer=apex_dot_v1_dot_control__pb2.GetCommandStatusRequest.SerializeToString,
+                response_deserializer=apex_dot_v1_dot_control__pb2.GetCommandStatusResponse.FromString,
+                )
 
 
 class ControlGatewayServicer(object):
@@ -117,6 +127,18 @@ class ControlGatewayServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AckCommand(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCommandStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlGatewayServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -129,6 +151,16 @@ def add_ControlGatewayServicer_to_server(servicer, server):
                     servicer.PollCommands,
                     request_deserializer=apex_dot_v1_dot_control__pb2.PollCommandsRequest.FromString,
                     response_serializer=apex_dot_v1_dot_control__pb2.PollCommandsResponse.SerializeToString,
+            ),
+            'AckCommand': grpc.unary_unary_rpc_method_handler(
+                    servicer.AckCommand,
+                    request_deserializer=apex_dot_v1_dot_control__pb2.AckCommandRequest.FromString,
+                    response_serializer=apex_dot_v1_dot_control__pb2.AckCommandResponse.SerializeToString,
+            ),
+            'GetCommandStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCommandStatus,
+                    request_deserializer=apex_dot_v1_dot_control__pb2.GetCommandStatusRequest.FromString,
+                    response_serializer=apex_dot_v1_dot_control__pb2.GetCommandStatusResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -197,5 +229,39 @@ class ControlGateway(object):
         return grpc.experimental.unary_unary(request, target, '/apex.v1.ControlGateway/PollCommands',
             apex_dot_v1_dot_control__pb2.PollCommandsRequest.SerializeToString,
             apex_dot_v1_dot_control__pb2.PollCommandsResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def AckCommand(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/apex.v1.ControlGateway/AckCommand',
+            apex_dot_v1_dot_control__pb2.AckCommandRequest.SerializeToString,
+            apex_dot_v1_dot_control__pb2.AckCommandResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def GetCommandStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/apex.v1.ControlGateway/GetCommandStatus',
+            apex_dot_v1_dot_control__pb2.GetCommandStatusRequest.SerializeToString,
+            apex_dot_v1_dot_control__pb2.GetCommandStatusResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

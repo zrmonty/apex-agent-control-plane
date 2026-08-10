@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use apex_event_ingest::{Caller, EphemeralStore, RateLimitKey};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 
 use crate::agent_auth::{
     AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver, StaticAgentWorkloadResolver,
@@ -20,8 +21,8 @@ use crate::auth::{OperatorCredentialResolver, OperatorTokenAuthenticator};
 use crate::envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
 use crate::errors::CommandError;
 use crate::inbox::{
-    ControlInboxBackend, DeliveryPolicy, InMemoryCommandInbox, PendingCommand, PollTarget,
-    RecordResult, ScopeAuthorizer,
+    AckResult, ControlInboxBackend, DeliveryPolicy, DeliveryStatus, InMemoryCommandInbox, InboxKey,
+    PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
 };
 use crate::outbox::{ControlOutboxBackend, submit_command};
 use crate::proto;
@@ -36,6 +37,8 @@ use crate::status::GatewayRuntimeMetrics;
 pub(crate) const DEFAULT_MAX_COMMANDS_PER_WINDOW: u32 = 50;
 pub(crate) const DEFAULT_ADMISSION_WINDOW: Duration = Duration::from_secs(1);
 const MAX_TRACKED_OPERATORS: usize = 4096;
+const MAX_STORAGE_OPERATIONS: usize = 64;
+const MAX_ACCELERATOR_OPERATIONS: usize = 128;
 
 /// Poll ceiling applied per authenticated *agent* identity, after auth
 /// succeeds and independently of the operator ceiling above.
@@ -118,7 +121,8 @@ struct CallerScopes<'caller>(&'caller Caller);
 
 impl ScopeAuthorizer for CallerScopes<'_> {
     fn allows(&self, workspace_id: &str, namespace_id: &str) -> bool {
-        self.0.allows_scope(&format!("{workspace_id}/{namespace_id}"))
+        self.0
+            .allows_scope(&format!("{workspace_id}/{namespace_id}"))
     }
 }
 
@@ -129,6 +133,7 @@ pub type SharedEphemeralStore = Arc<Mutex<Box<dyn EphemeralStore>>>;
 #[derive(Debug, Clone, Copy)]
 struct AdmissionBucket {
     window_started: Instant,
+    last_seen: Instant,
     count: u32,
 }
 
@@ -154,6 +159,8 @@ pub struct ControlGatewayService<R: OperatorCredentialResolver> {
     poll_limit: u32,
     delivery_policy: DeliveryPolicy,
     metrics: Arc<GatewayRuntimeMetrics>,
+    storage_slots: Arc<Semaphore>,
+    accelerator_slots: Arc<Semaphore>,
 }
 
 impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
@@ -197,6 +204,8 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             poll_limit: DEFAULT_MAX_POLLS_PER_WINDOW,
             delivery_policy: DeliveryPolicy::default(),
             metrics: Arc::new(GatewayRuntimeMetrics::default()),
+            storage_slots: Arc::new(Semaphore::new(MAX_STORAGE_OPERATIONS)),
+            accelerator_slots: Arc::new(Semaphore::new(MAX_ACCELERATOR_OPERATIONS)),
         }
     }
 
@@ -272,11 +281,17 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     /// `spawn_blocking`.
     async fn admit(&self, subject: &str) -> Result<(), CommandError> {
         if let Some(store) = &self.ephemeral {
+            let permit = self
+                .accelerator_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| CommandError::rate_limited())?;
             let store = Arc::clone(store);
             let key = control_admission_rate_limit_key(subject);
             let limit = self.limit;
             let window = self.window;
             let shared = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let Ok(mut guard) = store.lock() else {
                     return None;
                 };
@@ -315,11 +330,17 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     /// channel that has to keep working when things are already bad.
     async fn admit_poll(&self, subject: &str) -> Result<(), CommandError> {
         if let Some(store) = &self.ephemeral {
+            let permit = self
+                .accelerator_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| CommandError::rate_limited())?;
             let store = Arc::clone(store);
             let key = control_poll_rate_limit_key(subject);
             let limit = self.poll_limit;
             let window = self.window;
             let shared = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let Ok(mut guard) = store.lock() else {
                     return None;
                 };
@@ -371,16 +392,23 @@ fn admit_in(
         return Err(CommandError::internal());
     };
     let now = Instant::now();
+    let stale_after = window.saturating_mul(2);
+    buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) < stale_after);
     if !buckets.contains_key(subject) && buckets.len() >= max_tracked {
         return Err(CommandError::rate_limited());
     }
-    let bucket = buckets.entry(subject.to_owned()).or_insert(AdmissionBucket {
-        window_started: now,
-        count: 0,
-    });
+    let bucket = buckets
+        .entry(subject.to_owned())
+        .or_insert(AdmissionBucket {
+            window_started: now,
+            last_seen: now,
+            count: 0,
+        });
+    bucket.last_seen = now;
     if bucket.window_started.elapsed() >= window {
         *bucket = AdmissionBucket {
             window_started: now,
+            last_seen: now,
             count: 0,
         };
     }
@@ -429,7 +457,13 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
 
         let outbox = self.outbox.clone();
         let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
         let accept_result = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
             // Keep the authoritative outbox commit ahead of the delivery
             // record, but perform both synchronous backend operations in one
             // blocking task so the accept path pays one scheduler handoff.
@@ -547,13 +581,18 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
         let inbox = self.inbox.clone();
         let policy = self.delivery_policy;
         let now_millis = crate::envelope::now_unix_millis();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
         // `spawn_blocking` for the same reason the accept path uses it: the
         // inbox is behind a mutex, its durable backend performs synchronous
         // I/O, and neither may run on a tonic worker thread.
         let claim_result = tokio::task::spawn_blocking(move || {
-            inbox.with_lock(|inbox| {
-                inbox.claim(&target, &CallerScopes(&caller), policy, now_millis)
-            })
+            let _storage_permit = storage_permit;
+            inbox
+                .with_lock(|inbox| inbox.claim(&target, &CallerScopes(&caller), policy, now_millis))
         })
         .await;
         let claimed: Vec<PendingCommand> = match claim_result {
@@ -592,6 +631,116 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             agent_id,
             min_poll_interval_seconds: self.min_poll_interval_seconds(),
         }))
+    }
+
+    async fn ack_command(
+        &self,
+        request: tonic::Request<proto::AckCommandRequest>,
+    ) -> Result<tonic::Response<proto::AckCommandResponse>, tonic::Status> {
+        let peer = peer_identity_from_request(&request);
+        let caller = self
+            .agent_auth
+            .authenticate(request.metadata(), peer.as_ref())
+            .map_err(CommandError::into_status)?;
+        let Some(agent_id) = caller.bound_agent_id().map(str::to_owned) else {
+            return Err(CommandError::unauthenticated().into_status());
+        };
+        let input = request.into_inner();
+        if input.workspace_id.is_empty()
+            || input.namespace_id.is_empty()
+            || input.command_id.is_empty()
+            || input.delivery_attempt == 0
+        {
+            return Err(CommandError::invalid_command().into_status());
+        }
+        if !caller.allows_scope(&format!("{}/{}", input.workspace_id, input.namespace_id)) {
+            return Err(CommandError::scope_denied().into_status());
+        }
+        let target = PollTarget { agent_id, limit: 1 };
+        let key = InboxKey {
+            workspace_id: input.workspace_id,
+            namespace_id: input.namespace_id,
+            command_id: input.command_id.clone(),
+        };
+        let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        let now_millis = crate::envelope::now_unix_millis();
+        let result = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            inbox.acknowledge(&target, &key, input.delivery_attempt, now_millis)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?;
+        let (acknowledged, already_acknowledged) = match result {
+            AckResult::Acknowledged => (true, false),
+            AckResult::AlreadyAcknowledged => (false, true),
+            AckResult::NotFound => (false, false),
+        };
+        Ok(tonic::Response::new(proto::AckCommandResponse {
+            command_id: input.command_id,
+            acknowledged,
+            already_acknowledged,
+        }))
+    }
+
+    async fn get_command_status(
+        &self,
+        request: tonic::Request<proto::GetCommandStatusRequest>,
+    ) -> Result<tonic::Response<proto::GetCommandStatusResponse>, tonic::Status> {
+        let operator = self
+            .auth
+            .authenticate(request.metadata())
+            .map_err(CommandError::into_status)?;
+        let input = request.into_inner();
+        if input.workspace_id.is_empty()
+            || input.namespace_id.is_empty()
+            || input.command_id.is_empty()
+        {
+            return Err(CommandError::invalid_command().into_status());
+        }
+        if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
+            return Err(CommandError::scope_denied().into_status());
+        }
+        let key = InboxKey {
+            workspace_id: input.workspace_id,
+            namespace_id: input.namespace_id,
+            command_id: input.command_id.clone(),
+        };
+        let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        let result = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            inbox.status(&key, crate::DEFAULT_MAX_DELIVERY_ATTEMPTS)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?;
+        let (state, delivery_attempt) = result
+            .map(|(status, attempt)| (delivery_status_to_proto(status), attempt))
+            .unwrap_or((proto::CommandDeliveryState::Unspecified, 0));
+        Ok(tonic::Response::new(proto::GetCommandStatusResponse {
+            command_id: input.command_id,
+            state: state as i32,
+            delivery_attempt,
+        }))
+    }
+}
+
+fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliveryState {
+    match status {
+        DeliveryStatus::Pending => proto::CommandDeliveryState::CommandDeliveryPending,
+        DeliveryStatus::Delivered => proto::CommandDeliveryState::CommandDeliveryDelivered,
+        DeliveryStatus::Acknowledged => proto::CommandDeliveryState::CommandDeliveryAcknowledged,
+        DeliveryStatus::Exhausted => proto::CommandDeliveryState::CommandDeliveryExhausted,
     }
 }
 
@@ -681,7 +830,10 @@ mod tests {
         service().with_agent_resolver(crate::agent_auth::BoxedAgentWorkloadResolver::new(agents))
     }
 
-    fn poll_request(bearer: &str, peer: apex_event_ingest::PeerIdentity) -> tonic::Request<proto::PollCommandsRequest> {
+    fn poll_request(
+        bearer: &str,
+        peer: apex_event_ingest::PeerIdentity,
+    ) -> tonic::Request<proto::PollCommandsRequest> {
         poll_request_for(bearer, peer, proto::PollCommandsRequest { max_commands: 0 })
     }
 
@@ -702,7 +854,9 @@ mod tests {
         request
     }
 
-    fn authed_request(body: proto::ControlCommandRequest) -> tonic::Request<proto::ControlCommandRequest> {
+    fn authed_request(
+        body: proto::ControlCommandRequest,
+    ) -> tonic::Request<proto::ControlCommandRequest> {
         let mut request = tonic::Request::new(body);
         request
             .metadata_mut()
@@ -1130,6 +1284,141 @@ mod tests {
         assert_eq!(command.delivery_attempt, 1);
         assert!(!command.issued_at.is_empty());
         assert!(response.min_poll_interval_seconds >= 1);
+    }
+
+    #[tokio::test]
+    async fn an_agent_acknowledges_a_delivery_and_retries_are_idempotent() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x101).await;
+        let delivered = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        let command = &delivered.commands[0];
+
+        let mut ack = tonic::Request::new(proto::AckCommandRequest {
+            workspace_id: command.workspace_id.clone(),
+            namespace_id: command.namespace_id.clone(),
+            command_id: command.command_id.clone(),
+            delivery_attempt: command.delivery_attempt,
+        });
+        ack.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-a-token-abcdefgh".parse().unwrap(),
+        );
+        ack.extensions_mut().insert(peer(0xaa));
+        let first = service.ack_command(ack).await.unwrap().into_inner();
+        assert_eq!(first.command_id, command_id);
+        assert!(first.acknowledged);
+        assert!(!first.already_acknowledged);
+
+        let empty = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(empty.commands.is_empty());
+
+        let mut retry = tonic::Request::new(proto::AckCommandRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id.clone(),
+            delivery_attempt: 1,
+        });
+        retry.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-a-token-abcdefgh".parse().unwrap(),
+        );
+        retry.extensions_mut().insert(peer(0xaa));
+        let second = service.ack_command(retry).await.unwrap().into_inner();
+        assert!(!second.acknowledged);
+        assert!(second.already_acknowledged);
+
+        let mut status = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id,
+        });
+        status
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        let status = service
+            .get_command_status(status)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.state,
+            proto::CommandDeliveryState::CommandDeliveryAcknowledged as i32
+        );
+        assert_eq!(status.delivery_attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn command_status_distinguishes_pending_and_delivered_and_rejects_wrong_agent_ack() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x102).await;
+
+        let mut status = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id.clone(),
+        });
+        status
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        let status = service
+            .get_command_status(status)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.state,
+            proto::CommandDeliveryState::CommandDeliveryPending as i32
+        );
+        assert_eq!(status.delivery_attempt, 0);
+
+        let mut wrong_ack = tonic::Request::new(proto::AckCommandRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: command_id.clone(),
+            delivery_attempt: 1,
+        });
+        wrong_ack.metadata_mut().insert(
+            "authorization",
+            "Bearer agent-b-token-abcdefgh".parse().unwrap(),
+        );
+        wrong_ack.extensions_mut().insert(peer(0xbb));
+        let wrong_ack = service.ack_command(wrong_ack).await.unwrap().into_inner();
+        assert!(!wrong_ack.acknowledged);
+        assert!(!wrong_ack.already_acknowledged);
+
+        let delivered = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered.commands[0].delivery_attempt, 1);
+
+        let mut status = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id,
+        });
+        status
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        let status = service
+            .get_command_status(status)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.state,
+            proto::CommandDeliveryState::CommandDeliveryDelivered as i32
+        );
+        assert_eq!(status.delivery_attempt, 1);
     }
 
     /// **The mandatory isolation test.** Agent B authenticates as itself and

@@ -8,8 +8,8 @@
 use postgres::Client;
 
 use super::{
-    CommandInbox, DeliveryPolicy, PendingCommand, PollTarget, RecordResult,
-    ScopeAuthorizer, command_hash, is_recordable,
+    CommandInbox, DeliveryPolicy, PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
+    command_hash, is_recordable,
 };
 use crate::errors::{CommandError, CommandErrorCode};
 
@@ -48,10 +48,8 @@ impl RecoveringPostgresCommandInbox {
         match operation(&mut self.inner) {
             Ok(value) => Ok(value),
             Err(error) if error.code == CommandErrorCode::Internal => {
-                let replacement = PostgresCommandInbox::connect(
-                    &self.connection_string,
-                    self.capacity,
-                )?;
+                let replacement =
+                    PostgresCommandInbox::connect(&self.connection_string, self.capacity)?;
                 self.inner = replacement;
                 operation(&mut self.inner)
             }
@@ -77,6 +75,28 @@ impl CommandInbox for RecoveringPostgresCommandInbox {
 
     fn undelivered_count(&mut self) -> usize {
         self.inner.undelivered_count()
+    }
+
+    fn pending_count(&mut self) -> usize {
+        self.inner.pending_count()
+    }
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &super::InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<super::AckResult, CommandError> {
+        self.with_retry(|inner| inner.acknowledge(target, key, delivery_attempt, now_millis))
+    }
+
+    fn status(
+        &mut self,
+        key: &super::InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(super::DeliveryStatus, u32)>, CommandError> {
+        self.with_retry(|inner| inner.status(key, max_attempts))
     }
 
     fn maintain(
@@ -115,13 +135,20 @@ impl CommandInbox for PostgresCommandInbox {
             ));
         }
         let hash = command_hash(command)?;
-        let mut tx = self.client.transaction().map_err(|_| CommandError::internal())?;
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|_| CommandError::internal())?;
         let existing = tx
             .query_opt(
                 "SELECT command_hash FROM apex_control_inbox
                  WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3
                  FOR UPDATE",
-                &[&command.workspace_id, &command.namespace_id, &command.command_id],
+                &[
+                    &command.workspace_id,
+                    &command.namespace_id,
+                    &command.command_id,
+                ],
             )
             .map_err(|_| CommandError::internal())?;
         if let Some(row) = existing {
@@ -175,7 +202,11 @@ impl CommandInbox for PostgresCommandInbox {
                 .query_one(
                     "SELECT command_hash FROM apex_control_inbox
                      WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3",
-                    &[&command.workspace_id, &command.namespace_id, &command.command_id],
+                    &[
+                        &command.workspace_id,
+                        &command.namespace_id,
+                        &command.command_id,
+                    ],
                 )
                 .map_err(|_| CommandError::internal())?
                 .get(0);
@@ -204,7 +235,10 @@ impl CommandInbox for PostgresCommandInbox {
         let redelivery_after = i64::try_from(policy.redelivery_after.as_millis())
             .map_err(|_| CommandError::internal())?;
         let now_millis = i64::try_from(now_millis).map_err(|_| CommandError::internal())?;
-        let mut tx = self.client.transaction().map_err(|_| CommandError::internal())?;
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|_| CommandError::internal())?;
         let mut cursor = 0_i64;
         let mut selected = Vec::with_capacity(target.limit);
 
@@ -218,6 +252,7 @@ impl CommandInbox for PostgresCommandInbox {
                     "SELECT sequence, workspace_id, namespace_id, command_id
                      FROM apex_control_inbox
                      WHERE agent_id = $1
+                       AND acknowledged_at_millis IS NULL
                        AND attempts < $2
                        AND (last_delivered_millis IS NULL
                             OR $3 - last_delivered_millis >= $4)
@@ -318,6 +353,97 @@ impl CommandInbox for PostgresCommandInbox {
             .unwrap_or(0)
     }
 
+    fn pending_count(&mut self) -> usize {
+        self.client
+            .query_one("SELECT COUNT(*) FROM apex_control_inbox", &[])
+            .ok()
+            .and_then(|row| row.get::<_, i64>(0).try_into().ok())
+            .unwrap_or(0)
+    }
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &super::InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<super::AckResult, CommandError> {
+        let now_millis = i64::try_from(now_millis).map_err(|_| CommandError::internal())?;
+        let updated = self
+            .client
+            .execute(
+                "UPDATE apex_control_inbox
+                 SET acknowledged_at_millis = $1
+                 WHERE workspace_id = $2 AND namespace_id = $3 AND command_id = $4
+                   AND agent_id = $5
+                   AND acknowledged_at_millis IS NULL
+                   AND attempts >= $6",
+                &[
+                    &now_millis,
+                    &key.workspace_id,
+                    &key.namespace_id,
+                    &key.command_id,
+                    &target.agent_id,
+                    &i64::from(delivery_attempt),
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        if updated > 0 {
+            return Ok(super::AckResult::Acknowledged);
+        }
+        let existing = self
+            .client
+            .query_opt(
+                "SELECT acknowledged_at_millis FROM apex_control_inbox
+                 WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3
+                   AND agent_id = $4",
+                &[
+                    &key.workspace_id,
+                    &key.namespace_id,
+                    &key.command_id,
+                    &target.agent_id,
+                ],
+            )
+            .map_err(|_| CommandError::internal())?;
+        Ok(match existing {
+            Some(row) if row.get::<_, Option<i64>>(0).is_some() => {
+                super::AckResult::AlreadyAcknowledged
+            }
+            _ => super::AckResult::NotFound,
+        })
+    }
+
+    fn status(
+        &mut self,
+        key: &super::InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(super::DeliveryStatus, u32)>, CommandError> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT attempts, last_delivered_millis, acknowledged_at_millis
+                 FROM apex_control_inbox
+                 WHERE workspace_id = $1 AND namespace_id = $2 AND command_id = $3",
+                &[&key.workspace_id, &key.namespace_id, &key.command_id],
+            )
+            .map_err(|_| CommandError::internal())?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let attempts = row.get::<_, i64>(0).try_into().unwrap_or(u32::MAX);
+        let acknowledged = row.get::<_, Option<i64>>(2).is_some();
+        let state = if acknowledged {
+            super::DeliveryStatus::Acknowledged
+        } else if attempts == 0 {
+            super::DeliveryStatus::Pending
+        } else if attempts >= max_attempts {
+            super::DeliveryStatus::Exhausted
+        } else {
+            super::DeliveryStatus::Delivered
+        };
+        Ok(Some((state, attempts)))
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -325,19 +451,15 @@ impl CommandInbox for PostgresCommandInbox {
         max_attempts: u32,
     ) -> Result<(), CommandError> {
         let now_millis = i64::try_from(now_millis).map_err(|_| CommandError::internal())?;
-        let retention_millis = i64::try_from(retention_millis)
-            .map_err(|_| CommandError::internal())?;
+        let retention_millis =
+            i64::try_from(retention_millis).map_err(|_| CommandError::internal())?;
         self.client
             .execute(
                 "DELETE FROM apex_control_inbox
-                 WHERE attempts >= $1
+                 WHERE (acknowledged_at_millis IS NOT NULL OR attempts >= $1)
                    AND last_delivered_millis IS NOT NULL
                    AND $2 - last_delivered_millis >= $3",
-                &[
-                    &i64::from(max_attempts),
-                    &now_millis,
-                    &retention_millis,
-                ],
+                &[&i64::from(max_attempts), &now_millis, &retention_millis],
             )
             .map_err(|_| CommandError::internal())?;
         Ok(())

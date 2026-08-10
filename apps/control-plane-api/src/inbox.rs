@@ -194,6 +194,21 @@ pub enum RecordResult {
     AlreadyRecorded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckResult {
+    Acknowledged,
+    AlreadyAcknowledged,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryStatus {
+    Pending,
+    Delivered,
+    Acknowledged,
+    Exhausted,
+}
+
 /// Durable delivery-state store.
 pub trait CommandInbox: Send {
     /// Idempotently records a command as awaiting delivery to its agent.
@@ -214,6 +229,24 @@ pub trait CommandInbox: Send {
     /// Count of commands that have never been delivered. Diagnostics and
     /// tests only; never exposed on the wire.
     fn undelivered_count(&mut self) -> usize;
+
+    /// Count of active delivery records, including records already delivered
+    /// but retained for redelivery or idempotency.
+    fn pending_count(&mut self) -> usize;
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<AckResult, CommandError>;
+
+    fn status(
+        &mut self,
+        key: &InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(DeliveryStatus, u32)>, CommandError>;
 
     /// Retires settled delivery state after the configured idempotency window.
     /// Implementations must preserve the command identity until that window
@@ -245,6 +278,28 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
 
     fn undelivered_count(&mut self) -> usize {
         (**self).undelivered_count()
+    }
+
+    fn pending_count(&mut self) -> usize {
+        (**self).pending_count()
+    }
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<AckResult, CommandError> {
+        (**self).acknowledge(target, key, delivery_attempt, now_millis)
+    }
+
+    fn status(
+        &mut self,
+        key: &InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
+        (**self).status(key, max_attempts)
     }
 
     fn maintain(
@@ -279,6 +334,7 @@ struct Entry {
     command: PendingCommand,
     attempts: u32,
     last_delivered_millis: Option<u64>,
+    acknowledged: bool,
 }
 
 impl InboxState {
@@ -321,6 +377,7 @@ impl InboxState {
                 command: command.clone(),
                 attempts: 0,
                 last_delivered_millis: None,
+                acknowledged: false,
             },
         );
         Ok(RecordResult::Recorded)
@@ -372,6 +429,9 @@ impl InboxState {
             if entry.attempts >= policy.max_attempts {
                 continue;
             }
+            if entry.acknowledged {
+                continue;
+            }
             let visible = match entry.last_delivered_millis {
                 None => true,
                 Some(delivered_at) => {
@@ -402,6 +462,42 @@ impl InboxState {
             .count()
     }
 
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+    ) -> AckResult {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return AckResult::NotFound;
+        };
+        if entry.command.agent_id != target.agent_id
+            || delivery_attempt == 0
+            || delivery_attempt > entry.attempts
+        {
+            return AckResult::NotFound;
+        }
+        if entry.acknowledged {
+            return AckResult::AlreadyAcknowledged;
+        }
+        entry.acknowledged = true;
+        AckResult::Acknowledged
+    }
+
+    fn status(&self, key: &InboxKey, max_attempts: u32) -> Option<(DeliveryStatus, u32)> {
+        let entry = self.entries.get(key)?;
+        let status = if entry.acknowledged {
+            DeliveryStatus::Acknowledged
+        } else if entry.attempts == 0 {
+            DeliveryStatus::Pending
+        } else if entry.attempts >= max_attempts {
+            DeliveryStatus::Exhausted
+        } else {
+            DeliveryStatus::Delivered
+        };
+        Some((status, entry.attempts))
+    }
+
     fn retire(&mut self, key: &InboxKey, retired_at_millis: u64) {
         self.entries.remove(key);
         self.retired.insert(key.clone(), retired_at_millis);
@@ -409,7 +505,8 @@ impl InboxState {
 
     fn remove_expired_retired(&mut self, cutoff_millis: u64) -> bool {
         let before = self.retired.len();
-        self.retired.retain(|_, retired_at| *retired_at > cutoff_millis);
+        self.retired
+            .retain(|_, retired_at| *retired_at > cutoff_millis);
         before != self.retired.len()
     }
 }
@@ -456,6 +553,28 @@ impl CommandInbox for InMemoryCommandInbox {
     fn undelivered_count(&mut self) -> usize {
         self.state.undelivered_count()
     }
+
+    fn pending_count(&mut self) -> usize {
+        self.state.entries.len()
+    }
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+        _now_millis: u64,
+    ) -> Result<AckResult, CommandError> {
+        Ok(self.state.acknowledge(target, key, delivery_attempt))
+    }
+
+    fn status(
+        &mut self,
+        key: &InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
+        Ok(self.state.status(key, max_attempts))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -467,6 +586,12 @@ enum InboxRecord {
         namespace_id: String,
         command_id: String,
         attempt: u32,
+        at_millis: u64,
+    },
+    Acknowledged {
+        workspace_id: String,
+        namespace_id: String,
+        command_id: String,
         at_millis: u64,
     },
     Retired {
@@ -593,6 +718,20 @@ impl FileCommandInbox {
                         at_millis,
                     );
                 }
+                InboxRecord::Acknowledged {
+                    workspace_id,
+                    namespace_id,
+                    command_id,
+                    ..
+                } => {
+                    if let Some(entry) = self.state.entries.get_mut(&InboxKey {
+                        workspace_id,
+                        namespace_id,
+                        command_id,
+                    }) {
+                        entry.acknowledged = true;
+                    }
+                }
                 InboxRecord::Retired {
                     workspace_id,
                     namespace_id,
@@ -690,6 +829,14 @@ impl FileCommandInbox {
                     namespace_id: key.namespace_id.clone(),
                     command_id: key.command_id.clone(),
                     attempt: entry.attempts,
+                    at_millis: entry.last_delivered_millis.unwrap_or_default(),
+                });
+            }
+            if entry.acknowledged {
+                records.push(InboxRecord::Acknowledged {
+                    workspace_id: key.workspace_id.clone(),
+                    namespace_id: key.namespace_id.clone(),
+                    command_id: key.command_id.clone(),
                     at_millis: entry.last_delivered_millis.unwrap_or_default(),
                 });
             }
@@ -861,6 +1008,41 @@ impl CommandInbox for FileCommandInbox {
         self.state.undelivered_count()
     }
 
+    fn pending_count(&mut self) -> usize {
+        self.state.entries.len()
+    }
+
+    fn acknowledge(
+        &mut self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<AckResult, CommandError> {
+        let result = self.state.acknowledge(target, key, delivery_attempt);
+        if matches!(result, AckResult::Acknowledged)
+            && let Err(error) = self.append(&InboxRecord::Acknowledged {
+                workspace_id: key.workspace_id.clone(),
+                namespace_id: key.namespace_id.clone(),
+                command_id: key.command_id.clone(),
+                at_millis: now_millis,
+            }) {
+                if let Some(entry) = self.state.entries.get_mut(key) {
+                    entry.acknowledged = false;
+                }
+                return Err(error);
+            }
+        Ok(result)
+    }
+
+    fn status(
+        &mut self,
+        key: &InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
+        Ok(self.state.status(key, max_attempts))
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -874,7 +1056,7 @@ impl CommandInbox for FileCommandInbox {
             .entries
             .iter()
             .filter_map(|(key, entry)| {
-                (entry.attempts >= max_attempts
+                ((entry.acknowledged || entry.attempts >= max_attempts)
                     && entry
                         .last_delivered_millis
                         .is_some_and(|delivered_at| delivered_at <= cutoff_millis))
@@ -920,10 +1102,7 @@ fn is_recordable(command: &PendingCommand) -> bool {
             command.action.as_str(),
             "stop" | "pause" | "resume" | "inject" | "set_budget"
         )
-        && command
-            .reason_code
-            .as_deref()
-            .is_none_or(is_identifier)
+        && command.reason_code.as_deref().is_none_or(is_identifier)
         && command.issued_at.len() <= 64
         && command.issued_at.is_ascii()
         && !command.issued_at.chars().any(char::is_control)
@@ -974,9 +1153,7 @@ impl ControlInboxBackend {
         }
     }
 
-    pub fn new_pool(
-        inboxes: Vec<Box<dyn CommandInbox + Send>>,
-    ) -> Result<Self, CommandError> {
+    pub fn new_pool(inboxes: Vec<Box<dyn CommandInbox + Send>>) -> Result<Self, CommandError> {
         if inboxes.is_empty() {
             return Err(CommandError::internal());
         }
@@ -1005,6 +1182,34 @@ impl ControlInboxBackend {
                 Ok(f(&mut guard))
             }
         }
+    }
+
+    pub fn pending_count(&self) -> Result<u64, CommandError> {
+        let count = self.with_lock(|inbox| inbox.pending_count())?;
+        u64::try_from(count).map_err(|_| CommandError::internal())
+    }
+
+    pub fn undelivered_count(&self) -> Result<u64, CommandError> {
+        let count = self.with_lock(|inbox| inbox.undelivered_count())?;
+        u64::try_from(count).map_err(|_| CommandError::internal())
+    }
+
+    pub fn acknowledge(
+        &self,
+        target: &PollTarget,
+        key: &InboxKey,
+        delivery_attempt: u32,
+        now_millis: u64,
+    ) -> Result<AckResult, CommandError> {
+        self.with_lock(|inbox| inbox.acknowledge(target, key, delivery_attempt, now_millis))?
+    }
+
+    pub fn status(
+        &self,
+        key: &InboxKey,
+        max_attempts: u32,
+    ) -> Result<Option<(DeliveryStatus, u32)>, CommandError> {
+        self.with_lock(|inbox| inbox.status(key, max_attempts))?
     }
 }
 
@@ -1131,9 +1336,18 @@ mod tests {
             RecordResult::AlreadyRecorded
         );
         let claimed = inbox
-            .claim(&target("agent-a"), &acme_prod(), DeliveryPolicy::default(), 1)
+            .claim(
+                &target("agent-a"),
+                &acme_prod(),
+                DeliveryPolicy::default(),
+                1,
+            )
             .unwrap();
-        assert_eq!(claimed.len(), 1, "a resubmitted command must not queue twice");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "a resubmitted command must not queue twice"
+        );
     }
 
     #[test]
@@ -1154,6 +1368,43 @@ mod tests {
         assert_eq!(
             delivered, 3,
             "a command whose target never returns must stop being redelivered"
+        );
+    }
+
+    #[test]
+    fn acknowledging_a_delivery_is_idempotent_and_suppresses_redelivery() {
+        let mut inbox = InMemoryCommandInbox::new(16);
+        inbox.record(&command("cmd-ack", "agent-a")).unwrap();
+        let policy = DeliveryPolicy {
+            redelivery_after: Duration::ZERO,
+            max_attempts: 3,
+        };
+        let delivered = inbox
+            .claim(&target("agent-a"), &acme_prod(), policy, 1)
+            .unwrap();
+        assert_eq!(delivered[0].delivery_attempt, 1);
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-ack".to_owned(),
+        };
+        assert_eq!(
+            inbox.acknowledge(&target("agent-a"), &key, 1, 2).unwrap(),
+            AckResult::Acknowledged
+        );
+        assert_eq!(
+            inbox.acknowledge(&target("agent-a"), &key, 1, 3).unwrap(),
+            AckResult::AlreadyAcknowledged
+        );
+        assert!(
+            inbox
+                .claim(&target("agent-a"), &acme_prod(), policy, 4)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            inbox.status(&key, 3).unwrap(),
+            Some((DeliveryStatus::Acknowledged, 1))
         );
     }
 
@@ -1218,7 +1469,10 @@ mod tests {
                     .len()
             }));
         }
-        let total: usize = handles.into_iter().map(|handle| handle.join().unwrap()).sum();
+        let total: usize = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .sum();
         assert_eq!(
             total, 1,
             "exactly one concurrent poll may receive the command"
@@ -1242,7 +1496,12 @@ mod tests {
             inbox.record(&command("cmd-1", "agent-a")).unwrap();
             inbox.record(&command("cmd-2", "agent-a")).unwrap();
             let claimed = inbox
-                .claim(&target("agent-a"), &acme_prod(), DeliveryPolicy::default(), 10_000)
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    10_000,
+                )
                 .unwrap();
             assert_eq!(claimed.len(), 2);
         }
@@ -1254,17 +1513,81 @@ mod tests {
             assert_eq!(inbox.undelivered_count(), 0);
             assert!(
                 inbox
-                    .claim(&target("agent-a"), &acme_prod(), DeliveryPolicy::default(), 12_000)
+                    .claim(
+                        &target("agent-a"),
+                        &acme_prod(),
+                        DeliveryPolicy::default(),
+                        12_000
+                    )
                     .unwrap()
                     .is_empty()
             );
             // ... and past the window they come back, attempt count preserved.
             let again = inbox
-                .claim(&target("agent-a"), &acme_prod(), DeliveryPolicy::default(), 41_000)
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    41_000,
+                )
                 .unwrap();
             assert_eq!(again.len(), 2);
             assert!(again.iter().all(|command| command.delivery_attempt == 2));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_inbox_persists_an_acknowledgement_across_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-ack-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-ack".to_owned(),
+        };
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            inbox.record(&command("cmd-ack", "agent-a")).unwrap();
+            inbox
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    10_000,
+                )
+                .unwrap();
+            assert_eq!(
+                inbox
+                    .acknowledge(&target("agent-a"), &key, 1, 11_000)
+                    .unwrap(),
+                AckResult::Acknowledged
+            );
+        }
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64).unwrap();
+        assert_eq!(
+            reopened.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS),
+            Ok(Some((DeliveryStatus::Acknowledged, 1)))
+        );
+        assert!(
+            reopened
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    41_000
+                )
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

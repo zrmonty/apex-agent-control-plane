@@ -27,7 +27,10 @@ impl FileOutbox {
                 event_id: key.event_id.clone(),
                 envelope_sha256: fingerprint.map(hex_fingerprint),
                 completed_at_millis: self.completed_at_millis.get(key).copied(),
-                envelope: self.complete_events.get(key).map(|event| event.envelope.clone()),
+                envelope: self
+                    .complete_events
+                    .get(key)
+                    .map(|event| event.envelope.clone()),
             });
         }
         for (key, event) in &self.quarantined {
@@ -77,7 +80,11 @@ impl FileOutbox {
             return result;
         }
         drop(temp);
-        drop(self.file.take().ok_or_else(GatewayError::invalid_outbox_configuration)?);
+        drop(
+            self.file
+                .take()
+                .ok_or_else(GatewayError::invalid_outbox_configuration)?,
+        );
         if fs::rename(&temp_path, &self.path).is_err() {
             let _ = fs::remove_file(&temp_path);
             self.file = Some(
@@ -173,7 +180,8 @@ impl EventOutbox for FileOutbox {
             if let Some(event) = event {
                 self.complete_events.insert(key.clone(), event);
             }
-            self.completed_at_millis.insert(key.clone(), completed_at_millis);
+            self.completed_at_millis
+                .insert(key.clone(), completed_at_millis);
             self.next_attempt_at_millis.remove(key);
             self.attempts.remove(key);
         }
@@ -207,7 +215,8 @@ impl EventOutbox for FileOutbox {
             let fingerprint = payload_fingerprint(&event.envelope);
             self.complete.insert(key.clone(), Some(fingerprint));
             self.complete_events.insert(key.clone(), event);
-            self.completed_at_millis.insert(key.clone(), completed_at_millis);
+            self.completed_at_millis
+                .insert(key.clone(), completed_at_millis);
             self.next_attempt_at_millis.remove(&key);
             self.attempts.remove(&key);
         }
@@ -223,16 +232,14 @@ impl EventOutbox for FileOutbox {
         Ok(self
             .pending
             .iter()
-            .filter(|(key, _)| {
-                self.next_attempt_at_millis
-                    .get(key)
-                    .copied()
-                    .unwrap_or(0)
-                    <= now
-            })
+            .filter(|(key, _)| self.next_attempt_at_millis.get(key).copied().unwrap_or(0) <= now)
             .take(limit)
             .map(|(_, event)| event.clone())
             .collect())
+    }
+
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        Ok(self.pending.len() as u64)
     }
 
     fn recent_completed_batch(
@@ -256,7 +263,11 @@ impl EventOutbox for FileOutbox {
         Ok(self.pending.values().take(limit).cloned().collect())
     }
 
-    fn reschedule(&mut self, keys: &[OutboxKey], after: std::time::Duration) -> Result<(), GatewayError> {
+    fn reschedule(
+        &mut self,
+        keys: &[OutboxKey],
+        after: std::time::Duration,
+    ) -> Result<(), GatewayError> {
         let now = now_millis();
         let next = now.saturating_add(after.as_millis().min(u128::from(u64::MAX)) as u64);
         let mut records = Vec::new();
@@ -265,7 +276,12 @@ impl EventOutbox for FileOutbox {
             let Some(event) = self.pending.get(key).cloned() else {
                 continue;
             };
-            let attempts = self.attempts.get(key).copied().unwrap_or(0).saturating_add(1);
+            let attempts = self
+                .attempts
+                .get(key)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
             if attempts >= MAX_PERSISTED_ATTEMPTS {
                 quarantine_keys.push(key.clone());
                 continue;

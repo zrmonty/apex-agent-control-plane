@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 #[derive(Clone, Debug, Default)]
@@ -45,6 +45,9 @@ pub struct GatewayRuntimeMetrics {
     pub outbox_write_failures: AtomicU64,
     pub quarantined_rows: AtomicU64,
     pub quarantined_current: AtomicU64,
+    pub outbox_pending: AtomicU64,
+    pub inbox_pending: AtomicU64,
+    pub inbox_undelivered: AtomicU64,
     pub shutdowns: AtomicU64,
     pub fanout_healthy: AtomicBool,
     pub storage_healthy: AtomicBool,
@@ -67,6 +70,9 @@ impl Default for GatewayRuntimeMetrics {
             outbox_write_failures: AtomicU64::new(0),
             quarantined_rows: AtomicU64::new(0),
             quarantined_current: AtomicU64::new(0),
+            outbox_pending: AtomicU64::new(0),
+            inbox_pending: AtomicU64::new(0),
+            inbox_undelivered: AtomicU64::new(0),
             shutdowns: AtomicU64::new(0),
             fanout_healthy: AtomicBool::new(false),
             storage_healthy: AtomicBool::new(true),
@@ -90,6 +96,9 @@ pub struct GatewayRuntimeSnapshot {
     pub outbox_write_failures: u64,
     pub quarantined_rows: u64,
     pub quarantined_current: u64,
+    pub outbox_pending: u64,
+    pub inbox_pending: u64,
+    pub inbox_undelivered: u64,
     pub shutdowns: u64,
     pub fanout_healthy: bool,
     pub storage_healthy: bool,
@@ -113,7 +122,8 @@ impl GatewayRuntimeMetrics {
     }
 
     pub fn set_accelerator_sidelined(&self, sidelined: bool) {
-        self.accelerator_sidelined.store(sidelined, Ordering::Relaxed);
+        self.accelerator_sidelined
+            .store(sidelined, Ordering::Relaxed);
     }
 
     pub fn accelerator_healthy(&self) -> bool {
@@ -135,6 +145,9 @@ impl GatewayRuntimeMetrics {
             outbox_write_failures: self.outbox_write_failures.load(Ordering::Relaxed),
             quarantined_rows: self.quarantined_rows.load(Ordering::Relaxed),
             quarantined_current: self.quarantined_current.load(Ordering::Relaxed),
+            outbox_pending: self.outbox_pending.load(Ordering::Relaxed),
+            inbox_pending: self.inbox_pending.load(Ordering::Relaxed),
+            inbox_undelivered: self.inbox_undelivered.load(Ordering::Relaxed),
             shutdowns: self.shutdowns.load(Ordering::Relaxed),
             fanout_healthy: self.fanout_healthy.load(Ordering::Relaxed),
             storage_healthy: self.storage_healthy.load(Ordering::Relaxed),
@@ -147,7 +160,7 @@ impl GatewayRuntimeMetrics {
         self.set_accelerator_sidelined(accelerator_sidelined);
         let snapshot = self.snapshot();
         format!(
-            "apex_control_gateway_status submissions={} duplicate_submissions={} polls={} fanout_successes={} fanout_failures={} retention_failures={} reconciliation_repairs={} reconciliation_failures={} outbox_read_failures={} outbox_write_failures={} quarantined_rows={} quarantined_current={} shutdowns={} fanout_healthy={} storage_healthy={} accelerator_configured={} accelerator_sidelined={}",
+            "apex_control_gateway_status submissions={} duplicate_submissions={} polls={} fanout_successes={} fanout_failures={} retention_failures={} reconciliation_repairs={} reconciliation_failures={} outbox_read_failures={} outbox_write_failures={} quarantined_rows={} quarantined_current={} outbox_pending={} inbox_pending={} inbox_undelivered={} shutdowns={} fanout_healthy={} storage_healthy={} accelerator_configured={} accelerator_sidelined={}",
             snapshot.submissions,
             snapshot.duplicate_submissions,
             snapshot.polls,
@@ -160,6 +173,9 @@ impl GatewayRuntimeMetrics {
             snapshot.outbox_write_failures,
             snapshot.quarantined_rows,
             snapshot.quarantined_current,
+            snapshot.outbox_pending,
+            snapshot.inbox_pending,
+            snapshot.inbox_undelivered,
             snapshot.shutdowns,
             snapshot.fanout_healthy,
             snapshot.storage_healthy,

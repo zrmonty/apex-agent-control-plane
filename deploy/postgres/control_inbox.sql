@@ -19,8 +19,12 @@ CREATE TABLE IF NOT EXISTS apex_control_inbox (
     issued_at TEXT NOT NULL,
     attempts BIGINT NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     last_delivered_millis BIGINT,
+    acknowledged_at_millis BIGINT,
     UNIQUE (workspace_id, namespace_id, command_id)
 );
+
+ALTER TABLE apex_control_inbox
+    ADD COLUMN IF NOT EXISTS acknowledged_at_millis BIGINT;
 
 CREATE INDEX IF NOT EXISTS apex_control_inbox_delivery_idx
     ON apex_control_inbox (agent_id, sequence);

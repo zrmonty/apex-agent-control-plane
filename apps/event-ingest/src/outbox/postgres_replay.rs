@@ -11,8 +11,16 @@ pub(super) trait PostgresReplayOps {
     fn maintain(&mut self, now_millis: u64, retention_millis: u64) -> Result<(), GatewayError>;
     fn pending(&mut self) -> Vec<IngestRequest>;
     fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError>;
-    fn recent_completed_batch(&mut self, since_millis: u64, limit: usize) -> Result<Vec<IngestRequest>, GatewayError>;
-    fn pending_reconciliation_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError>;
+    fn pending_count(&mut self) -> Result<u64, GatewayError>;
+    fn recent_completed_batch(
+        &mut self,
+        since_millis: u64,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError>;
+    fn pending_reconciliation_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<IngestRequest>, GatewayError>;
     fn quarantine(&mut self, keys: &[OutboxKey], reason: &'static str) -> Result<(), GatewayError>;
     fn quarantined_batch(&mut self, limit: usize) -> Result<Vec<OutboxKey>, GatewayError>;
     fn quarantined_count(&mut self) -> Result<u64, GatewayError>;
@@ -62,8 +70,8 @@ impl PostgresReplayOps for PostgresOutbox {
 
     fn maintain(&mut self, now_millis: u64, retention_millis: u64) -> Result<(), GatewayError> {
         let now_millis = i64::try_from(now_millis).map_err(|_| GatewayError::internal())?;
-        let retention_millis = i64::try_from(retention_millis)
-            .map_err(|_| GatewayError::internal())?;
+        let retention_millis =
+            i64::try_from(retention_millis).map_err(|_| GatewayError::internal())?;
         self.client
             .execute(
                 "DELETE FROM apex_event_outbox
@@ -103,8 +111,10 @@ impl PostgresReplayOps for PostgresOutbox {
 
     fn pending_batch(&mut self, limit: usize) -> Result<Vec<IngestRequest>, GatewayError> {
         let limit = i64::try_from(limit.min(10_000)).unwrap_or(10_000);
-        let rows = self.client.query(
-            "UPDATE apex_event_outbox AS o
+        let rows = self
+            .client
+            .query(
+                "UPDATE apex_event_outbox AS o
              SET attempts = o.attempts + 1,
                  next_attempt_at = now() + make_interval(secs => $1)
              WHERE (o.workspace_id, o.namespace_id, o.event_id) IN (
@@ -118,9 +128,9 @@ impl PostgresReplayOps for PostgresOutbox {
                  FOR UPDATE SKIP LOCKED
              )
              RETURNING o.workspace_id, o.namespace_id, o.event_id, o.envelope",
-            &[&OUTBOX_CLAIM_LEASE_SECONDS, &limit],
-        )
-        .map_err(|_| GatewayError::internal())?;
+                &[&OUTBOX_CLAIM_LEASE_SECONDS, &limit],
+            )
+            .map_err(|_| GatewayError::internal())?;
         let mut events = Vec::with_capacity(rows.len());
         let mut poison = Vec::new();
         for row in rows {
@@ -161,6 +171,19 @@ impl PostgresReplayOps for PostgresOutbox {
             self.quarantine(&poison, "malformed_durable_event")?;
         }
         Ok(events)
+    }
+
+    fn pending_count(&mut self) -> Result<u64, GatewayError> {
+        let count: i64 = self
+            .client
+            .query_one(
+                "SELECT COUNT(*) FROM apex_event_outbox
+                 WHERE state = 'pending' AND quarantined_at IS NULL",
+                &[],
+            )
+            .map_err(|_| GatewayError::internal())?
+            .get(0);
+        count.try_into().map_err(|_| GatewayError::internal())
     }
 
     fn recent_completed_batch(

@@ -45,19 +45,19 @@ pub use envelope::{
 };
 pub use errors::{CommandError, CommandErrorCode};
 pub use inbox::{
-    CommandInbox, ControlInboxBackend, DEFAULT_INBOX_CAPACITY, DEFAULT_MAX_COMMANDS_PER_POLL,
-    DEFAULT_MAX_DELIVERY_ATTEMPTS, DEFAULT_REDELIVERY_AFTER, DeliveryPolicy, ExactScope,
-    FileCommandInbox, InMemoryCommandInbox, InboxKey, MAX_COMMANDS_PER_POLL, PendingCommand,
-    PollTarget, RecordResult, ScopeAuthorizer,
+    AckResult, CommandInbox, ControlInboxBackend, DEFAULT_INBOX_CAPACITY,
+    DEFAULT_MAX_COMMANDS_PER_POLL, DEFAULT_MAX_DELIVERY_ATTEMPTS, DEFAULT_REDELIVERY_AFTER,
+    DeliveryPolicy, DeliveryStatus, ExactScope, FileCommandInbox, InMemoryCommandInbox, InboxKey,
+    MAX_COMMANDS_PER_POLL, PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
 };
 #[cfg(feature = "postgres")]
 pub use inbox::{PostgresCommandInbox, RecoveringPostgresCommandInbox};
 pub use keycloak::{
     KeycloakConfig, KeycloakConfigError, KeycloakOperatorCredentialResolver, KeycloakRejection,
 };
-pub use outbox::{ControlOutboxBackend, submit_command};
 #[cfg(feature = "postgres")]
 pub use outbox::RecoveringPostgresOutbox;
+pub use outbox::{ControlOutboxBackend, submit_command};
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,
