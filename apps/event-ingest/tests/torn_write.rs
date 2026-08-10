@@ -9,8 +9,8 @@
 //!   * an invalid event never lands *anywhere*, even while a sink is down and
 //!     the retry machinery is active.
 //!
-//! Requires the same environment as `adversarial_ingest.rs`, plus permission to
-//! stop and start the sink containers named by
+//! Requires the same environment as the `adversarial_*.rs` test corpus, plus
+//! permission to stop and start the sink containers named by
 //! `APEX_TORN_CH_CONTAINER` / `APEX_TORN_ARCHIVE_CONTAINER`.
 //!
 //! ```text
@@ -184,7 +184,7 @@ fn idempotency_lines(event_id: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Envelope helpers (mirrors adversarial_ingest.rs)
+// Envelope helpers (mirrors the adversarial_*.rs files)
 // ---------------------------------------------------------------------------
 
 async fn channel() -> Channel {

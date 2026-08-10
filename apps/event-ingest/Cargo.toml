@@ -53,9 +53,42 @@ valkey = ["dep:redis"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
 postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pki-types", "dep:uuid"]
 
+# In-process gateway/adapter/publisher suite, split by scenario: auth
+# admission, JetStream publishing, envelope validation, idempotency/scope,
+# diagnostics, transport configuration, and durable fanout.
 [[test]]
-name = "gateway"
-path = "tests/gateway.rs"
+name = "gateway_auth_admission"
+path = "tests/gateway_auth_admission.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_jetstream_publisher"
+path = "tests/gateway_jetstream_publisher.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_envelope_validation"
+path = "tests/gateway_envelope_validation.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_idempotency_and_scope"
+path = "tests/gateway_idempotency_and_scope.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_diagnostics"
+path = "tests/gateway_diagnostics.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_transport_config"
+path = "tests/gateway_transport_config.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_durable_fanout"
+path = "tests/gateway_durable_fanout.rs"
 required-features = ["test-support"]
 
 [[test]]
@@ -65,9 +98,26 @@ required-features = ["test-support"]
 
 # Adversarial data-admission corpus against a running gateway. Skips itself
 # unless APEX_ADVERSARIAL_GATEWAY points at one, so offline CI stays green.
+# Split by scenario: integrity/canonicalization, scope/replay, malformed
+# payloads, and transport admission.
 [[test]]
-name = "adversarial_ingest"
-path = "tests/adversarial_ingest.rs"
+name = "adversarial_integrity"
+path = "tests/adversarial_integrity.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "adversarial_scope_and_replay"
+path = "tests/adversarial_scope_and_replay.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "adversarial_malformed_payloads"
+path = "tests/adversarial_malformed_payloads.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "adversarial_transport"
+path = "tests/adversarial_transport.rs"
 required-features = ["test-support"]
 
 # Partial-landing / torn-write tests. Stops and starts sink containers, so it
@@ -78,10 +128,17 @@ path = "tests/torn_write.rs"
 required-features = ["test-support"]
 
 # SIGKILLs the gateway container itself mid-fanout, so it is opt-in via
-# APEX_KILL_GATEWAY=1 on top of the live gateway endpoint.
+# APEX_KILL_GATEWAY=1 on top of the live gateway endpoint. Split by scenario:
+# a deterministic single-event kill (archive held down) and a concurrent
+# load-stream kill (every sink healthy).
 [[test]]
-name = "gateway_kill"
-path = "tests/gateway_kill.rs"
+name = "gateway_kill_deterministic"
+path = "tests/gateway_kill_deterministic.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "gateway_kill_volley"
+path = "tests/gateway_kill_volley.rs"
 required-features = ["test-support"]
 
 # Stops and blackholes the Valkey accelerator under load. Opt-in via

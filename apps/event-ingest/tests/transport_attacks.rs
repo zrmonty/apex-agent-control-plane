@@ -1,6 +1,6 @@
 //! Transport-layer attacks against a live gateway.
 //!
-//! `adversarial_ingest.rs` proves the client-certificate *matrix* (anonymous,
+//! `adversarial_transport.rs` proves the client-certificate *matrix* (anonymous,
 //! untrusted CA, self-signed, expired, not-yet-valid, wrong SAN, wrong EKU) is
 //! refused at the handshake. These are the cases that survive the handshake and
 //! have to be caught above it, plus the negotiable-feature surfaces.
@@ -154,7 +154,7 @@ async fn ingest(
 
 /// Identity must be re-derived per connection, never inherited.
 ///
-/// The certificate matrix in `adversarial_ingest.rs` covers certificates that
+/// The certificate matrix in `adversarial_transport.rs` covers certificates that
 /// fail the *handshake*. This is the case that passes it: a second certificate
 /// issued by the same trusted CA, with the right EKU and SAN, that is simply
 /// not the pinned one. `ingest-nats-client` is exactly that -- a legitimate

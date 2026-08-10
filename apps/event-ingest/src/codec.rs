@@ -108,8 +108,9 @@ impl<U: Message + Default> Decoder for RedactedProstDecoder<U> {
 ///
 /// Split out because `DecodeBuf`/`EncodeBuf` cannot be constructed outside
 /// tonic (`pub(crate)` constructors), so the mapping is unit-tested here and
-/// the wiring is proven end to end over real gRPC by
-/// `tests/adversarial_ingest.rs`.
+/// the wiring is proven end to end over real gRPC by the `adversarial_*.rs`
+/// test corpus (`tests/adversarial_malformed_payloads.rs` covers the raw
+/// codec-level cases).
 pub(crate) fn redacted_decode_status() -> Status {
     GatewayError::new(GatewayErrorCode::InvalidEnvelope).grpc_status_value()
 }

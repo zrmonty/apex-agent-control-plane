@@ -1,19 +1,16 @@
-//! Exactly-once across a **hard kill of the gateway process itself**.
+//! Exactly-once across a **hard kill of the gateway process itself**, under a
+//! sustained concurrent load stream.
 //!
 //! `torn_write.rs` breaks the sinks. It never breaks the gateway. Those are
 //! different failure modes: a sink outage lets the gateway observe the failure
 //! and run its own error path, while `SIGKILL` gives it no error path at all.
-//! The window that matters is between the durable outbox commit and the
-//! downstream write -- the process dies holding an obligation nothing has
-//! recorded as discharged.
 //!
-//! Two properties, asserted against the live stores after recovery:
-//!
-//!   * **No lost row.** An event whose Pending outbox record was fsynced before
-//!     the kill must be durable in every sink once the gateway restarts.
-//!   * **No duplicate row, and no stranded Pending.** Replay must converge to
-//!     exactly one copy, and must not leave an outbox entry that can never
-//!     drain.
+//! `gateway_kill_deterministic.rs` covers the one window that can be timed by
+//! hand (archive down, kill mid-retry). This file covers the windows that
+//! cannot -- notably "fanout fully succeeded, `mark_complete` not yet
+//! written", where a naive replay would fan the event out a second time -- by
+//! killing mid-volley with every sink healthy. For every id in the stream the
+//! outcome must be all-or-nothing and never doubled.
 //!
 //! The journals live in a container volume, so they are read with `docker exec`
 //! rather than from the host filesystem.
@@ -25,7 +22,7 @@
 //! APEX_KILL_GATEWAY_CONTAINER=apex-pentest-gw-ingest-gateway-1 \
 //! APEX_TORN_CH_CONTAINER=apex-pentest-gw-clickhouse-projection-1 \
 //! APEX_TORN_ARCHIVE_CONTAINER=apex-pentest-gw-archive-provider-1 \
-//!   cargo test --test gateway_kill --features test-support -- --test-threads=1
+//!   cargo test --test gateway_kill_volley --features test-support -- --test-threads=1
 //! ```
 
 #![cfg(feature = "test-support")]
@@ -49,7 +46,7 @@ fn skip(name: &str) -> bool {
         eprintln!("skip {name}: set APEX_KILL_GATEWAY=1 and APEX_ADVERSARIAL_GATEWAY");
         return true;
     }
-    // These tests kill containers. A previous failure can leave the stack half
+    // This test kills containers. A previous failure can leave the stack half
     // down, which would make every later test fail for the wrong reason and
     // hide the result being measured.
     ensure_running(&ch_container());
@@ -173,13 +170,6 @@ fn start_gateway() {
     panic!("{container} did not serve again after restart:\n{logs}");
 }
 
-fn stop(container: &str) {
-    assert!(
-        docker_ok(&["stop", "-t", "2", container]),
-        "could not stop {container}"
-    );
-}
-
 fn start_sink(container: &str) {
     assert!(docker_ok(&["start", container]), "could not start {container}");
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -195,26 +185,6 @@ fn start_sink(container: &str) {
 
 fn docker_python(container: &str, script: &str) -> Option<String> {
     docker_output(&["exec", container, "python", "-c", script])
-}
-
-fn clickhouse_rows(event_id: &str) -> u32 {
-    let script = format!(
-        "import sqlite3;db=sqlite3.connect('/var/lib/apex/events.sqlite3');\
-         print(db.execute('select count(*) from events where event_id=?',('{event_id}',)).fetchone()[0])"
-    );
-    docker_python(&ch_container(), &script)
-        .and_then(|v| v.parse().ok())
-        .expect("clickhouse projection query")
-}
-
-fn archive_objects(event_id: &str) -> u32 {
-    let script = format!(
-        "import sqlite3;db=sqlite3.connect('/var/lib/apex/objects.sqlite3');\
-         print(db.execute('select count(*) from objects where event_id=?',('{event_id}',)).fetchone()[0])"
-    );
-    docker_python(&archive_container(), &script)
-        .and_then(|v| v.parse().ok())
-        .expect("archive provider query")
 }
 
 /// Counts for many ids in a single `docker exec`.
@@ -265,25 +235,6 @@ fn journal(file: &str) -> String {
     .unwrap_or_default()
 }
 
-fn journal_lines(file: &str, event_id: &str) -> Vec<String> {
-    journal(file)
-        .lines()
-        .filter(|line| line.contains(event_id))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// An outbox key is stranded when a `pending` record was written and no
-/// `complete` record for the same key ever followed. That row can never drain:
-/// startup replay is the only thing that reads it, and if it is still pending
-/// after a completed restart, nothing else will ever pick it up.
-fn stranded_pending(event_id: &str) -> bool {
-    let lines = journal_lines("outbox.jsonl", event_id);
-    let pending = lines.iter().any(|l| l.contains("\"op\":\"pending\""));
-    let complete = lines.iter().any(|l| l.contains("\"op\":\"complete\""));
-    pending && !complete
-}
-
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -304,10 +255,6 @@ async fn try_channel() -> Option<Channel> {
         .connect()
         .await
         .ok()
-}
-
-async fn channel() -> Channel {
-    try_channel().await.expect("gateway channel")
 }
 
 fn bearer() -> String {
@@ -390,88 +337,9 @@ fn event_id(suffix: u32) -> String {
     )
 }
 
-fn converge(event_id: &str, seconds: u64) {
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    while Instant::now() < deadline {
-        if clickhouse_rows(event_id) == 1 && archive_objects(event_id) == 1 {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Tests
+// Test
 // ---------------------------------------------------------------------------
-
-/// The deterministic window: the archive is down, so the fanout is guaranteed
-/// to be mid-flight (JetStream published, ClickHouse written, archive
-/// retrying) when the gateway is SIGKILLed. The Pending outbox record is
-/// already fsynced; nothing has marked it complete.
-///
-/// After restart the event must be durable exactly once and the outbox row
-/// must be settled.
-#[test]
-fn sigkill_between_outbox_commit_and_fanout_completion_is_exactly_once() {
-    if skip("sigkill_between_outbox_commit_and_fanout_completion_is_exactly_once") {
-        return;
-    }
-    let id = event_id(1);
-
-    stop(&archive_container());
-
-    // Submit in the background: the call blocks on the archive retry ladder,
-    // which is the window we want to kill inside.
-    let submit_id = id.clone();
-    let submitter = std::thread::spawn(move || {
-        runtime().block_on(async {
-            let channel = channel().await;
-            send(&channel, sign(base(&submit_id))).await.map(|_| ())
-        })
-    });
-
-    // Let the gateway get past enqueue + JetStream + ClickHouse and into the
-    // archive retries before pulling the plug.
-    std::thread::sleep(Duration::from_secs(3));
-    kill_gateway();
-    let _ = submitter.join();
-
-    // Restore the sink first so replay can actually complete on startup.
-    start_sink(&archive_container());
-    start_gateway();
-
-    converge(&id, 120);
-
-    assert_eq!(
-        clickhouse_rows(&id),
-        1,
-        "a SIGKILL mid-fanout produced {} ClickHouse rows; exactly-once was violated",
-        clickhouse_rows(&id)
-    );
-    assert_eq!(
-        archive_objects(&id),
-        1,
-        "a SIGKILL mid-fanout produced {} archive objects; exactly-once was violated",
-        archive_objects(&id)
-    );
-    assert!(
-        !stranded_pending(&id),
-        "the outbox row is still pending after recovery and can never drain: {:?}",
-        journal_lines("outbox.jsonl", &id)
-    );
-
-    // Re-submitting the identical event must not fan out a second time.
-    let response = runtime().block_on(async {
-        let channel = channel().await;
-        send(&channel, sign(base(&id))).await
-    });
-    assert!(
-        response.is_ok(),
-        "an identical replay after recovery must not be rejected: {response:?}"
-    );
-    assert_eq!(clickhouse_rows(&id), 1, "post-recovery replay duplicated the ClickHouse row");
-    assert_eq!(archive_objects(&id), 1, "post-recovery replay duplicated the archive object");
-}
 
 /// A kill with every sink healthy, in the middle of a sustained load stream.
 ///
