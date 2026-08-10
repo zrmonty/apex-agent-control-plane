@@ -13,7 +13,7 @@ use super::env::{
     AgentTokenSource, DEFAULT_BIND_ADDR, OperatorTokenSource, admission_limit_value,
     agent_token_source_value, bounded_secs_value, control_postgres_url_value,
     command_retention_value, control_valkey_host_value, expected_token_typ_value,
-    fanout_interval_value,
+    fanout_interval_value, inbox_scope_quota_value,
     global_subjects_value, nats_retry_attempts_value, operator_token_source_value,
     metrics_bind_addr_value, resolve_bind_addr_value,
 };
@@ -195,6 +195,35 @@ fn admission_limit_is_range_checked_rather_than_clamped() {
     assert!(admission_limit_value(Some("100001")).is_err());
     assert!(admission_limit_value(Some("-1")).is_err());
     assert!(admission_limit_value(Some("fifty")).is_err());
+}
+
+/// The per-scope inbox quota is the per-tenant-fairness fix's configuration
+/// knob: it must default sensibly, accept an explicit in-range value, and
+/// fail closed -- never silently clamp -- on zero or on anything wider than
+/// the capacity it is supposed to sit inside of.
+#[test]
+fn inbox_scope_quota_defaults_sensibly_and_is_bounded_by_capacity() {
+    assert_eq!(inbox_scope_quota_value(None, 1_000_000).unwrap(), 20_000);
+    assert_eq!(inbox_scope_quota_value(Some(""), 1_000_000).unwrap(), 20_000);
+    assert_eq!(inbox_scope_quota_value(Some("1"), 1_000_000).unwrap(), 1);
+    assert_eq!(
+        inbox_scope_quota_value(Some("1000000"), 1_000_000).unwrap(),
+        1_000_000
+    );
+    // A capacity smaller than the default quota must not silently widen the
+    // quota past the capacity it has to sit inside of; the default is
+    // clamped down, not the other way around.
+    assert_eq!(inbox_scope_quota_value(None, 100).unwrap(), 100);
+
+    // Zero admits nothing for anybody in the scope, which is never what an
+    // operator setting this variable meant -- refused, not treated as
+    // "unlimited".
+    assert!(inbox_scope_quota_value(Some("0"), 1_000_000).is_err());
+    // Wider than the global capacity: refused rather than silently clamped
+    // down to it, so a misconfiguration is loud at startup.
+    assert!(inbox_scope_quota_value(Some("1000001"), 1_000_000).is_err());
+    assert!(inbox_scope_quota_value(Some("-1"), 1_000_000).is_err());
+    assert!(inbox_scope_quota_value(Some("twenty-thousand"), 1_000_000).is_err());
 }
 
 /// The control gateway must be given its own Valkey credentials and instance,

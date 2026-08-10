@@ -19,6 +19,9 @@ const CLAIM_BATCH: i64 = 1_024;
 pub struct PostgresCommandInbox {
     client: Client,
     capacity: usize,
+    /// Per-`(workspace_id, namespace_id)` ceiling, enforced in *addition* to
+    /// `capacity`. See [`super::DEFAULT_INBOX_SCOPE_QUOTA`].
+    scope_quota: usize,
 }
 
 /// Reconnects a Postgres inbox slot after a transport-level failure. A poll
@@ -28,15 +31,21 @@ pub struct PostgresCommandInbox {
 pub struct RecoveringPostgresCommandInbox {
     connection_string: String,
     capacity: usize,
+    scope_quota: usize,
     inner: PostgresCommandInbox,
 }
 
 impl RecoveringPostgresCommandInbox {
-    pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, CommandError> {
-        let inner = PostgresCommandInbox::connect(connection_string, capacity)?;
+    pub fn connect(
+        connection_string: &str,
+        capacity: usize,
+        scope_quota: usize,
+    ) -> Result<Self, CommandError> {
+        let inner = PostgresCommandInbox::connect(connection_string, capacity, scope_quota)?;
         Ok(Self {
             connection_string: connection_string.to_owned(),
             capacity,
+            scope_quota,
             inner,
         })
     }
@@ -48,8 +57,11 @@ impl RecoveringPostgresCommandInbox {
         match operation(&mut self.inner) {
             Ok(value) => Ok(value),
             Err(error) if error.code == CommandErrorCode::Internal => {
-                let replacement =
-                    PostgresCommandInbox::connect(&self.connection_string, self.capacity)?;
+                let replacement = PostgresCommandInbox::connect(
+                    &self.connection_string,
+                    self.capacity,
+                    self.scope_quota,
+                )?;
                 self.inner = replacement;
                 operation(&mut self.inner)
             }
@@ -110,8 +122,19 @@ impl CommandInbox for RecoveringPostgresCommandInbox {
 }
 
 impl PostgresCommandInbox {
-    pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, CommandError> {
+    pub fn connect(
+        connection_string: &str,
+        capacity: usize,
+        scope_quota: usize,
+    ) -> Result<Self, CommandError> {
         if capacity == 0 || capacity > super::DEFAULT_INBOX_CAPACITY {
+            return Err(configuration_error());
+        }
+        // Same fail-loud discipline as `capacity` immediately above: a
+        // misconfigured per-scope quota (zero, or wider than the global
+        // ceiling it is supposed to sit inside of) is a startup error, not a
+        // value to silently clamp.
+        if scope_quota == 0 || scope_quota > capacity {
             return Err(configuration_error());
         }
         let mut client = apex_event_ingest::connect_postgres(connection_string)
@@ -122,7 +145,11 @@ impl PostgresCommandInbox {
             include_str!("../../../deploy/postgres/control_inbox.sql"),
         )
         .map_err(|_| configuration_error())?;
-        Ok(Self { client, capacity })
+        Ok(Self {
+            client,
+            capacity,
+            scope_quota,
+        })
     }
 }
 
@@ -163,6 +190,64 @@ impl CommandInbox for PostgresCommandInbox {
             ));
         }
 
+        // Scoped advisory lock: closes the TOCTOU window between the
+        // per-scope COUNT below and the INSERT further down. Under Postgres's
+        // default READ COMMITTED isolation those were two separate
+        // statements with nothing serialising them, so two concurrent
+        // `record()` calls for the SAME scope -- different tokio tasks,
+        // different replicas, each on its own connection -- could both read
+        // the count as under quota and both commit, overshooting the
+        // per-scope ceiling the fairness fix below exists to enforce.
+        // `pg_advisory_xact_lock` auto-releases at commit or rollback (unlike
+        // `apply_postgres_schema`'s session-scoped lock/unlock pair in
+        // `postgres_transport.rs`, which is session-scoped on purpose for a
+        // different reason), so a caller that errors out of this function
+        // anywhere below still releases it when `tx` drops.
+        //
+        // Deliberately scoped to `(workspace_id, namespace_id)` via
+        // `hashtext`, not a single fixed key: a global lock here would
+        // serialise every tenant's inserts against each other and defeat the
+        // point of a multi-tenant, scale-first system, to protect a boundary
+        // that only ever needs correctness *per scope*. `hashtext` is a
+        // 32-bit hash, so two different scopes can in principle collide onto
+        // the same lock key; that costs unrelated tenants some extra
+        // serialisation on an unlucky hash collision, which is a performance
+        // detail, not a correctness one -- the count-then-insert below is
+        // still scoped to the caller's own `workspace_id`/`namespace_id`.
+        let scope_lock_key = format!("{}|{}", command.workspace_id, command.namespace_id);
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            &[&scope_lock_key],
+        )
+        .map_err(|_| CommandError::internal())?;
+
+        let scope_count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM apex_control_inbox
+                 WHERE workspace_id = $1 AND namespace_id = $2",
+                &[&command.workspace_id, &command.namespace_id],
+            )
+            .map_err(|_| CommandError::internal())?
+            .get(0);
+        if scope_count >= self.scope_quota as i64 {
+            return Err(CommandError::new(
+                CommandErrorCode::Capacity,
+                "This workspace/namespace has reached its share of the durable command inbox. Retry after operator remediation.",
+            ));
+        }
+
+        // The global ceiling is intentionally left lock-free across scopes.
+        // It can therefore still be overshot by a small margin under extreme
+        // concurrency spanning many *different* scopes recording
+        // simultaneously -- each holds only its own scope's advisory lock, so
+        // several of them can pass this COUNT concurrently the same way the
+        // per-scope count used to. That is an accepted, explicitly-reasoned
+        // tradeoff: the per-scope quota above is the actual security boundary
+        // being protected (one tenant cannot starve every other tenant's
+        // delivery, including an emergency `stop`), not the exact value of
+        // the global number, and a global lock to make the global ceiling
+        // exact would serialise unrelated tenants against each other for a
+        // guarantee this system does not need.
         let count: i64 = tx
             .query_one("SELECT COUNT(*) FROM apex_control_inbox", &[])
             .map_err(|_| CommandError::internal())?
@@ -471,4 +556,168 @@ fn configuration_error() -> CommandError {
         CommandErrorCode::Internal,
         "The control gateway failed to process the request.",
     )
+}
+
+/// Opt-in, like every other live-Postgres test in this repository (mirroring
+/// `apps/event-ingest/src/outbox/postgres_tests_cases.rs`'s `url()`): CI does
+/// not provision a database for this job, so every test here reads
+/// `APEX_CONTROL_POSTGRES_URL` and prints a skip line and returns rather than
+/// failing when it is unset.
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::*;
+
+    fn url() -> Option<String> {
+        std::env::var("APEX_CONTROL_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Distinguishes test runs against a database that is not dropped between
+    /// runs, the same reason `event-ingest`'s postgres tests mint unique
+    /// event ids rather than reusing fixed ones.
+    fn unique_suffix() -> String {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    fn command(
+        command_id: &str,
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: &str,
+    ) -> PendingCommand {
+        PendingCommand {
+            command_id: command_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+            run_id: "run-1".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: "stop".to_owned(),
+            reason_code: Some("operator.request".to_owned()),
+            parameters: Vec::new(),
+            issued_at: "2026-08-08T00:00:00.000000Z".to_owned(),
+            delivery_attempt: 0,
+        }
+    }
+
+    #[test]
+    fn postgres_inbox_connect_rejects_an_invalid_scope_quota() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_CONTROL_POSTGRES_URL");
+            return;
+        };
+        assert!(
+            PostgresCommandInbox::connect(&url, 1_000, 0).is_err(),
+            "a zero per-scope quota must be refused, not treated as unlimited"
+        );
+        assert!(
+            PostgresCommandInbox::connect(&url, 1_000, 1_001).is_err(),
+            "a per-scope quota wider than the global capacity must be refused"
+        );
+    }
+
+    /// The actual regression test for the multi-tenant-fairness finding, at
+    /// the Postgres backend: one workspace/namespace filling its own
+    /// per-scope quota must never block a *different* scope from recording.
+    #[test]
+    fn postgres_inbox_scope_at_its_quota_never_blocks_a_different_scope() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_CONTROL_POSTGRES_URL");
+            return;
+        };
+        let mut inbox = PostgresCommandInbox::connect(&url, 100_000, 1).expect("connect");
+        let suffix = unique_suffix();
+        let scope_a = format!("scope-a-{suffix}");
+        let scope_b = format!("scope-b-{suffix}");
+
+        inbox
+            .record(&command("cmd-1", &scope_a, "ns", "agent-a"))
+            .unwrap();
+        let error = inbox
+            .record(&command("cmd-2", &scope_a, "ns", "agent-a"))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            CommandErrorCode::Capacity,
+            "scope A must be refused once it is at its own quota"
+        );
+
+        assert_eq!(
+            inbox
+                .record(&command("cmd-3", &scope_b, "ns", "agent-b"))
+                .unwrap(),
+            RecordResult::Recorded,
+            "scope B must not be blocked by scope A's exhausted quota"
+        );
+    }
+
+    /// Concurrency regression for the scoped-advisory-lock fix: many
+    /// concurrent `record()` calls against the SAME scope, each on its own
+    /// connection, racing the count-check-then-insert window that used to
+    /// have nothing serialising it under READ COMMITTED. Modelled on
+    /// `event-ingest`'s
+    /// `postgres_outbox_pending_is_claimed_not_merely_listed` and this
+    /// crate's own `concurrent_polls_never_hand_one_command_to_two_callers`:
+    /// a `Barrier` lines every writer up on its own connection and releases
+    /// them together, so the race window is actually exercised rather than
+    /// serialised by accident through connection setup time.
+    #[test]
+    fn postgres_inbox_scope_quota_holds_under_concurrent_writers_to_one_scope() {
+        let Some(url) = url() else {
+            eprintln!("skip postgres inbox: set APEX_CONTROL_POSTGRES_URL");
+            return;
+        };
+        const WRITERS: usize = 12;
+        const QUOTA: usize = 5;
+        let scope = format!("concurrency-scope-{}", unique_suffix());
+
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let mut handles = Vec::new();
+        for index in 0..WRITERS {
+            let url = url.clone();
+            let scope = scope.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || -> Result<RecordResult, CommandError> {
+                let mut inbox =
+                    PostgresCommandInbox::connect(&url, 100_000, QUOTA).expect("connect");
+                let command = command(&format!("cmd-{index}"), &scope, "ns", "agent");
+                barrier.wait();
+                inbox.record(&command)
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("writer thread"))
+            .collect();
+
+        let recorded = results
+            .iter()
+            .filter(|result| matches!(result, Ok(RecordResult::Recorded)))
+            .count();
+        assert_eq!(
+            recorded, QUOTA,
+            "the scoped advisory lock must serialise the count-check-then-insert \
+             race so exactly {QUOTA} of {WRITERS} concurrent writers to one scope \
+             are admitted -- never more, which is exactly the overshoot the \
+             unlocked TOCTOU window used to allow"
+        );
+        for result in &results {
+            match result {
+                Ok(RecordResult::Recorded) => {}
+                Err(error) => assert_eq!(error.code, CommandErrorCode::Capacity),
+                Ok(other) => panic!("unexpected result: {other:?}"),
+            }
+        }
+    }
 }

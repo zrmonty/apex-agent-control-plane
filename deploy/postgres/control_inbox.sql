@@ -32,3 +32,15 @@ CREATE INDEX IF NOT EXISTS apex_control_inbox_delivery_idx
 CREATE INDEX IF NOT EXISTS apex_control_inbox_retention_idx
     ON apex_control_inbox (last_delivered_millis)
     WHERE last_delivered_millis IS NOT NULL;
+
+-- No additional index for the per-`(workspace_id, namespace_id)` quota's
+-- `SELECT COUNT(*) ... WHERE workspace_id = $1 AND namespace_id = $2`
+-- (`PostgresCommandInbox::record`, `inbox_postgres.rs`): the `UNIQUE
+-- (workspace_id, namespace_id, command_id)` constraint above already backs a
+-- btree index with those two columns as its leftmost prefix, so the quota
+-- check is already a plain prefix range scan (index-only, once the visibility
+-- map is warm) on an index this table must carry regardless. A second,
+-- narrower index over just (workspace_id, namespace_id) would duplicate most
+-- of that data on disk and add write amplification to every insert for a
+-- negligible read benefit -- the wrong tradeoff for a hot, multi-tenant write
+-- path.

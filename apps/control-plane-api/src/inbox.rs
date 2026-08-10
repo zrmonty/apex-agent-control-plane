@@ -43,6 +43,27 @@
 //! delivery record and is inside the redelivery window, so a command is handed
 //! to at most one of them. That is asserted by
 //! `concurrent_polls_never_hand_one_command_to_two_callers`.
+//!
+//! The Postgres backend does not have that mutex -- it uses a bounded pool of
+//! independent connections instead, on purpose, so concurrent gateway work
+//! gets row-level locking rather than one process-wide lock. `record`'s
+//! per-scope capacity check therefore takes a scoped `pg_advisory_xact_lock`
+//! of its own to close a count-then-insert TOCTOU window under READ
+//! COMMITTED; see the comment on [`PostgresCommandInbox::record`] and
+//! `postgres_inbox_scope_quota_holds_under_concurrent_writers_to_one_scope`.
+//!
+//! # Capacity
+//!
+//! Two independent ceilings, both enforced on every `record`:
+//!
+//! - [`DEFAULT_INBOX_CAPACITY`] -- one number shared by every tenant.
+//! - [`DEFAULT_INBOX_SCOPE_QUOTA`] -- a per-`(workspace_id, namespace_id)`
+//!   ceiling enforced in *addition* to the global one, so a single scoped
+//!   credential cannot fill the entire shared inbox and block delivery --
+//!   including an emergency `stop` -- to every other tenant. This is the
+//!   actual multi-tenant fairness boundary; see
+//!   `a_scope_at_its_quota_never_blocks_a_different_scope_from_recording` for
+//!   the regression test.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -93,6 +114,38 @@ pub const MAX_COMMANDS_PER_POLL: usize = 64;
 
 /// Ceiling on tracked commands, mirroring the outbox's own capacity bound.
 pub const DEFAULT_INBOX_CAPACITY: usize = 1_000_000;
+
+/// Default and validation ceiling for
+/// `APEX_CONTROL_INBOX_MAX_COMMANDS_PER_SCOPE`: the most tracked commands one
+/// `(workspace_id, namespace_id)` scope may occupy, enforced in *addition* to
+/// [`DEFAULT_INBOX_CAPACITY`].
+///
+/// [`DEFAULT_INBOX_CAPACITY`] is one number shared by every tenant. An
+/// operator credential is commonly scoped to a single workspace/namespace
+/// (`OperatorCaller::scoped` in `auth.rs`; every Keycloak-issued credential
+/// maps IdP claims down to the same narrow scopes in `keycloak.rs`), but
+/// nothing stopped a single scoped credential from filling the *entire*
+/// shared inbox by itself -- a compromised credential, a buggy automation, or
+/// just an unlucky burst from one tenant could leave zero room for every
+/// other tenant's commands, including an emergency `stop`, until an operator
+/// intervened. There was no per-workspace/per-agent quota. This constant is
+/// that quota, and it is the actual security boundary being protected here,
+/// not the global ceiling: it bounds what any one scope may occupy so a
+/// single tenant's burst cannot starve delivery to everyone else, regardless
+/// of how far the global ceiling is from being hit.
+///
+/// **20,000**, chosen in the low tens of thousands deliberately: no
+/// legitimate single tenant should ever need anywhere near the 1,000,000
+/// global ceiling in flight at once, and 20,000 is two orders of magnitude
+/// below it -- a single compromised or malfunctioning scope can consume at
+/// most 2% of the shared inbox before every other tenant is still guaranteed
+/// room for theirs. It is also generous relative to the front door: at the
+/// default admission ceiling (`APEX_CONTROL_ADMISSION_LIMIT`, 50 commands per
+/// operator per second), a single credential sustaining the maximum admitted
+/// rate continuously would still take roughly 6-7 minutes to exhaust its own
+/// quota -- comfortably longer than any legitimate burst, comfortably
+/// shorter than leaving a runaway credential to run for hours.
+pub const DEFAULT_INBOX_SCOPE_QUOTA: usize = 20_000;
 
 const MAX_INBOX_RECORD_BYTES: usize = 512 * 1024;
 const MAX_INBOX_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -327,6 +380,14 @@ struct InboxState {
     /// Settled command identities retained for the idempotency window.
     retired: HashMap<InboxKey, u64>,
     capacity: usize,
+    /// Per-`(workspace_id, namespace_id)` ceiling, enforced in *addition* to
+    /// `capacity`. See [`DEFAULT_INBOX_SCOPE_QUOTA`] for why this exists.
+    scope_quota: usize,
+    /// Live per-scope count of tracked commands -- `entries` plus `retired`,
+    /// the same two buckets `capacity` counts globally -- kept incrementally
+    /// so enforcing `scope_quota` in `record` never has to scan the whole
+    /// inbox.
+    scope_counts: HashMap<(String, String), usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,12 +399,14 @@ struct Entry {
 }
 
 impl InboxState {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, scope_quota: usize) -> Self {
         Self {
             order: Vec::new(),
             entries: HashMap::new(),
             retired: HashMap::new(),
             capacity,
+            scope_quota,
+            scope_counts: HashMap::new(),
         }
     }
 
@@ -355,6 +418,10 @@ impl InboxState {
         }
     }
 
+    fn scope(command: &PendingCommand) -> (String, String) {
+        (command.workspace_id.clone(), command.namespace_id.clone())
+    }
+
     fn record(&mut self, command: &PendingCommand) -> Result<RecordResult, CommandError> {
         let key = Self::key(command);
         if self.entries.contains_key(&key) || self.retired.contains_key(&key) {
@@ -364,6 +431,17 @@ impl InboxState {
             return Err(CommandError::new(
                 CommandErrorCode::Capacity,
                 "The durable command inbox is at capacity. Retry after operator remediation.",
+            ));
+        }
+        let scope = Self::scope(command);
+        // Enforced in *addition* to the global ceiling above. This is what
+        // stops one workspace/namespace from filling the entire shared inbox
+        // and blocking delivery -- including an emergency `stop` -- to every
+        // other tenant. See [`DEFAULT_INBOX_SCOPE_QUOTA`].
+        if self.scope_counts.get(&scope).copied().unwrap_or(0) >= self.scope_quota {
+            return Err(CommandError::new(
+                CommandErrorCode::Capacity,
+                "This workspace/namespace has reached its share of the durable command inbox. Retry after operator remediation.",
             ));
         }
         // A tombstone that has just expired may still have its old key in the
@@ -380,6 +458,7 @@ impl InboxState {
                 acknowledged: false,
             },
         );
+        *self.scope_counts.entry(scope).or_insert(0) += 1;
         Ok(RecordResult::Recorded)
     }
 
@@ -505,8 +584,28 @@ impl InboxState {
 
     fn remove_expired_retired(&mut self, cutoff_millis: u64) -> bool {
         let before = self.retired.len();
-        self.retired
-            .retain(|_, retired_at| *retired_at > cutoff_millis);
+        // Collect first, mutate `scope_counts` after: `retired`'s own borrow
+        // inside `retain`'s closure must not overlap a mutable borrow of a
+        // different field being updated from within it.
+        let mut expired_scopes: Vec<(String, String)> = Vec::new();
+        self.retired.retain(|key, retired_at| {
+            let expired = *retired_at <= cutoff_millis;
+            if expired {
+                expired_scopes.push((key.workspace_id.clone(), key.namespace_id.clone()));
+            }
+            !expired
+        });
+        // The identity is leaving the inbox entirely here (not merely being
+        // retired), so this -- not `retire` -- is where its scope's share is
+        // freed back up.
+        for scope in expired_scopes {
+            if let Some(count) = self.scope_counts.get_mut(&scope) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.scope_counts.remove(&scope);
+                }
+            }
+        }
         before != self.retired.len()
     }
 }
@@ -518,16 +617,22 @@ pub struct InMemoryCommandInbox {
 }
 
 impl InMemoryCommandInbox {
-    pub fn new(capacity: usize) -> Self {
+    /// `scope_quota` is the same per-`(workspace_id, namespace_id)` ceiling
+    /// `FileCommandInbox` and `PostgresCommandInbox` enforce; both are clamped
+    /// to at least 1 rather than rejected outright, matching this type's role
+    /// as the permissive test/embedding backend -- strict startup validation
+    /// (reject zero, reject over capacity) lives on the durable backends'
+    /// `Result`-returning constructors instead.
+    pub fn new(capacity: usize, scope_quota: usize) -> Self {
         Self {
-            state: InboxState::new(capacity.max(1)),
+            state: InboxState::new(capacity.max(1), scope_quota.max(1)),
         }
     }
 }
 
 impl Default for InMemoryCommandInbox {
     fn default() -> Self {
-        Self::new(DEFAULT_INBOX_CAPACITY)
+        Self::new(DEFAULT_INBOX_CAPACITY, DEFAULT_INBOX_SCOPE_QUOTA)
     }
 }
 
@@ -620,8 +725,20 @@ pub struct FileCommandInbox {
 }
 
 impl FileCommandInbox {
-    pub fn open(path: &Path, base: &Path, capacity: usize) -> Result<Self, CommandError> {
+    pub fn open(
+        path: &Path,
+        base: &Path,
+        capacity: usize,
+        scope_quota: usize,
+    ) -> Result<Self, CommandError> {
         if capacity == 0 || capacity > DEFAULT_INBOX_CAPACITY {
+            return Err(configuration_error());
+        }
+        // Same fail-loud discipline as `capacity` immediately above: a
+        // misconfigured per-scope quota (zero, or wider than the global
+        // ceiling it is supposed to sit inside of) is a startup error, not a
+        // value to silently clamp.
+        if scope_quota == 0 || scope_quota > capacity {
             return Err(configuration_error());
         }
         let canonical_base = base.canonicalize().map_err(|_| configuration_error())?;
@@ -667,7 +784,7 @@ impl FileCommandInbox {
             file: Some(file),
             path: path.to_owned(),
             _writer_lock: writer_lock,
-            state: InboxState::new(capacity),
+            state: InboxState::new(capacity, scope_quota),
             delivery_records_since_compaction: 0,
         };
         inbox.load()?;
@@ -1253,7 +1370,7 @@ mod tests {
 
     #[test]
     fn a_recorded_command_is_delivered_once_then_suppressed_for_the_window() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         inbox.record(&command("cmd-1", "agent-a")).unwrap();
         let policy = DeliveryPolicy::default();
 
@@ -1284,7 +1401,7 @@ mod tests {
     /// namespace and the store holds both.
     #[test]
     fn a_command_is_never_delivered_to_another_agent() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         inbox.record(&command("cmd-a", "agent-a")).unwrap();
         inbox.record(&command("cmd-b", "agent-b")).unwrap();
         let policy = DeliveryPolicy::default();
@@ -1304,7 +1421,7 @@ mod tests {
 
     #[test]
     fn a_command_is_never_delivered_across_a_workspace_or_namespace_boundary() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         inbox.record(&command("cmd-1", "agent-a")).unwrap();
         let policy = DeliveryPolicy::default();
         for (workspace, namespace) in [("other", "prod"), ("acme", "staging"), ("other", "staging")]
@@ -1326,7 +1443,7 @@ mod tests {
 
     #[test]
     fn recording_the_same_command_twice_is_idempotent() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         assert_eq!(
             inbox.record(&command("cmd-1", "agent-a")).unwrap(),
             RecordResult::Recorded
@@ -1352,7 +1469,7 @@ mod tests {
 
     #[test]
     fn redelivery_is_bounded_by_the_attempt_ceiling() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         inbox.record(&command("cmd-1", "agent-a")).unwrap();
         let policy = DeliveryPolicy {
             redelivery_after: Duration::from_secs(1),
@@ -1373,7 +1490,7 @@ mod tests {
 
     #[test]
     fn acknowledging_a_delivery_is_idempotent_and_suppresses_redelivery() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         inbox.record(&command("cmd-ack", "agent-a")).unwrap();
         let policy = DeliveryPolicy {
             redelivery_after: Duration::ZERO,
@@ -1410,7 +1527,7 @@ mod tests {
 
     #[test]
     fn the_limit_only_ever_narrows_a_result_set() {
-        let mut inbox = InMemoryCommandInbox::new(16);
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
         for index in 0..5 {
             inbox
                 .record(&command(&format!("cmd-{index}"), "agent-a"))
@@ -1429,10 +1546,121 @@ mod tests {
 
     #[test]
     fn capacity_is_refused_rather_than_silently_dropping_a_command() {
-        let mut inbox = InMemoryCommandInbox::new(1);
+        let mut inbox = InMemoryCommandInbox::new(1, 1);
         inbox.record(&command("cmd-1", "agent-a")).unwrap();
         let error = inbox.record(&command("cmd-2", "agent-a")).unwrap_err();
         assert_eq!(error.code, CommandErrorCode::Capacity);
+    }
+
+    /// The actual regression test for the multi-tenant-fairness finding: one
+    /// workspace/namespace filling its own per-scope quota must never block a
+    /// *different* scope from recording -- including, in production, an
+    /// emergency `stop`. The global ceiling (16) is left far from binding so
+    /// only the per-scope quota (1) can be responsible for either outcome
+    /// below.
+    #[test]
+    fn a_scope_at_its_quota_never_blocks_a_different_scope_from_recording() {
+        let mut inbox = InMemoryCommandInbox::new(16, 1);
+        inbox.record(&command("cmd-1", "agent-a")).unwrap();
+        let error = inbox.record(&command("cmd-2", "agent-a")).unwrap_err();
+        assert_eq!(
+            error.code,
+            CommandErrorCode::Capacity,
+            "acme/prod must be refused once it is at its own quota"
+        );
+
+        let mut other = command("cmd-other", "agent-b");
+        other.workspace_id = "other-workspace".to_owned();
+        other.namespace_id = "other-ns".to_owned();
+        assert_eq!(
+            inbox.record(&other).unwrap(),
+            RecordResult::Recorded,
+            "a scope with room left must not be refused because a different \
+             scope exhausted its own quota"
+        );
+    }
+
+    /// The per-scope ceiling is enforced on its own terms, distinct from the
+    /// global capacity: a generous global ceiling (100) does not save a
+    /// scope from its own tight quota (2).
+    #[test]
+    fn the_scope_quota_is_enforced_independently_of_the_global_capacity() {
+        let mut inbox = InMemoryCommandInbox::new(100, 2);
+        inbox.record(&command("cmd-1", "agent-a")).unwrap();
+        inbox.record(&command("cmd-2", "agent-a")).unwrap();
+        let error = inbox.record(&command("cmd-3", "agent-a")).unwrap_err();
+        assert_eq!(error.code, CommandErrorCode::Capacity);
+        assert_eq!(
+            inbox.pending_count(),
+            2,
+            "the global inbox is nowhere near its own ceiling; only the scope quota fired"
+        );
+    }
+
+    /// Settlement frees a scope's share back up: once a command's tombstone
+    /// expires past the retention window, the identity leaves the inbox
+    /// entirely and the scope is no longer counted against its quota.
+    #[test]
+    fn expiring_a_retired_command_frees_its_scope_quota() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-scope-quota-retire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let policy = DeliveryPolicy {
+            redelivery_after: Duration::ZERO,
+            max_attempts: 1,
+        };
+        let mut inbox = FileCommandInbox::open(&path, &dir, 16, 1).unwrap();
+        inbox.record(&command("cmd-1", "agent-a")).unwrap();
+        assert_eq!(
+            inbox
+                .claim(&target("agent-a"), &acme_prod(), policy, 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        let error = inbox.record(&command("cmd-2", "agent-a")).unwrap_err();
+        assert_eq!(error.code, CommandErrorCode::Capacity);
+
+        // Settle and expire the tombstone.
+        inbox.maintain(1_000, 100, 1).unwrap();
+        inbox.maintain(2_000, 100, 1).unwrap();
+
+        assert_eq!(
+            inbox.record(&command("cmd-2", "agent-a")).unwrap(),
+            RecordResult::Recorded,
+            "once the settled command's identity fully expires, its scope's \
+             quota must be freed for a new command"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_inbox_open_rejects_an_invalid_scope_quota() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-scope-quota-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            FileCommandInbox::open(&dir.join("zero.jsonl"), &dir, 64, 0).is_err(),
+            "a zero per-scope quota must be refused, not treated as unlimited"
+        );
+        assert!(
+            FileCommandInbox::open(&dir.join("over.jsonl"), &dir, 64, 65).is_err(),
+            "a per-scope quota wider than the global capacity must be refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A restarted or duplicated agent process polling concurrently must not
@@ -1444,7 +1672,7 @@ mod tests {
         use std::sync::Arc;
 
         let backend = Arc::new(ControlInboxBackend::new(Box::new(
-            InMemoryCommandInbox::new(64),
+            InMemoryCommandInbox::new(64, 64),
         )));
         backend
             .with_lock(|inbox| inbox.record(&command("cmd-1", "agent-a")))
@@ -1492,7 +1720,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("inbox.jsonl");
         {
-            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
             inbox.record(&command("cmd-1", "agent-a")).unwrap();
             inbox.record(&command("cmd-2", "agent-a")).unwrap();
             let claimed = inbox
@@ -1509,7 +1737,7 @@ mod tests {
             // Reopened: both commands are known and both are inside the
             // redelivery window, so a restarted gateway does not immediately
             // re-serve a command the agent already has.
-            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
             assert_eq!(inbox.undelivered_count(), 0);
             assert!(
                 inbox
@@ -1555,7 +1783,7 @@ mod tests {
             command_id: "cmd-ack".to_owned(),
         };
         {
-            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
             inbox.record(&command("cmd-ack", "agent-a")).unwrap();
             inbox
                 .claim(
@@ -1572,7 +1800,7 @@ mod tests {
                 AckResult::Acknowledged
             );
         }
-        let mut reopened = FileCommandInbox::open(&path, &dir, 64).unwrap();
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
         assert_eq!(
             reopened.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS),
             Ok(Some((DeliveryStatus::Acknowledged, 1)))
@@ -1608,7 +1836,7 @@ mod tests {
             max_attempts: 8,
         };
         {
-            let mut inbox = FileCommandInbox::open(&path, &dir, 64).unwrap();
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
             inbox.record(&command("cmd-1", "agent-a")).unwrap();
             for attempt in 0..8 {
                 assert_eq!(
@@ -1624,7 +1852,7 @@ mod tests {
             let after = std::fs::metadata(&path).unwrap().len();
             assert!(after < before, "compaction must shrink repeated deliveries");
         }
-        let mut reopened = FileCommandInbox::open(&path, &dir, 64).unwrap();
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
         assert_eq!(reopened.undelivered_count(), 0);
         assert!(
             reopened
@@ -1653,7 +1881,7 @@ mod tests {
             max_attempts: 1,
         };
         {
-            let mut inbox = FileCommandInbox::open(&path, &dir, 2).unwrap();
+            let mut inbox = FileCommandInbox::open(&path, &dir, 2, 2).unwrap();
             inbox.record(&command("cmd-1", "agent-a")).unwrap();
             assert_eq!(
                 inbox
@@ -1667,7 +1895,7 @@ mod tests {
             // duplicate submission during the retention window is still a no-op.
             inbox.maintain(1_000, 100, 1).unwrap();
         }
-        let mut inbox = FileCommandInbox::open(&path, &dir, 2).unwrap();
+        let mut inbox = FileCommandInbox::open(&path, &dir, 2, 2).unwrap();
         assert_eq!(
             inbox.record(&command("cmd-1", "agent-a")).unwrap(),
             RecordResult::AlreadyRecorded
@@ -1688,7 +1916,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("apex-inbox-base-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let outside = std::env::temp_dir().join("apex-inbox-escape.jsonl");
-        assert!(FileCommandInbox::open(&outside, &dir, 64).is_err());
+        assert!(FileCommandInbox::open(&outside, &dir, 64, 64).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1703,7 +1931,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut inbox = FileCommandInbox::open(&dir.join("inbox.jsonl"), &dir, 64).unwrap();
+        let mut inbox = FileCommandInbox::open(&dir.join("inbox.jsonl"), &dir, 64, 64).unwrap();
         let mut bad = command("cmd-1", "agent a");
         bad.action = "stop".to_owned();
         assert!(inbox.record(&bad).is_err());

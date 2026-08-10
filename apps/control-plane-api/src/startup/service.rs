@@ -23,7 +23,7 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
     AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source, command_retention,
-    control_postgres_url, control_valkey_env, keycloak_env, metrics_bind_addr,
+    control_postgres_url, control_valkey_env, inbox_scope_quota, keycloak_env, metrics_bind_addr,
     operator_token_source, path, postgres_pool_size, required, resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
@@ -266,20 +266,29 @@ fn build_agent_resolver(
 /// a Postgres outbox gets a Postgres inbox, so every replica sees the same
 /// delivery state; otherwise both remain on the operator-owned file volume.
 fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
+    // Validated eagerly, before either backend is opened, and against the
+    // same capacity both backends are about to be constructed with: a
+    // misconfigured per-scope quota is a startup failure, not something
+    // discovered later on the first `record()` call.
+    let scope_quota = inbox_scope_quota(OUTBOX_CAPACITY)?;
     #[cfg(feature = "postgres")]
     {
         if let Some(url) = control_postgres_url()? {
             let pool_size = postgres_pool_size()?;
             let mut inboxes = Vec::with_capacity(pool_size);
             for _ in 0..pool_size {
-                let inbox = RecoveringPostgresCommandInbox::connect(&url, OUTBOX_CAPACITY)
-                    .map_err(|error| {
-                        format!("failed to open control inbox: {}", error.code.as_str())
-                    })?;
+                let inbox =
+                    RecoveringPostgresCommandInbox::connect(&url, OUTBOX_CAPACITY, scope_quota)
+                        .map_err(|error| {
+                            format!("failed to open control inbox: {}", error.code.as_str())
+                        })?;
                 inboxes
                     .push(Box::new(inbox) as Box<dyn apex_control_plane_api::CommandInbox + Send>);
             }
             println!("apex-control-plane-api inbox backend: postgres");
+            println!(
+                "apex-control-plane-api inbox per-scope quota: {scope_quota} command(s) per workspace/namespace"
+            );
             return ControlInboxBackend::new_pool(inboxes)
                 .map_err(|_| io::Error::other("failed to create control inbox pool").into());
         }
@@ -289,9 +298,12 @@ fn open_inbox() -> Result<ControlInboxBackend, Box<dyn std::error::Error>> {
     let inbox_file = base.join(
         std::env::var("APEX_CONTROL_INBOX_FILE").unwrap_or_else(|_| "inbox.jsonl".to_owned()),
     );
-    let inbox = FileCommandInbox::open(&inbox_file, &base, OUTBOX_CAPACITY)
+    let inbox = FileCommandInbox::open(&inbox_file, &base, OUTBOX_CAPACITY, scope_quota)
         .map_err(|error| format!("failed to open control inbox: {}", error.code.as_str()))?;
     println!("apex-control-plane-api inbox backend: file");
+    println!(
+        "apex-control-plane-api inbox per-scope quota: {scope_quota} command(s) per workspace/namespace"
+    );
     Ok(ControlInboxBackend::new(Box::new(inbox)))
 }
 

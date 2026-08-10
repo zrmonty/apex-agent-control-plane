@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use apex_control_plane_api::DEFAULT_INBOX_SCOPE_QUOTA;
 use apex_event_ingest::NatsTlsConfig;
 
 /// Loopback by default. See [`resolve_bind_addr_value`] for why a non-loopback
@@ -430,6 +431,51 @@ pub(crate) fn admission_limit_value(raw: Option<&str>) -> Result<u32, io::Error>
         return Err(invalid());
     }
     Ok(limit)
+}
+
+/// Per-`(workspace_id, namespace_id)` ceiling on tracked inbox commands,
+/// enforced in *addition* to the shared global inbox capacity every
+/// `CommandInbox` backend already applies. See
+/// `apex_control_plane_api::DEFAULT_INBOX_SCOPE_QUOTA` for why this exists
+/// (an operator credential is commonly scoped to one workspace/namespace, and
+/// nothing previously stopped a single scoped credential from filling the
+/// entire shared inbox and blocking delivery -- including an emergency
+/// `stop` -- to every other tenant) and why 20,000 is the default.
+pub(crate) fn inbox_scope_quota(capacity: usize) -> Result<usize, io::Error> {
+    inbox_scope_quota_value(
+        optional("APEX_CONTROL_INBOX_MAX_COMMANDS_PER_SCOPE").as_deref(),
+        capacity,
+    )
+}
+
+pub(crate) fn inbox_scope_quota_value(
+    raw: Option<&str>,
+    capacity: usize,
+) -> Result<usize, io::Error> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "APEX_CONTROL_INBOX_MAX_COMMANDS_PER_SCOPE must be a positive integer no greater than the inbox capacity ({capacity})"
+            ),
+        )
+    };
+    let quota = raw
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<usize>().map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_INBOX_SCOPE_QUOTA.min(capacity));
+    // Zero is refused rather than treated as "unlimited" -- same rule, same
+    // reason, as `admission_limit_value`: a quota of zero admits nothing for
+    // anybody, which is never what an operator setting this variable meant.
+    // Wider than `capacity` is refused for the same fail-loud-not-clamped
+    // reason every other bounded setting in this file uses: silently
+    // clamping would make the configured number a lie an operator could
+    // never observe.
+    if quota == 0 || quota > capacity {
+        return Err(invalid());
+    }
+    Ok(quota)
 }
 
 /// The control gateway's own Valkey accelerator.

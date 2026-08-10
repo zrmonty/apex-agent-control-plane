@@ -59,6 +59,18 @@
 //! - `APEX_CONTROL_COMMAND_RETENTION_SECS` -- settled command-id retention,
 //!   default 30 days (3600..=31536000). Reusing a command_id is rejected
 //!   during this window and allowed after it expires.
+//! - `APEX_CONTROL_INBOX_MAX_COMMANDS_PER_SCOPE` -- per-`(workspace_id,
+//!   namespace_id)` ceiling on tracked inbox commands, default 20,000,
+//!   enforced in *addition* to the shared global inbox capacity (see
+//!   `apex_control_plane_api::DEFAULT_INBOX_SCOPE_QUOTA`). An operator
+//!   credential is commonly scoped to a single workspace/namespace
+//!   (`OperatorCaller::scoped`, and every Keycloak-issued credential maps
+//!   down to the same narrow scopes); without this ceiling one scoped
+//!   credential -- compromised, buggy automation, or just an unlucky burst --
+//!   could fill the entire shared inbox and block delivery, including an
+//!   emergency `stop`, to every other tenant. Must be a positive integer no
+//!   greater than the inbox capacity; zero and out-of-range values abort
+//!   startup rather than being silently clamped.
 //! - `APEX_CONTROL_NATS_RETRY_ATTEMPTS` -- bounded publish retry ladder,
 //!   default 3 (1..=8), mirroring event-ingest's `APEX_RETRY_ATTEMPTS`.
 //! - `APEX_CONTROL_OPERATOR_TOKENS_FILE` or `APEX_CONTROL_OPERATOR_TOKENS`
