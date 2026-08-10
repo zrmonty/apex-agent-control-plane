@@ -21,8 +21,8 @@ use crate::auth::{OperatorCredentialResolver, OperatorTokenAuthenticator};
 use crate::envelope::{AcceptedCommand, ControlCommandInput, build_control_request};
 use crate::errors::CommandError;
 use crate::inbox::{
-    AckResult, ControlInboxBackend, DeliveryPolicy, DeliveryStatus, InMemoryCommandInbox, InboxKey,
-    PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
+    AckResult, CancelResult, ControlInboxBackend, DeliveryPolicy, DeliveryStatus,
+    InMemoryCommandInbox, InboxKey, PendingCommand, PollTarget, RecordResult, ScopeAuthorizer,
 };
 use crate::outbox::{ControlOutboxBackend, submit_command};
 use crate::proto;
@@ -836,6 +836,67 @@ impl<R: OperatorCredentialResolver> proto::control_gateway_server::ControlGatewa
             next_page_token,
         }))
     }
+
+    /// Retracts a command an operator issued, before it has ever reached its
+    /// target agent.
+    ///
+    /// Authenticated and scope-checked identically to `get_command_status`
+    /// above -- same operator credential space, same
+    /// `operator.allows_scope(workspace_id, namespace_id)` gate, no agent
+    /// identity involved. The only new behaviour is in the inbox: `cancel`
+    /// refuses (rather than performs) the mutation once the command has been
+    /// delivered even once, because at that point the agent may already be
+    /// acting on it and retracting it would recreate exactly the "did the
+    /// agent get it or not" ambiguity the delivery-tracking design in
+    /// `inbox.rs` exists to eliminate.
+    async fn cancel_command(
+        &self,
+        request: tonic::Request<proto::CancelCommandRequest>,
+    ) -> Result<tonic::Response<proto::CancelCommandResponse>, tonic::Status> {
+        let operator = self
+            .auth
+            .authenticate(request.metadata())
+            .map_err(CommandError::into_status)?;
+        let input = request.into_inner();
+        if input.workspace_id.is_empty()
+            || input.namespace_id.is_empty()
+            || input.command_id.is_empty()
+        {
+            return Err(CommandError::invalid_command().into_status());
+        }
+        if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
+            return Err(CommandError::scope_denied().into_status());
+        }
+        let key = InboxKey {
+            workspace_id: input.workspace_id,
+            namespace_id: input.namespace_id,
+            command_id: input.command_id.clone(),
+        };
+        let inbox = self.inbox.clone();
+        let storage_permit = self
+            .storage_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::rate_limited().into_status())?;
+        let now_millis = crate::envelope::now_unix_millis();
+        let result = tokio::task::spawn_blocking(move || {
+            let _storage_permit = storage_permit;
+            inbox.cancel(&key, now_millis)
+        })
+        .await
+        .map_err(|_| CommandError::internal().into_status())?
+        .map_err(CommandError::into_status)?;
+        let (cancelled, already_cancelled) = match result {
+            CancelResult::Cancelled => (true, false),
+            CancelResult::AlreadyCancelled => (false, true),
+            CancelResult::NotFound => (false, false),
+        };
+        Ok(tonic::Response::new(proto::CancelCommandResponse {
+            command_id: input.command_id,
+            cancelled,
+            already_cancelled,
+        }))
+    }
 }
 
 fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliveryState {
@@ -844,6 +905,7 @@ fn delivery_status_to_proto(status: DeliveryStatus) -> proto::CommandDeliverySta
         DeliveryStatus::Delivered => proto::CommandDeliveryState::CommandDeliveryDelivered,
         DeliveryStatus::Acknowledged => proto::CommandDeliveryState::CommandDeliveryAcknowledged,
         DeliveryStatus::Exhausted => proto::CommandDeliveryState::CommandDeliveryExhausted,
+        DeliveryStatus::Cancelled => proto::CommandDeliveryState::CommandDeliveryCancelled,
     }
 }
 
@@ -859,6 +921,7 @@ fn proto_state_to_delivery_status(state: proto::CommandDeliveryState) -> Option<
             Some(DeliveryStatus::Acknowledged)
         }
         proto::CommandDeliveryState::CommandDeliveryExhausted => Some(DeliveryStatus::Exhausted),
+        proto::CommandDeliveryState::CommandDeliveryCancelled => Some(DeliveryStatus::Cancelled),
     }
 }
 
@@ -2115,5 +2178,147 @@ mod tests {
             "agent-a AND Pending must match only cmd-a2, not every agent-a command"
         );
         assert_eq!(combined.commands[0].command_id, "cmd-a2");
+    }
+
+    // --- CancelCommand ----------------------------------------------------
+
+    fn cancel_request(
+        workspace_id: &str,
+        namespace_id: &str,
+        command_id: &str,
+    ) -> tonic::Request<proto::CancelCommandRequest> {
+        let mut request = tonic::Request::new(proto::CancelCommandRequest {
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            command_id: command_id.to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        request
+    }
+
+    fn status_request(
+        workspace_id: &str,
+        namespace_id: &str,
+        command_id: &str,
+    ) -> tonic::Request<proto::GetCommandStatusRequest> {
+        let mut request = tonic::Request::new(proto::GetCommandStatusRequest {
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            command_id: command_id.to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer op-token".parse().unwrap());
+        request
+    }
+
+    /// The success path: an undelivered command can be cancelled, a repeat
+    /// cancellation is idempotent, and -- the property that actually matters
+    /// -- the target agent never sees it on a subsequent poll.
+    #[tokio::test]
+    async fn cancel_command_of_an_undelivered_command_succeeds_and_it_is_never_polled() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x800).await;
+
+        let first = service
+            .cancel_command(cancel_request("acme", "prod", &command_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.cancelled);
+        assert!(!first.already_cancelled);
+
+        let second = service
+            .cancel_command(cancel_request("acme", "prod", &command_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!second.cancelled);
+        assert!(second.already_cancelled);
+
+        let polled = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            polled.commands.is_empty(),
+            "a cancelled command must never be delivered to its agent"
+        );
+
+        let status = service
+            .get_command_status(status_request("acme", "prod", &command_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.state,
+            proto::CommandDeliveryState::CommandDeliveryCancelled as i32
+        );
+    }
+
+    /// The refusal path: once a poll has handed a command to its agent even
+    /// once, the gateway must not cancel it out from under that delivery.
+    #[tokio::test]
+    async fn cancel_command_of_an_already_delivered_command_is_refused() {
+        let service = service_with_two_agents();
+        let command_id = submit_stop_for(&service, "agent-a", 0x801).await;
+        let delivered = service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(delivered.commands.len(), 1);
+
+        let status = service
+            .cancel_command(cancel_request("acme", "prod", &command_id))
+            .await
+            .expect_err("a delivered command must not be cancellable");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+
+        // Refused, not silently no-op'd: the command is still exactly as
+        // delivered as it was, and a second poll after the redelivery window
+        // must still be able to hand it back.
+        let status = service
+            .get_command_status(status_request("acme", "prod", &command_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.state,
+            proto::CommandDeliveryState::CommandDeliveryDelivered as i32
+        );
+    }
+
+    /// Mirrors `submit_command_rejects_a_scope_the_operator_does_not_hold`:
+    /// an operator may only cancel within the workspace/namespace scopes its
+    /// own credential holds, exactly the same gate `get_command_status`
+    /// applies.
+    #[tokio::test]
+    async fn cancel_command_rejects_a_scope_the_operator_does_not_hold() {
+        let service = service();
+        let status = service
+            .cancel_command(cancel_request(
+                "other-workspace",
+                "prod",
+                &fresh_command_id(0x802),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn cancel_command_of_an_unknown_command_id_reports_neither_flag_set() {
+        let service = service();
+        let response = service
+            .cancel_command(cancel_request("acme", "prod", &fresh_command_id(0x803)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.cancelled);
+        assert!(!response.already_cancelled);
     }
 }

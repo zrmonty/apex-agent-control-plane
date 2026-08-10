@@ -331,11 +331,26 @@ pub enum AckResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelResult {
+    Cancelled,
+    /// The same command was already cancelled by an earlier call. Idempotent,
+    /// for the same reason `AckResult::AlreadyAcknowledged` is: an operator
+    /// retrying a cancellation after a lost response must not get an error.
+    AlreadyCancelled,
+    /// No stored command matches this key -- never issued, or its identity
+    /// has already been retired past the idempotency window.
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Pending,
     Delivered,
     Acknowledged,
     Exhausted,
+    /// An operator cancelled this command via `CancelCommand` before it was
+    /// ever delivered. Terminal and durable, the same as `Acknowledged`.
+    Cancelled,
 }
 
 /// The one rule every backend applies to turn attempts/acknowledgement into
@@ -344,11 +359,17 @@ pub enum DeliveryStatus {
 /// place so "what does DELIVERED mean" cannot drift between backends, or
 /// between the two RPCs (`GetCommandStatus`, `ListCommands`) that report it.
 pub(super) fn resolve_delivery_status(
+    cancelled: bool,
     acknowledged: bool,
     attempts: u32,
     max_attempts: u32,
 ) -> DeliveryStatus {
-    if acknowledged {
+    if cancelled {
+        // `cancel` only ever succeeds while `attempts == 0`, so this is
+        // checked first: an entry that is both `cancelled` and, by that
+        // invariant, still at zero attempts must never resolve to `Pending`.
+        DeliveryStatus::Cancelled
+    } else if acknowledged {
         DeliveryStatus::Acknowledged
     } else if attempts == 0 {
         DeliveryStatus::Pending
@@ -408,6 +429,22 @@ pub trait CommandInbox: Send {
         &mut self,
         query: &ListCommandsQuery<'_>,
     ) -> Result<ListCommandsPage, CommandError>;
+
+    /// Retracts a command that has never been delivered.
+    ///
+    /// Operator-initiated, unlike `acknowledge` -- there is deliberately no
+    /// `PollTarget`/agent-identity check here, the same as `status` above.
+    /// The caller's authority is scope, checked by the caller against `key`'s
+    /// `workspace_id`/`namespace_id` before this is ever reached; the inbox
+    /// itself only needs the exact key.
+    ///
+    /// Succeeds only while the command's delivery attempt count is still
+    /// zero. A command delivered even once is refused with
+    /// `CommandErrorCode::AlreadyDelivered` rather than cancelled: the agent
+    /// may already be acting on it, and cancelling it out from under a
+    /// delivery would recreate exactly the "did the agent get it or not"
+    /// ambiguity this module exists to eliminate.
+    fn cancel(&mut self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError>;
 
     /// Retires settled delivery state after the configured idempotency window.
     /// Implementations must preserve the command identity until that window
@@ -470,6 +507,10 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
         (**self).list_commands(query)
     }
 
+    fn cancel(&mut self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError> {
+        (**self).cancel(key, now_millis)
+    }
+
     fn maintain(
         &mut self,
         now_millis: u64,
@@ -521,6 +562,10 @@ struct Entry {
     last_delivered_millis: Option<u64>,
     acknowledged: bool,
     sequence: u64,
+    /// Set by `cancel`. Mutually exclusive with `acknowledged` by
+    /// construction: cancellation only ever succeeds while `attempts == 0`,
+    /// and `acknowledge` requires `attempts >= 1`.
+    cancelled: bool,
 }
 
 impl InboxState {
@@ -617,6 +662,7 @@ impl InboxState {
                 last_delivered_millis: None,
                 acknowledged: false,
                 sequence,
+                cancelled: false,
             },
         );
         *self.scope_counts.entry(scope).or_insert(0) += 1;
@@ -679,6 +725,9 @@ impl InboxState {
             if entry.acknowledged {
                 continue;
             }
+            if entry.cancelled {
+                continue;
+            }
             let visible = match entry.last_delivered_millis {
                 None => true,
                 Some(delivered_at) => {
@@ -731,9 +780,37 @@ impl InboxState {
         AckResult::Acknowledged
     }
 
+    /// Retracts a never-delivered command. See `CommandInbox::cancel` for the
+    /// full contract.
+    fn cancel(&mut self, key: &InboxKey) -> Result<CancelResult, CommandError> {
+        if let Some(entry) = self.entries.get_mut(key) {
+            if entry.cancelled {
+                return Ok(CancelResult::AlreadyCancelled);
+            }
+            if entry.attempts > 0 {
+                return Err(CommandError::already_delivered());
+            }
+            entry.cancelled = true;
+            return Ok(CancelResult::Cancelled);
+        }
+        if self.retired.contains_key(key) {
+            // `retire` (called only from `maintain`) only ever tombstones an
+            // entry that was `acknowledged` or hit the attempt ceiling --
+            // both imply at least one delivery -- so a key found here was
+            // necessarily delivered before its state was cleaned up.
+            return Err(CommandError::already_delivered());
+        }
+        Ok(CancelResult::NotFound)
+    }
+
     fn status(&self, key: &InboxKey, max_attempts: u32) -> Option<(DeliveryStatus, u32)> {
         let entry = self.entries.get(key)?;
-        let status = resolve_delivery_status(entry.acknowledged, entry.attempts, max_attempts);
+        let status = resolve_delivery_status(
+            entry.cancelled,
+            entry.acknowledged,
+            entry.attempts,
+            max_attempts,
+        );
         Some((status, entry.attempts))
     }
 
@@ -768,8 +845,12 @@ impl InboxState {
             {
                 continue;
             }
-            let status =
-                resolve_delivery_status(entry.acknowledged, entry.attempts, query.max_attempts);
+            let status = resolve_delivery_status(
+                entry.cancelled,
+                entry.acknowledged,
+                entry.attempts,
+                query.max_attempts,
+            );
             if let Some(filter) = query.state
                 && filter != status
             {
@@ -903,6 +984,10 @@ impl CommandInbox for InMemoryCommandInbox {
         let (commands, has_more) = self.state.list(query);
         Ok(ListCommandsPage { commands, has_more })
     }
+
+    fn cancel(&mut self, key: &InboxKey, _now_millis: u64) -> Result<CancelResult, CommandError> {
+        self.state.cancel(key)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -927,6 +1012,16 @@ enum InboxRecord {
         namespace_id: String,
         command_id: String,
         retired_at_millis: u64,
+    },
+    /// Durable record of an operator cancellation. Replayed the same way
+    /// `Acknowledged` is: `load()` sets the in-memory flag and discards
+    /// `at_millis`, which exists for the journal's own readability rather
+    /// than to drive any replay decision -- same as `Acknowledged`'s.
+    Cancelled {
+        workspace_id: String,
+        namespace_id: String,
+        command_id: String,
+        at_millis: u64,
     },
 }
 
@@ -1087,6 +1182,20 @@ impl FileCommandInbox {
                         retired_at_millis,
                     );
                 }
+                InboxRecord::Cancelled {
+                    workspace_id,
+                    namespace_id,
+                    command_id,
+                    ..
+                } => {
+                    if let Some(entry) = self.state.entries.get_mut(&InboxKey {
+                        workspace_id,
+                        namespace_id,
+                        command_id,
+                    }) {
+                        entry.cancelled = true;
+                    }
+                }
             }
         }
         Ok(())
@@ -1174,6 +1283,19 @@ impl FileCommandInbox {
             }
             if entry.acknowledged {
                 records.push(InboxRecord::Acknowledged {
+                    workspace_id: key.workspace_id.clone(),
+                    namespace_id: key.namespace_id.clone(),
+                    command_id: key.command_id.clone(),
+                    at_millis: entry.last_delivered_millis.unwrap_or_default(),
+                });
+            }
+            if entry.cancelled {
+                // A cancelled entry is always undelivered (`attempts == 0`),
+                // so there is no delivery timestamp to carry forward; 0 is
+                // consistent with the `Acknowledged` case above, whose
+                // `at_millis` is likewise informational only and discarded on
+                // replay.
+                records.push(InboxRecord::Cancelled {
                     workspace_id: key.workspace_id.clone(),
                     namespace_id: key.namespace_id.clone(),
                     command_id: key.command_id.clone(),
@@ -1373,12 +1495,13 @@ impl CommandInbox for FileCommandInbox {
                 namespace_id: key.namespace_id.clone(),
                 command_id: key.command_id.clone(),
                 at_millis: now_millis,
-            }) {
-                if let Some(entry) = self.state.entries.get_mut(key) {
-                    entry.acknowledged = false;
-                }
-                return Err(error);
+            })
+        {
+            if let Some(entry) = self.state.entries.get_mut(key) {
+                entry.acknowledged = false;
             }
+            return Err(error);
+        }
         Ok(result)
     }
 
@@ -1396,6 +1519,27 @@ impl CommandInbox for FileCommandInbox {
     ) -> Result<ListCommandsPage, CommandError> {
         let (commands, has_more) = self.state.list(query);
         Ok(ListCommandsPage { commands, has_more })
+    }
+
+    fn cancel(&mut self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError> {
+        let result = self.state.cancel(key)?;
+        // Journal after the in-memory mutation, mirroring `acknowledge`: if
+        // the append fails, the in-memory flag is rolled back so the two
+        // never disagree about whether this command is cancelled.
+        if matches!(result, CancelResult::Cancelled)
+            && let Err(error) = self.append(&InboxRecord::Cancelled {
+                workspace_id: key.workspace_id.clone(),
+                namespace_id: key.namespace_id.clone(),
+                command_id: key.command_id.clone(),
+                at_millis: now_millis,
+            })
+        {
+            if let Some(entry) = self.state.entries.get_mut(key) {
+                entry.cancelled = false;
+            }
+            return Err(error);
+        }
+        Ok(result)
     }
 
     fn maintain(
@@ -1572,6 +1716,10 @@ impl ControlInboxBackend {
         query: &ListCommandsQuery<'_>,
     ) -> Result<ListCommandsPage, CommandError> {
         self.with_lock(|inbox| inbox.list_commands(query))?
+    }
+
+    pub fn cancel(&self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError> {
+        self.with_lock(|inbox| inbox.cancel(key, now_millis))?
     }
 }
 
@@ -1768,6 +1916,81 @@ mod tests {
             inbox.status(&key, 3).unwrap(),
             Some((DeliveryStatus::Acknowledged, 1))
         );
+    }
+
+    #[test]
+    fn cancelling_an_undelivered_command_succeeds_and_it_is_never_polled() {
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
+        inbox.record(&command("cmd-cancel", "agent-a")).unwrap();
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-cancel".to_owned(),
+        };
+        assert_eq!(inbox.cancel(&key, 1_000).unwrap(), CancelResult::Cancelled);
+        // Idempotent: a retried cancellation (lost response, operator
+        // double-click) must not error.
+        assert_eq!(
+            inbox.cancel(&key, 1_500).unwrap(),
+            CancelResult::AlreadyCancelled
+        );
+        assert_eq!(
+            inbox.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS).unwrap(),
+            Some((DeliveryStatus::Cancelled, 0))
+        );
+        // The whole point: a cancelled command must never reach a poll.
+        assert!(
+            inbox
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    2_000
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cancelling_an_already_delivered_command_is_refused() {
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
+        inbox
+            .record(&command("cmd-cancel-late", "agent-a"))
+            .unwrap();
+        let delivered = inbox
+            .claim(
+                &target("agent-a"),
+                &acme_prod(),
+                DeliveryPolicy::default(),
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(delivered.len(), 1);
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-cancel-late".to_owned(),
+        };
+        let error = inbox.cancel(&key, 2_000).unwrap_err();
+        assert_eq!(error.code, CommandErrorCode::AlreadyDelivered);
+        // Refused, not silently no-op'd: the command must still be exactly
+        // as deliverable/acknowledgeable as it was before the refused call.
+        assert_eq!(
+            inbox.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS).unwrap(),
+            Some((DeliveryStatus::Delivered, 1))
+        );
+    }
+
+    #[test]
+    fn cancelling_an_unknown_command_id_is_reported_as_not_found() {
+        let mut inbox = InMemoryCommandInbox::new(16, 16);
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-never-issued".to_owned(),
+        };
+        assert_eq!(inbox.cancel(&key, 1_000).unwrap(), CancelResult::NotFound);
     }
 
     #[test]
@@ -2122,6 +2345,103 @@ mod tests {
                 )
                 .unwrap()
                 .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Mirrors `file_inbox_persists_an_acknowledgement_across_restart`: a
+    /// cancellation is journaled the same way an acknowledgement is, so a
+    /// query for the command's status after a restart must still say
+    /// `Cancelled` rather than falling back to "not found" -- which would be
+    /// indistinguishable from a command_id that was never issued at all, a
+    /// real audit-trail regression for a security-relevant control plane.
+    #[test]
+    fn file_inbox_persists_a_cancellation_across_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-cancel".to_owned(),
+        };
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
+            inbox.record(&command("cmd-cancel", "agent-a")).unwrap();
+            assert_eq!(inbox.cancel(&key, 5_000).unwrap(), CancelResult::Cancelled);
+        }
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
+        assert_eq!(
+            reopened.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS),
+            Ok(Some((DeliveryStatus::Cancelled, 0))),
+            "a cancelled command's status must survive a restart, not silently become \
+             indistinguishable from a command_id that was never issued"
+        );
+        // Still never deliverable after the restart.
+        assert!(
+            reopened
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    6_000
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The refusal path (not just the success path) has to hold for the file
+    /// backend too: a command already delivered once must never be
+    /// cancellable, and the journal must show no `Cancelled` record for it --
+    /// which this proves by reopening and checking `Delivered` survives.
+    #[test]
+    fn file_inbox_refuses_to_cancel_an_already_delivered_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-inbox-cancel-refused-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.jsonl");
+        let key = InboxKey {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "cmd-cancel-refused".to_owned(),
+        };
+        {
+            let mut inbox = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
+            inbox
+                .record(&command("cmd-cancel-refused", "agent-a"))
+                .unwrap();
+            let delivered = inbox
+                .claim(
+                    &target("agent-a"),
+                    &acme_prod(),
+                    DeliveryPolicy::default(),
+                    1_000,
+                )
+                .unwrap();
+            assert_eq!(delivered.len(), 1);
+            let error = inbox.cancel(&key, 2_000).unwrap_err();
+            assert_eq!(error.code, CommandErrorCode::AlreadyDelivered);
+        }
+        let mut reopened = FileCommandInbox::open(&path, &dir, 64, 64).unwrap();
+        assert_eq!(
+            reopened.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS),
+            Ok(Some((DeliveryStatus::Delivered, 1))),
+            "a refused cancellation must not have journaled anything"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

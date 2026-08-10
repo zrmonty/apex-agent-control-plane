@@ -26,6 +26,15 @@ pub enum CommandErrorCode {
     IdempotencyInProgress,
     Capacity,
     Internal,
+    /// A `CancelCommand` targeted a command that has already been delivered
+    /// at least once. Refused rather than attempted: the agent may already be
+    /// acting on it, and cancelling it out from under a delivery would
+    /// recreate exactly the "did the agent get it or not" ambiguity the
+    /// inbox's whole delivery-tracking design exists to eliminate. Distinct
+    /// from `InvalidCommand` -- the request is well-formed -- and from
+    /// `IdempotencyConflict` -- there is no field mismatch. The remedy is
+    /// different too: issue a new command, do not retry this one.
+    AlreadyDelivered,
 }
 
 impl CommandErrorCode {
@@ -41,6 +50,7 @@ impl CommandErrorCode {
             Self::IdempotencyInProgress => "IDEMPOTENCY_IN_PROGRESS",
             Self::Capacity => "OUTBOX_CAPACITY",
             Self::Internal => "INTERNAL_FAILURE",
+            Self::AlreadyDelivered => "ALREADY_DELIVERED",
         }
     }
 
@@ -55,6 +65,11 @@ impl CommandErrorCode {
             Self::InvalidCommand | Self::IdempotencyConflict => tonic::Code::InvalidArgument,
             Self::IdempotencyInProgress => tonic::Code::Aborted,
             Self::Internal => tonic::Code::Internal,
+            // The request was well-formed and the identity was found; the
+            // gateway's *state* just does not permit this operation anymore.
+            // That is precisely what FAILED_PRECONDITION means, and it is
+            // distinct from the InvalidArgument codes above.
+            Self::AlreadyDelivered => tonic::Code::FailedPrecondition,
         }
     }
 }
@@ -111,6 +126,14 @@ impl CommandError {
         Self::new(
             CommandErrorCode::InvalidCommand,
             "The command was malformed: check the command identity and delivery fields.",
+        )
+    }
+
+    /// See [`CommandErrorCode::AlreadyDelivered`].
+    pub fn already_delivered() -> Self {
+        Self::new(
+            CommandErrorCode::AlreadyDelivered,
+            "This command has already been delivered to its agent at least once and can no longer be cancelled: the agent may already be acting on it. Issue a new command instead.",
         )
     }
 
