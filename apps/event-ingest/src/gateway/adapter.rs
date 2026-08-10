@@ -49,10 +49,8 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
                 return Err(error);
             }
         };
-        let duplicate = match self.gateway.ingest(caller, request) {
-            Ok(outcome) => matches!(outcome, IngestOutcome::Duplicate),
-            Err(error) => return Err(error),
-        };
+        let outcome = self.gateway.ingest(caller, request)?;
+        let duplicate = matches!(outcome, IngestOutcome::Duplicate);
         Ok(proto::IngestResponse { duplicate })
     }
 }
