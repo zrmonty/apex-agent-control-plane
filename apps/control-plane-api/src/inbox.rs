@@ -2267,7 +2267,7 @@ mod tests {
     /// whether a further page exists.
     #[test]
     fn list_commands_pages_through_results_without_repeats_or_gaps() {
-        let mut inbox = InMemoryCommandInbox::new(64);
+        let mut inbox = InMemoryCommandInbox::new(64, 64);
         for index in 0..5 {
             inbox
                 .record(&command(&format!("cmd-{index}"), "agent-a"))
@@ -2311,7 +2311,7 @@ mod tests {
 
     #[test]
     fn list_commands_filters_by_agent_id_and_by_state_and_can_combine_both() {
-        let mut inbox = InMemoryCommandInbox::new(64);
+        let mut inbox = InMemoryCommandInbox::new(64, 64);
         inbox.record(&command("cmd-a", "agent-a")).unwrap();
         inbox.record(&command("cmd-b", "agent-b")).unwrap();
         // Deliver cmd-a so it is no longer Pending; cmd-b stays Pending.
@@ -2367,7 +2367,7 @@ mod tests {
 
     #[test]
     fn list_commands_is_scoped_to_workspace_and_namespace() {
-        let mut inbox = InMemoryCommandInbox::new(64);
+        let mut inbox = InMemoryCommandInbox::new(64, 64);
         inbox.record(&command("cmd-1", "agent-a")).unwrap(); // acme/prod, via `command()`.
         for (workspace_id, namespace_id) in
             [("other", "prod"), ("acme", "staging"), ("other", "staging")]
