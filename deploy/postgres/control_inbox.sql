@@ -32,3 +32,13 @@ CREATE INDEX IF NOT EXISTS apex_control_inbox_delivery_idx
 CREATE INDEX IF NOT EXISTS apex_control_inbox_retention_idx
     ON apex_control_inbox (last_delivered_millis)
     WHERE last_delivered_millis IS NOT NULL;
+
+-- Supports ListCommands' scope-and-cursor scan: workspace/namespace equality
+-- plus an ascending `sequence` range, the same per-scope ordering
+-- `apex_control_inbox_delivery_idx` already gives the per-agent `claim()`
+-- scan above. Without this, a ListCommands call would fall back to a full
+-- scan of the table ordered by the primary key and filter every row in
+-- application code, which is exactly the OFFSET-shaped cost this index
+-- exists to avoid.
+CREATE INDEX IF NOT EXISTS apex_control_inbox_scope_idx
+    ON apex_control_inbox (workspace_id, namespace_id, sequence);

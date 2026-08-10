@@ -60,6 +60,23 @@ service ControlGateway {
   rpc PollCommands(PollCommandsRequest) returns (PollCommandsResponse);
   rpc AckCommand(AckCommandRequest) returns (AckCommandResponse);
   rpc GetCommandStatus(GetCommandStatusRequest) returns (GetCommandStatusResponse);
+
+  // Enumerates commands recorded for a scope -- "what is currently pending
+  // here" -- for an operator who does not yet know a command_id, which is
+  // exactly the gap GetCommandStatus cannot close: it requires one. This is
+  // the natural precursor to an operator-facing dashboard: it exposes
+  // nothing GetCommandStatus/PollCommands do not already expose per command,
+  // just a scoped, paginated view across many of them at once.
+  //
+  // Operator-authenticated and scope-checked exactly like GetCommandStatus:
+  // the operator credential space, never the agent one, and the same
+  // allows_scope(workspace_id, namespace_id) check. Genuinely paginated and
+  // bounded, the same discipline PollCommands' max_commands already applies:
+  // page_size is clamped into the gateway's own ceiling, and page_token is a
+  // cursor -- resume strictly after the last-seen command -- never an
+  // offset, so a scope being concurrently written to while an operator pages
+  // through it cannot shift already-returned rows or cause a skip/repeat.
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
 }
 
 message ControlCommandRequest {
@@ -191,4 +208,52 @@ enum ControlAction {
   RESUME = 3;
   INJECT = 4;
   SET_BUDGET = 5;
+}
+
+message ListCommandsRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  // Narrows to one agent's commands. Unset returns every agent's commands in
+  // scope. Like PollCommands' max_commands, this can only ever narrow a
+  // result set the caller was already entitled to; there is no field here
+  // that can widen past workspace_id/namespace_id.
+  optional string agent_id = 3;
+  // Narrows to one delivery state. COMMAND_DELIVERY_STATE_UNSPECIFIED (the
+  // default) returns commands in every state.
+  CommandDeliveryState state = 4;
+  // Client hint for the maximum number of summaries to return. The gateway
+  // clamps it into its own bounds (DEFAULT_LIST_COMMANDS_PAGE_SIZE /
+  // MAX_LIST_COMMANDS_PAGE_SIZE in inbox.rs) and applies its own default when
+  // zero.
+  uint32 page_size = 5;
+  // Opaque continuation cursor from a previous response's next_page_token.
+  // Empty starts from the beginning of the scope. This is a cursor, not an
+  // offset: the gateway resumes strictly after the last command the caller
+  // already saw, so commands recorded, delivered, or settled by others while
+  // this caller pages through a large scope can never shift already-returned
+  // rows or cause the caller to skip or repeat one the way an OFFSET would.
+  string page_token = 6;
+}
+
+message ListCommandsResponse {
+  // Command summaries in the scope, oldest first, matching any filters.
+  // Empty is the normal case for an idle scope and is not an error.
+  repeated CommandSummary commands = 1;
+  // Pass back as the next request's page_token to continue. Empty means
+  // there is nothing more to page through.
+  string next_page_token = 2;
+}
+
+// The subset of a command's identity and delivery state useful for an
+// operator scanning a scope -- exactly the fields GetCommandStatus and
+// PendingControlCommand already expose for this, and nothing else: no
+// parameters, no run_id/trace_id/reason_code. An operator who needs those
+// already has the command_id this carries and can look up the full record.
+message CommandSummary {
+  string command_id = 1;
+  string agent_id = 2;
+  ControlAction action = 3;
+  CommandDeliveryState state = 4;
+  uint32 delivery_attempt = 5;
+  string issued_at = 6;
 }
