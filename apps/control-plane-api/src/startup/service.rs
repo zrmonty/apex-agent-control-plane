@@ -11,20 +11,22 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apex_control_plane_api::{
-    BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver, ControlGatewayService,
-    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, GatewayRuntimeMetrics,
-    GatewayShutdown, KeycloakConfig, KeycloakOperatorCredentialResolver,
-    OperatorTokenAuthenticator, SharedEphemeralStore, StaticAgentWorkloadResolver,
-    bounded_control_gateway_server, parse_agent_token_table, parse_operator_token_table,
+    AgentRevocationList, BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver,
+    ControlGatewayService, ControlInboxBackend, ControlOutboxBackend, FileCommandInbox,
+    GatewayRuntimeMetrics, GatewayShutdown, KeycloakConfig, KeycloakOperatorCredentialResolver,
+    MAX_AGENT_REVOCATION_FILE_BYTES, OperatorTokenAuthenticator, RevocationAwareAgentResolver,
+    SharedEphemeralStore, StaticAgentWorkloadResolver, bounded_control_gateway_server,
+    parse_agent_token_table, parse_operator_token_table,
 };
 #[cfg(feature = "postgres")]
 use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use super::env::{
-    AgentTokenSource, OperatorTokenSource, admission_limits, agent_token_source, command_retention,
-    control_postgres_url, control_valkey_env, keycloak_env, metrics_bind_addr,
-    operator_token_source, path, postgres_pool_size, required, resolve_bind_addr,
+    AgentTokenSource, OperatorTokenSource, admission_limits, agent_revocation_env,
+    agent_token_source, command_retention, control_postgres_url, control_valkey_env, keycloak_env,
+    metrics_bind_addr, operator_token_source, path, postgres_pool_size, required,
+    resolve_bind_addr,
 };
 use super::fanout::prepare_control_fanout;
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
@@ -225,6 +227,12 @@ const MAX_AGENT_TABLE_BYTES: usize = 256 * 1024;
 /// simply has no agent that can retrieve them. It is announced loudly on
 /// stderr, because a control channel where nothing can receive a `stop` is the
 /// exact situation this work item exists to make visible rather than silent.
+///
+/// Wraps the resolved table in [`RevocationAwareAgentResolver`] whenever
+/// `APEX_CONTROL_AGENT_REVOCATION_FILE` is configured (see
+/// [`build_agent_revocation_list`]); when it is unset, the returned resolver
+/// is exactly the unwrapped table, so every deployment that predates this
+/// feature is unaffected.
 fn build_agent_resolver(
     trusted_base: &Path,
 ) -> Result<BoxedAgentWorkloadResolver, Box<dyn std::error::Error>> {
@@ -239,26 +247,81 @@ fn build_agent_resolver(
                 true,
                 "APEX_CONTROL_AGENT_TOKENS_FILE",
             )?;
-            read_credential_table(
+            Some(read_credential_table(
                 &table_path,
                 MAX_AGENT_TABLE_BYTES,
                 "APEX_CONTROL_AGENT_TOKENS_FILE",
-            )?
+            )?)
         }
-        AgentTokenSource::Inline(raw) => raw,
+        AgentTokenSource::Inline(raw) => Some(raw),
         AgentTokenSource::Unset => {
             eprintln!(
                 "control-plane-api: neither APEX_CONTROL_AGENT_TOKENS_FILE nor APEX_CONTROL_AGENT_TOKENS is set; no agent will be able to retrieve commands through PollCommands"
             );
             println!("apex-control-plane-api agent credentials: none configured");
-            return Ok(BoxedAgentWorkloadResolver::new(
-                StaticAgentWorkloadResolver::new(),
-            ));
+            None
         }
     };
-    let resolver = parse_agent_token_table(&raw)?;
-    println!("apex-control-plane-api agent credentials: static table");
-    Ok(BoxedAgentWorkloadResolver::new(resolver))
+    let resolver = match raw {
+        Some(raw) => {
+            let resolver = parse_agent_token_table(&raw)?;
+            println!("apex-control-plane-api agent credentials: static table");
+            resolver
+        }
+        None => StaticAgentWorkloadResolver::new(),
+    };
+    match build_agent_revocation_list(trusted_base)? {
+        Some(revocations) => Ok(BoxedAgentWorkloadResolver::new(
+            RevocationAwareAgentResolver::new(resolver, revocations),
+        )),
+        None => Ok(BoxedAgentWorkloadResolver::new(resolver)),
+    }
+}
+
+/// Selects and starts the agent-credential **revocation list**
+/// (`APEX_CONTROL_AGENT_REVOCATION_FILE`), or `None` when it is unset.
+///
+/// The path goes through the same `trusted_secret_path` confinement every
+/// other configured secret path in this crate does, so a tampered env var
+/// cannot point this process at an arbitrary host file, with one difference
+/// from the credential tables: `private` is `false`, because a certificate
+/// fingerprint is public material derived from a certificate, not a secret --
+/// the same call already made for the Keycloak JWKS CA file.
+///
+/// `trusted_secret_path` also refuses a zero-byte file. That is deliberate
+/// here too, not just inherited: a zero-byte file at a configured path is
+/// indistinguishable from a secret mount that was never actually populated,
+/// and this feature must not silently no-op in that case. An operator who
+/// wants "armed, nothing currently revoked" writes a file containing a single
+/// blank line -- see `agent_auth::parse_revocation_list`'s doc.
+///
+/// `AgentRevocationList::start` performs the actual first read and is what
+/// enforces "a configured-but-unreadable path fails startup loudly": unlike
+/// the Keycloak JWKS fetch, there is no acceptable "warn and keep going" here,
+/// because the file is local operator configuration, not an external network
+/// dependency ADR-0006 requires this gateway to tolerate being briefly
+/// unreachable.
+fn build_agent_revocation_list(
+    trusted_base: &Path,
+) -> Result<Option<AgentRevocationList>, Box<dyn std::error::Error>> {
+    let Some(settings) = agent_revocation_env()? else {
+        println!("apex-control-plane-api agent revocation: none configured");
+        return Ok(None);
+    };
+    let revocation_path = trusted_secret_path(
+        &settings.file,
+        trusted_base,
+        MAX_AGENT_REVOCATION_FILE_BYTES as u64,
+        false,
+        "APEX_CONTROL_AGENT_REVOCATION_FILE",
+    )?;
+    let list = AgentRevocationList::start(revocation_path, settings.refresh, settings.max_age)?;
+    println!(
+        "apex-control-plane-api agent revocation: file (refresh {}s, max age {}s)",
+        settings.refresh.as_secs(),
+        settings.max_age.as_secs()
+    );
+    Ok(Some(list))
 }
 
 /// Opens the durable command inbox -- the delivery-state store `PollCommands`

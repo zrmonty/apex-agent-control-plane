@@ -10,10 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::env::{
-    AgentTokenSource, DEFAULT_BIND_ADDR, OperatorTokenSource, admission_limit_value,
-    agent_token_source_value, bounded_secs_value, control_postgres_url_value,
-    command_retention_value, control_valkey_host_value, expected_token_typ_value,
-    fanout_interval_value,
+    AgentRevocationEnv, AgentTokenSource, DEFAULT_BIND_ADDR, OperatorTokenSource,
+    admission_limit_value, agent_revocation_env_value, agent_token_source_value,
+    bounded_secs_value, control_postgres_url_value, command_retention_value,
+    control_valkey_host_value, expected_token_typ_value, fanout_interval_value,
     global_subjects_value, nats_retry_attempts_value, operator_token_source_value,
     metrics_bind_addr_value, resolve_bind_addr_value,
 };
@@ -35,6 +35,71 @@ fn two_configured_agent_credential_sources_are_refused() {
     assert_eq!(
         agent_token_source_value(None, None).unwrap(),
         AgentTokenSource::Unset
+    );
+}
+
+/// Unset means unset: no file, no tuning, no revocation list built --
+/// `APEX_CONTROL_AGENT_TOKENS*` behaves exactly as it did before this feature
+/// existed, which is the compatibility guarantee every deployment predating
+/// it relies on.
+#[test]
+fn agent_revocation_env_is_unset_by_default_and_changes_nothing() {
+    assert_eq!(agent_revocation_env_value(None, None, None).unwrap(), None);
+}
+
+#[test]
+fn agent_revocation_env_parses_the_configured_file_with_default_tuning() {
+    let parsed = agent_revocation_env_value(Some("/run/secrets/agent-revocations"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        parsed,
+        AgentRevocationEnv {
+            file: PathBuf::from("/run/secrets/agent-revocations"),
+            refresh: std::time::Duration::from_secs(5),
+            max_age: std::time::Duration::from_secs(15),
+        }
+    );
+}
+
+#[test]
+fn agent_revocation_env_honours_explicit_tuning() {
+    let parsed = agent_revocation_env_value(
+        Some("/run/secrets/agent-revocations"),
+        Some("2"),
+        Some("30"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(parsed.refresh, std::time::Duration::from_secs(2));
+    assert_eq!(parsed.max_age, std::time::Duration::from_secs(30));
+}
+
+/// Setting the refresh interval or the staleness ceiling without the file
+/// variable is refused rather than silently ignored -- the same
+/// "half-configured reads as a mistake" rule the Keycloak break-glass pair and
+/// the token-typ waiver already follow.
+#[test]
+fn agent_revocation_env_refuses_tuning_without_the_file() {
+    assert!(agent_revocation_env_value(None, Some("2"), None).is_err());
+    assert!(agent_revocation_env_value(None, None, Some("30")).is_err());
+    assert!(agent_revocation_env_value(None, Some("2"), Some("30")).is_err());
+}
+
+#[test]
+fn agent_revocation_env_bounds_tuning_values() {
+    assert!(agent_revocation_env_value(Some("/run/secrets/agent-revocations"), Some("0"), None).is_err());
+    assert!(
+        agent_revocation_env_value(Some("/run/secrets/agent-revocations"), Some("301"), None)
+            .is_err()
+    );
+    assert!(
+        agent_revocation_env_value(Some("/run/secrets/agent-revocations"), None, Some("0"))
+            .is_err()
+    );
+    assert!(
+        agent_revocation_env_value(Some("/run/secrets/agent-revocations"), None, Some("3601"))
+            .is_err()
     );
 }
 

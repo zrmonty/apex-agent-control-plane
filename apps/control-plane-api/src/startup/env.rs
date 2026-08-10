@@ -223,6 +223,97 @@ pub(crate) fn agent_token_source_value(
     }
 }
 
+/// Where the **agent revocation list** comes from -- a background-refreshed
+/// file of certificate fingerprints that are refused regardless of what
+/// [`AgentTokenSource`] would otherwise authenticate. See
+/// `apex_control_plane_api::AgentRevocationList` for the full reasoning.
+///
+/// Unlike the credential tables above, there is no inline variant. The whole
+/// point of this file, as opposed to the static `APEX_CONTROL_AGENT_TOKENS*`
+/// table it sits alongside, is that revoking a compromised agent credential
+/// is "edit a file and wait a few seconds", not "redeploy and wait"; an
+/// inline env var would still need a process restart to change and would
+/// defeat that purpose entirely.
+///
+/// Entirely optional: unset means `APEX_CONTROL_AGENT_TOKENS*` behaves
+/// completely unchanged, which matters for every deployment that predates
+/// this feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRevocationEnv {
+    pub(crate) file: PathBuf,
+    pub(crate) refresh: Duration,
+    pub(crate) max_age: Duration,
+}
+
+/// Default refresh interval for the agent revocation list: **five seconds**.
+/// The feature's reason for existing is that revoking a compromised agent
+/// credential should be meaningfully faster than an env-var edit plus a
+/// redeploy; five seconds keeps "meaningfully faster" true without polling
+/// the filesystem hard enough to matter.
+const DEFAULT_AGENT_REVOCATION_REFRESH_SECS: u64 = 5;
+/// Default staleness ceiling: three refresh intervals, the same ratio
+/// `DEFAULT_JWKS_MAX_AGE_SECS` uses against `DEFAULT_JWKS_REFRESH_SECS` above
+/// and for the same reason -- long enough that one or two transient read
+/// failures (an editor's non-atomic save, a momentarily-missing file
+/// mid-rotation) do not flip every agent credential closed, short enough that
+/// a sustained failure to read the file does so within seconds, not minutes.
+const DEFAULT_AGENT_REVOCATION_MAX_AGE_SECS: u64 = 15;
+
+pub(crate) fn agent_revocation_env() -> Result<Option<AgentRevocationEnv>, io::Error> {
+    agent_revocation_env_value(
+        optional("APEX_CONTROL_AGENT_REVOCATION_FILE").as_deref(),
+        optional("APEX_CONTROL_AGENT_REVOCATION_REFRESH_SECS").as_deref(),
+        optional("APEX_CONTROL_AGENT_REVOCATION_MAX_AGE_SECS").as_deref(),
+    )
+}
+
+/// The two tuning variables require the file variable to be set too. The same
+/// "half-configured reads as a mistake" rule `expected_token_typ_value` and
+/// the Keycloak break-glass pair already follow: an operator who set a
+/// refresh interval and mistyped (or forgot) the file variable should find
+/// out at startup, not conclude after an incident that revocation had been
+/// live the whole time.
+///
+/// The refresh/max-age relationship itself (max age must be at least the
+/// refresh interval) is checked in the library's
+/// `AgentRevocationList::start`, not here, mirroring where
+/// `KeycloakConfig::validate` checks the equivalent JWKS pair rather than
+/// `keycloak_env`.
+pub(crate) fn agent_revocation_env_value(
+    file: Option<&str>,
+    refresh: Option<&str>,
+    max_age: Option<&str>,
+) -> Result<Option<AgentRevocationEnv>, io::Error> {
+    let Some(file) = file else {
+        if refresh.is_some() || max_age.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_CONTROL_AGENT_REVOCATION_REFRESH_SECS and APEX_CONTROL_AGENT_REVOCATION_MAX_AGE_SECS require APEX_CONTROL_AGENT_REVOCATION_FILE to be set",
+            ));
+        }
+        return Ok(None);
+    };
+    let refresh = bounded_secs_value(
+        refresh,
+        DEFAULT_AGENT_REVOCATION_REFRESH_SECS,
+        1,
+        300,
+        "APEX_CONTROL_AGENT_REVOCATION_REFRESH_SECS must be an integer from 1 through 300",
+    )?;
+    let max_age = bounded_secs_value(
+        max_age,
+        DEFAULT_AGENT_REVOCATION_MAX_AGE_SECS,
+        1,
+        3600,
+        "APEX_CONTROL_AGENT_REVOCATION_MAX_AGE_SECS must be an integer from 1 through 3600",
+    )?;
+    Ok(Some(AgentRevocationEnv {
+        file: PathBuf::from(file),
+        refresh,
+        max_age,
+    }))
+}
+
 /// Everything the Keycloak resolver needs, read from the environment.
 ///
 /// The CA arrives here as a *path*; `startup::service` resolves it through

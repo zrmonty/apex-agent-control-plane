@@ -30,9 +30,9 @@ mod service;
 mod status;
 
 pub use agent_auth::{
-    AgentTokenTableError, AgentWorkloadAuthenticator, BoxedAgentWorkloadResolver,
-    StaticAgentWorkloadResolver, agent_workload_subject, parse_agent_token_table,
-    peer_identity_from_request,
+    AgentRevocationError, AgentRevocationList, AgentTokenTableError, AgentWorkloadAuthenticator,
+    BoxedAgentWorkloadResolver, RevocationAwareAgentResolver, StaticAgentWorkloadResolver,
+    agent_workload_subject, parse_agent_token_table, peer_identity_from_request,
 };
 pub use auth::{
     BoxedOperatorCredentialResolver, OperatorCaller, OperatorCredentialResolver,
@@ -72,6 +72,15 @@ pub use status::{GatewayRuntimeMetrics, GatewayRuntimeSnapshot, GatewayShutdown}
 /// envelope ceiling (`apex_event_ingest::MAX_ENVELOPE_BYTES`) plus headroom
 /// for the outer request framing.
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 300 * 1024;
+
+/// Maximum size of the `APEX_CONTROL_AGENT_REVOCATION_FILE`, read in full on
+/// every refresh. One line per revoked fingerprint is roughly 65 bytes, so
+/// this is generous headroom (a few thousand entries) while still bounding
+/// what a mounted file can make this process allocate on a background thread
+/// -- the same size class as `MAX_AGENT_TABLE_BYTES` in
+/// `startup::service`, which this constant lets that module reuse rather than
+/// guess a second number that has to be kept in sync by hand.
+pub const MAX_AGENT_REVOCATION_FILE_BYTES: usize = 256 * 1024;
 
 pub fn install_rustls_provider() {
     apex_event_ingest::install_rustls_provider();

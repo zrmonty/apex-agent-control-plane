@@ -28,9 +28,30 @@
 //! configuration surface, keyed by this crate's own environment variables) and
 //! the peer-certificate extraction, which `event-ingest` keeps `pub(crate)`.
 //! See the module note on [`peer_identity_from_request`].
+//!
+//! # Revocation
+//!
+//! The table above is immutable for the life of the process: it is built
+//! exactly once, at startup, from `APEX_CONTROL_AGENT_TOKENS[_FILE]`, and
+//! never changes afterward. [`AgentRevocationList`] closes the gap that
+//! leaves: if one agent's mTLS client key and bearer token are compromised --
+//! the host running that agent is compromised, precisely the incident this
+//! gateway's `stop`/`pause`/`inject` controls exist to respond to -- an
+//! operator needs to revoke *that one credential* faster than an env-var edit
+//! plus a redeploy. It background-refreshes a set of revoked certificate
+//! fingerprints from a file, structurally the same shape as
+//! [`crate::keycloak`]'s `JwksCache`/`spawn_jwks_refresher`: wholesale
+//! replacement on every successful read, and fail-closed once the cache is
+//! older than a configured ceiling. [`RevocationAwareAgentResolver`] applies
+//! it to any [`BearerTokenResolver`] -- including
+//! [`StaticAgentWorkloadResolver`] -- without changing that type.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 use apex_event_ingest::{
     BearerTokenResolver, BearerTokenVerifier, Caller, CallerVerifier, GatewayError,
@@ -418,6 +439,353 @@ pub fn peer_identity_from_request<T>(request: &tonic::Request<T>) -> Option<Peer
     })
 }
 
+/// How many `\n`-separated fingerprint entries [`parse_revocation_list`]
+/// accepts before refusing the file outright. Sized to
+/// `crate::MAX_AGENT_REVOCATION_FILE_BYTES` divided by roughly 65 bytes per
+/// line (64 hex characters plus a newline), the same way `MAX_AGENT_TOKEN_ENTRIES`
+/// is sized against `MAX_AGENT_TABLE_BYTES` for the credential table.
+const MAX_REVOCATION_ENTRIES: usize = 4096;
+
+/// Retry sooner than the configured refresh interval after a failed read,
+/// mirroring `keycloak::JWKS_RETRY_DELAY` -- so a transient failure (an
+/// operator's editor doing a non-atomic save, or the file being briefly
+/// absent mid-rotation) does not have to wait a full interval before trying
+/// again.
+const REVOCATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Background-refreshed cache of revoked agent certificate fingerprints.
+///
+/// # Why this exists
+///
+/// [`StaticAgentWorkloadResolver`]/[`parse_agent_token_table`] build a table
+/// exactly once, at process startup, from `APEX_CONTROL_AGENT_TOKENS[_FILE]`.
+/// That table never changes for the life of the process. If one agent's mTLS
+/// client key and bearer token are compromised -- the host it runs on is
+/// compromised, which is precisely the class of incident this gateway's
+/// cooperative controls exist to let an operator respond to -- the only way
+/// to revoke *that one credential* today is to edit the env var and
+/// restart/redeploy the whole process. For a control plane whose purpose is
+/// "regain control of a compromised or misbehaving agent quickly", a
+/// revocation path bounded by a redeploy cycle is the gap this type closes.
+///
+/// # Shape
+///
+/// Structurally the mirror of [`crate::keycloak`]'s `JwksCache` /
+/// `spawn_jwks_refresher`, deliberately: a background thread re-reads a file
+/// on a short interval, and every successful read **replaces** the cached set
+/// wholesale rather than merging into it. A fingerprint an operator removes
+/// from the file -- un-revoking a credential, or cleaning the file up after an
+/// incident -- stops being revoked one refresh later; it is never "sticky"
+/// from an earlier read the way a merge would leave it.
+///
+/// # Fail-closed direction
+///
+/// This is the judgment call that matters most here, and it points the
+/// *opposite* way from "just stop checking revocation". Once the cache is
+/// older than `max_age` -- because the file became unreadable or the
+/// refresher thread died -- [`RevocationAwareAgentResolver`] refuses **every**
+/// agent credential, not only the ones that were ever listed.
+///
+/// A stale cache does not mean "no revocations are known"; it means
+/// "revocations of unknown recency are known", and those are not the same
+/// thing to trust. Treating a stale cache as equivalent to "nothing is
+/// revoked" would silently reopen the exact gap this feature exists to close:
+/// a credential revoked five minutes ago, while refreshes were failing, would
+/// keep authenticating as if the incident had never been reported. Trusting
+/// the last known-good set forever has the same flaw on a longer timer.
+/// Refusing everyone is *stricter* than "revocation checking is off" --
+/// an agent whose credential was never revoked is refused too, for as long as
+/// the cache stays stale -- and that asymmetry is deliberate: a gateway whose
+/// entire purpose is regaining control of a compromised agent quickly must
+/// bias toward wrongly refusing a clean agent during an outage over wrongly
+/// admitting a revoked one, because only the second failure is the one an
+/// attacker benefits from. This is exactly the rule
+/// `keycloak::JwksCache::fresh` already applies to operator credentials;
+/// nothing about the reasoning changes for agent ones.
+pub struct AgentRevocationList {
+    cache: Arc<RwLock<RevocationCache>>,
+    max_age: Duration,
+}
+
+#[derive(Debug, Default)]
+struct RevocationCache {
+    fingerprints: Option<HashSet<[u8; 32]>>,
+    fetched_at: Option<Instant>,
+}
+
+impl RevocationCache {
+    fn store(&mut self, fingerprints: HashSet<[u8; 32]>) {
+        self.fingerprints = Some(fingerprints);
+        self.fetched_at = Some(Instant::now());
+    }
+
+    /// The cached set, or `None` when it is absent or older than `max_age`.
+    /// Absence is what makes [`AgentRevocationList`] fail closed -- see its
+    /// doc for why that is the correct direction here.
+    fn fresh(&self, max_age: Duration) -> Option<&HashSet<[u8; 32]>> {
+        match (&self.fingerprints, self.fetched_at) {
+            (Some(set), Some(at)) if at.elapsed() <= max_age => Some(set),
+            _ => None,
+        }
+    }
+}
+
+/// Why an `APEX_CONTROL_AGENT_REVOCATION_FILE` could not be started, or its
+/// tuning was refused. Static reasons only -- the configured path never
+/// appears, the same redaction discipline `KeycloakConfigError` follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentRevocationError(&'static str);
+
+impl std::fmt::Display for AgentRevocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "agent revocation list configuration was refused: {}", self.0)
+    }
+}
+
+impl std::error::Error for AgentRevocationError {}
+
+/// Parses the revocation file body: one hex-encoded SHA-256 certificate
+/// fingerprint per line -- the same 64-character hex form
+/// `parse_certificate_sha256` already accepts for `expected_peer_certificate`
+/// in the `APEX_CONTROL_AGENT_TOKENS` table, so revoking a credential is
+/// "copy the fingerprint you already have into this file".
+///
+/// Blank lines are skipped. That is also how an operator represents "the
+/// feature is armed, nothing is currently revoked" -- a genuinely empty
+/// (zero-byte) file is refused before this function ever runs, by the
+/// `trusted_secret_path` check `startup::service` applies to every configured
+/// secret path, because a zero-byte file at a configured path reads the same
+/// as a secret mount that was never actually populated, and this feature must
+/// not silently no-op in that case.
+///
+/// Any other malformed line is a hard error, never a skip. `parse_agent_token_table`
+/// follows the same rule for the credential table, and it matters even more
+/// here: silently dropping one bad line out of many would leave an operator
+/// believing a specific credential had been revoked when it had not.
+fn parse_revocation_list(raw: &str) -> Result<HashSet<[u8; 32]>, AgentRevocationError> {
+    let mut fingerprints = HashSet::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if fingerprints.len() >= MAX_REVOCATION_ENTRIES {
+            return Err(AgentRevocationError(
+                "the revocation file lists too many fingerprints",
+            ));
+        }
+        let fingerprint = parse_certificate_sha256(line).ok_or(AgentRevocationError(
+            "the revocation file contains a line that is not a 64-character hexadecimal SHA-256 fingerprint",
+        ))?;
+        fingerprints.insert(fingerprint);
+    }
+    Ok(fingerprints)
+}
+
+/// Reads and parses the revocation file. Bounded the same way every other
+/// secret/config file this crate reads is: `max_bytes + 1` are read so an
+/// over-limit file is detected instead of silently truncated into something
+/// that still parses.
+fn read_revocation_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<HashSet<[u8; 32]>, AgentRevocationError> {
+    let file = std::fs::File::open(path).map_err(|_| {
+        AgentRevocationError("unable to read the configured agent revocation file")
+    })?;
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AgentRevocationError("unable to read the configured agent revocation file"))?;
+    if bytes.len() > max_bytes {
+        return Err(AgentRevocationError(
+            "the configured agent revocation file exceeds the size ceiling",
+        ));
+    }
+    let raw = String::from_utf8(bytes)
+        .map_err(|_| AgentRevocationError("the configured agent revocation file is not UTF-8"))?;
+    parse_revocation_list(&raw)
+}
+
+impl AgentRevocationList {
+    /// Validates the refresh/staleness relationship, performs the
+    /// **required** first read, and starts the background refresher.
+    ///
+    /// Unlike `KeycloakOperatorCredentialResolver::start`, whose first JWKS
+    /// fetch is a warning rather than a startup failure -- Keycloak is a
+    /// network dependency this gateway must tolerate being briefly
+    /// unreachable, per ADR-0006 -- the revocation file is local,
+    /// operator-owned configuration, not an external service. There is no
+    /// "briefly unreachable" case to tolerate here, only "the path is wrong"
+    /// or "the file was never actually provisioned". A configured-but-unreadable
+    /// path must therefore fail startup loudly rather than silently come up
+    /// with revocation disabled: an operator who believes they turned on a
+    /// safety feature must never discover, mid-incident, that a typo silently
+    /// turned it off instead.
+    pub fn start(
+        path: PathBuf,
+        refresh: Duration,
+        max_age: Duration,
+    ) -> Result<Self, AgentRevocationError> {
+        if refresh.is_zero() {
+            return Err(AgentRevocationError(
+                "the revocation refresh interval must be positive",
+            ));
+        }
+        if max_age < refresh {
+            return Err(AgentRevocationError(
+                "the revocation staleness ceiling must be at least the refresh interval",
+            ));
+        }
+        let initial = read_revocation_file(&path, crate::MAX_AGENT_REVOCATION_FILE_BYTES)?;
+        let cache = Arc::new(RwLock::new(RevocationCache::default()));
+        {
+            let mut guard = cache.write().map_err(|_| {
+                AgentRevocationError("could not initialize the agent revocation cache")
+            })?;
+            guard.store(initial);
+        }
+        spawn_revocation_refresher(path, refresh, Arc::downgrade(&cache));
+        Ok(Self { cache, max_age })
+    }
+
+    /// Builds a list over an already-known set, with no background thread and
+    /// no file. Tests only -- a deployment must be able to pick up a file edit
+    /// without a restart.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_static_revocations(
+        fingerprints: impl IntoIterator<Item = [u8; 32]>,
+        max_age: Duration,
+    ) -> Self {
+        let mut cache = RevocationCache::default();
+        cache.store(fingerprints.into_iter().collect());
+        Self {
+            cache: Arc::new(RwLock::new(cache)),
+            max_age,
+        }
+    }
+
+    /// True once fingerprints have been loaded and the cache is still inside
+    /// its staleness ceiling. Exposed for the same reason
+    /// `KeycloakOperatorCredentialResolver::keys_are_fresh` is: so a test can
+    /// wait for readiness instead of racing the first read.
+    pub fn is_fresh(&self) -> bool {
+        self.cache
+            .read()
+            .is_ok_and(|cache| cache.fresh(self.max_age).is_some())
+    }
+
+    /// Checks one certificate fingerprint against the current revocation set.
+    ///
+    /// `Err(())` means "the cache is stale or unreadable, so this question
+    /// cannot be answered right now" -- see this type's doc for why every
+    /// caller must treat that as a refusal, never as "not revoked".
+    fn check(&self, fingerprint: &[u8; 32]) -> Result<bool, ()> {
+        let cache = self.cache.read().map_err(|_| ())?;
+        let fresh = cache.fresh(self.max_age).ok_or(())?;
+        Ok(fresh.contains(fingerprint))
+    }
+}
+
+/// Replaces the whole cached set on every successful refresh -- never merges.
+/// See [`AgentRevocationList`]'s doc for why replacement, not merge, is the
+/// point: an un-revoked (removed) fingerprint must stop being refused one
+/// refresh later, the same way a rotated-away JWKS key stops verifying one
+/// refresh later.
+fn spawn_revocation_refresher(
+    path: PathBuf,
+    refresh: Duration,
+    cache: Weak<RwLock<RevocationCache>>,
+) {
+    let mut delay = refresh;
+    let spawned = std::thread::Builder::new()
+        .name("apex-control-agent-revocation".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(delay);
+                // The list has been dropped: stop, rather than keep a
+                // process-lifetime thread alive per constructed list.
+                let Some(cache) = cache.upgrade() else {
+                    return;
+                };
+                match read_revocation_file(&path, crate::MAX_AGENT_REVOCATION_FILE_BYTES) {
+                    Ok(fingerprints) => {
+                        if let Ok(mut guard) = cache.write() {
+                            guard.store(fingerprints);
+                        }
+                        delay = refresh;
+                    }
+                    Err(reason) => {
+                        eprintln!(
+                            "control-plane-api: agent revocation file refresh failed ({reason}); cached revocations expire at the configured max age"
+                        );
+                        delay = REVOCATION_RETRY_DELAY.min(refresh);
+                    }
+                }
+            }
+        });
+    if spawned.is_err() {
+        eprintln!(
+            "control-plane-api: could not start the agent revocation refresher; cached revocations will expire and every agent credential will then be refused"
+        );
+    }
+}
+
+/// Applies [`AgentRevocationList`] to any agent workload resolver, checked
+/// **in addition to**, never instead of, every existing check the wrapped
+/// resolver performs (peer certificate presence, the token-digest lookup, the
+/// pinned-certificate match). Deliberately a wrapper rather than a change to
+/// [`StaticAgentWorkloadResolver`] itself: the static table stays exactly what
+/// it always was, and every one of its existing tests keeps testing exactly
+/// what it always tested.
+pub struct RevocationAwareAgentResolver<R: BearerTokenResolver> {
+    inner: R,
+    revocations: AgentRevocationList,
+}
+
+impl<R: BearerTokenResolver> RevocationAwareAgentResolver<R> {
+    pub fn new(inner: R, revocations: AgentRevocationList) -> Self {
+        Self { inner, revocations }
+    }
+}
+
+impl<R: BearerTokenResolver> BearerTokenResolver for RevocationAwareAgentResolver<R> {
+    fn resolve(&self, token: &str) -> Result<Caller, GatewayError> {
+        // No peer certificate means nothing to check revocation against, and
+        // every resolver in this crate already refuses peer-less resolution
+        // outright -- delegating preserves that rather than reimplementing it.
+        self.inner.resolve(token)
+    }
+
+    fn resolve_with_peer(
+        &self,
+        token: &str,
+        peer: Option<&PeerIdentity>,
+    ) -> Result<Caller, GatewayError> {
+        // Every existing check runs first and unmodified: an unregistered
+        // token, a token presented with the wrong certificate, and a missing
+        // peer identity all still refuse exactly as they did before this
+        // wrapper existed. Revocation is checked in addition to those, never
+        // instead of them.
+        let caller = self.inner.resolve_with_peer(token, peer)?;
+        let Some(peer) = peer else {
+            // Unreachable in practice: `inner.resolve_with_peer` above already
+            // refuses a caller with no peer identity, for every resolver this
+            // crate ships. Kept explicit and fail-closed rather than
+            // `unreachable!()`, so a future resolver that forgets that rule
+            // fails safely here too instead of skipping the revocation check.
+            return Err(GatewayError::unauthenticated());
+        };
+        match self.revocations.check(&peer.certificate_sha256) {
+            Ok(false) => Ok(caller),
+            Ok(true) => Err(GatewayError::unauthenticated()),
+            // The cache is stale: fail closed. See `AgentRevocationList`'s doc
+            // for why this is the correct direction.
+            Err(()) => Err(GatewayError::unauthenticated()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +1006,185 @@ mod tests {
     #[test]
     fn bare_resolve_never_authenticates() {
         assert!(table().resolve("agent-a-token-abcdefgh").is_err());
+    }
+
+    // -- Revocation ----------------------------------------------------
+
+    /// A certificate whose fingerprint is in the revocation list is refused
+    /// even though its token and certificate still match the credential table
+    /// exactly -- revocation is checked in addition to, not instead of, every
+    /// existing check. An unrelated, never-revoked credential is unaffected.
+    #[test]
+    fn a_revoked_certificate_is_refused_even_with_a_valid_token_and_matching_certificate() {
+        let revocations = AgentRevocationList::with_static_revocations(
+            [peer(0xaa).certificate_sha256],
+            Duration::from_secs(60),
+        );
+        let auth =
+            AgentWorkloadAuthenticator::new(RevocationAwareAgentResolver::new(table(), revocations));
+        let error = auth
+            .authenticate(
+                &metadata_with_auth("Bearer agent-a-token-abcdefgh"),
+                Some(&peer(0xaa)),
+            )
+            .expect_err("a revoked certificate must be refused even with a valid token");
+        assert_eq!(error.code, crate::errors::CommandErrorCode::Unauthenticated);
+
+        assert!(
+            auth.authenticate(
+                &metadata_with_auth("Bearer agent-b-token-abcdefgh"),
+                Some(&peer(0xbb)),
+            )
+            .is_ok(),
+            "revocation must be scoped to the listed fingerprint, not every credential"
+        );
+    }
+
+    /// An empty (nothing revoked) but fresh revocation list changes nothing
+    /// about which credentials authenticate -- the wrapper is only ever a
+    /// narrowing of what the inner resolver already allows.
+    #[test]
+    fn an_empty_revocation_list_does_not_affect_authentication() {
+        let revocations =
+            AgentRevocationList::with_static_revocations(std::iter::empty(), Duration::from_secs(60));
+        let auth =
+            AgentWorkloadAuthenticator::new(RevocationAwareAgentResolver::new(table(), revocations));
+        let caller = auth
+            .authenticate(
+                &metadata_with_auth("Bearer agent-a-token-abcdefgh"),
+                Some(&peer(0xaa)),
+            )
+            .expect("an unrevoked credential must still authenticate");
+        assert_eq!(caller.bound_agent_id(), Some("agent-a"));
+    }
+
+    /// The fail-closed direction is the whole point of this feature (see
+    /// `AgentRevocationList`'s doc for the full reasoning): once the cache
+    /// ages past its staleness ceiling, every agent credential is refused,
+    /// including one that was never revoked at all.
+    #[test]
+    fn a_stale_revocation_cache_refuses_every_agent_credential() {
+        // One second, not one millisecond -- the same reasoning
+        // `keycloak::tests::a_stale_key_cache_fails_closed_rather_than_trusting_keys_of_unknown_age`
+        // gives: the first assertion below has to land *inside* the window,
+        // and that has to be reliable on a loaded CI runner, not just locally.
+        let revocations =
+            AgentRevocationList::with_static_revocations(std::iter::empty(), Duration::from_secs(1));
+        assert!(revocations.is_fresh());
+        let auth =
+            AgentWorkloadAuthenticator::new(RevocationAwareAgentResolver::new(table(), revocations));
+        assert!(
+            auth.authenticate(
+                &metadata_with_auth("Bearer agent-a-token-abcdefgh"),
+                Some(&peer(0xaa)),
+            )
+            .is_ok(),
+            "a fresh, empty revocation cache must not refuse an unrevoked agent"
+        );
+        std::thread::sleep(Duration::from_millis(1_400));
+        let error = auth
+            .authenticate(
+                &metadata_with_auth("Bearer agent-a-token-abcdefgh"),
+                Some(&peer(0xaa)),
+            )
+            .expect_err("a stale revocation cache must refuse even an agent that was never revoked");
+        assert_eq!(error.code, crate::errors::CommandErrorCode::Unauthenticated);
+    }
+
+    #[test]
+    fn revocation_file_parsing_skips_blank_lines_and_hard_fails_on_malformed_ones() {
+        let good = hex32(0xaa);
+        let parsed = parse_revocation_list(&format!("\n  \n{good}\n\n"))
+            .expect("blank lines must be skipped");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed.contains(&[0xaa; 32]));
+
+        let too_short = &good[..63];
+        for bad in ["not-hex-at-all", "deadbeef", too_short] {
+            assert!(
+                parse_revocation_list(bad).is_err(),
+                "{bad:?} must be refused, not silently skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn revocation_file_parsing_deduplicates_repeated_fingerprints() {
+        let good = hex32(0xaa);
+        let parsed = parse_revocation_list(&format!("{good}\n{good}\n")).unwrap();
+        assert_eq!(parsed.len(), 1);
+    }
+
+    /// A configured-but-missing revocation file must fail startup loudly, not
+    /// silently come up with revocation disabled -- see `AgentRevocationList::start`'s
+    /// doc for why this differs from the Keycloak JWKS "warn, don't fail"
+    /// split.
+    #[test]
+    fn revocation_list_start_fails_loudly_on_a_missing_file() {
+        let missing = std::env::temp_dir().join(format!(
+            "apex-control-agent-revocation-missing-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        assert!(
+            AgentRevocationList::start(missing, Duration::from_secs(5), Duration::from_secs(15))
+                .is_err(),
+            "a configured but unreadable revocation file must fail startup"
+        );
+    }
+
+    /// The staleness ceiling must be at least the refresh interval, the same
+    /// cross-check `KeycloakConfig::validate` applies to its own JWKS
+    /// refresh/max-age pair.
+    #[test]
+    fn revocation_list_start_refuses_a_ceiling_below_the_refresh_interval() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-agent-revocation-ceiling-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+        std::fs::write(&path, "\n").unwrap();
+        assert!(
+            AgentRevocationList::start(path, Duration::from_secs(10), Duration::from_secs(5))
+                .is_err()
+        );
+    }
+
+    /// The background refresher replaces the cached set wholesale rather than
+    /// merging: a fingerprint removed from the file stops being revoked after
+    /// the next refresh, and a newly added one starts being revoked after it.
+    #[test]
+    fn revocation_list_background_refresh_replaces_the_set_wholesale() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-agent-revocation-refresh-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+        let fingerprint = peer(0xaa).certificate_sha256;
+        std::fs::write(&path, format!("{}\n", hex32(0xaa))).unwrap();
+
+        let list = AgentRevocationList::start(
+            path.clone(),
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        )
+        .expect("a well-formed, readable revocation file must start");
+        assert_eq!(
+            list.check(&fingerprint),
+            Ok(true),
+            "the fingerprint present at startup must be revoked immediately"
+        );
+
+        // Un-revoke by rewriting the file with no entries.
+        std::fs::write(&path, "\n").unwrap();
+        std::thread::sleep(Duration::from_millis(1_000));
+        assert_eq!(
+            list.check(&fingerprint),
+            Ok(false),
+            "removing a fingerprint from the file must un-revoke it, not leave it \
+             stuck from an earlier read"
+        );
     }
 }
