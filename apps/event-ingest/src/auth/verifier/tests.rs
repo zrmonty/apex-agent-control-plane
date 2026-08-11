@@ -18,8 +18,14 @@ fn metadata(value: &[u8]) -> MetadataMap {
     metadata
 }
 
-#[test]
-fn distributed_deny_hint_is_shared_across_verifier_instances() {
+// `record_distributed_failure`/`distributed_deny_hint_active` use
+// `tokio::task::block_in_place`, which requires running inside a task
+// driven by a multi-thread Tokio runtime (matching production: the gateway
+// runtime is built with `worker_threads(4)`). Only tests that attach an
+// ephemeral store exercise that code path -- the rest never touch it and
+// stay plain `#[test]`s.
+#[tokio::test(flavor = "multi_thread")]
+async fn distributed_deny_hint_is_shared_across_verifier_instances() {
     use crate::{EphemeralStore, InMemoryEphemeralStore};
 
     let store: Arc<Mutex<Box<dyn EphemeralStore>>> =
@@ -56,8 +62,8 @@ fn distributed_deny_hint_is_shared_across_verifier_instances() {
     );
 }
 
-#[test]
-fn ephemeral_store_errors_do_not_block_authentication() {
+#[tokio::test(flavor = "multi_thread")]
+async fn ephemeral_store_errors_do_not_block_authentication() {
     use crate::{
         DenyHintKey, EphemeralError, EphemeralStore, FingerprintCounterKey, RateLimitDecision,
         RateLimitKey,
@@ -108,6 +114,40 @@ fn ephemeral_store_errors_do_not_block_authentication() {
             .verify(&metadata(b"Bearer valid-token"))
             .unwrap()
             .is_authenticated()
+    );
+}
+
+/// `accelerator_slots` bounds concurrent blocking-thread round trips into
+/// the shared store; it says nothing about any individual identity's own
+/// budget. Saturating it must degrade `record_distributed_failure` and
+/// `distributed_deny_hint_active` to "no distributed signal this attempt"
+/// -- the same as an unreachable store -- rather than blocking this call or
+/// turning the accelerator's own concurrency limit into a rejection. Mirrors
+/// control-plane-api's saturated-accelerator fallback test.
+#[tokio::test(flavor = "multi_thread")]
+async fn accelerator_slots_saturation_degrades_the_distributed_signal_without_blocking() {
+    use crate::{EphemeralStore, InMemoryEphemeralStore};
+
+    let store: Arc<Mutex<Box<dyn EphemeralStore>>> =
+        Arc::new(Mutex::new(Box::new(InMemoryEphemeralStore::new())));
+    let verifier = BearerTokenVerifier::new(RejectingResolver).with_ephemeral_store(store);
+    // Hold every accelerator concurrency slot for the whole test, without
+    // touching the process-local bucket map at all.
+    let _permits = verifier
+        .accelerator_slots
+        .clone()
+        .try_acquire_many_owned(MAX_ACCELERATOR_AUTH_OPERATIONS as u32)
+        .expect("nothing else has acquired a permit yet");
+    // The local-authoritative path must still decide the call on its own
+    // budget -- first failure for a fresh identity is Unauthenticated, not
+    // an internal error or a hang, even though the distributed counter and
+    // deny-hint check can make zero progress.
+    assert_eq!(
+        verifier
+            .verify(&metadata(b"Bearer saturated-accelerator"))
+            .unwrap_err()
+            .code,
+        GatewayErrorCode::Unauthenticated
     );
 }
 
