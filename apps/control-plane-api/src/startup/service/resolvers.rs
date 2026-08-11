@@ -91,7 +91,7 @@ const MAX_KEYCLOAK_CA_BYTES: usize = 1024 * 1024;
 /// Selects the operator credential verifier.
 ///
 /// Three paths, chosen by explicit configuration and never inferred from one
-/// another (see [`super::env::operator_token_source_value`]):
+/// another (see `startup::env::operator_token_source_value`):
 ///
 /// - **Keycloak** (`APEX_CONTROL_KEYCLOAK_ISSUER`) -- the production path.
 ///   Verifies short-lived, scope-bound credentials Keycloak issued through

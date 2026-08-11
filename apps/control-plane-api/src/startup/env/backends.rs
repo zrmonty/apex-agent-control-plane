@@ -130,9 +130,9 @@ pub(crate) fn control_postgres_url() -> Result<Option<String>, io::Error> {
 /// separate `control-outbox` volume the file backend already gets.
 ///
 /// Seeing both variables set in one process is refused rather than resolved by
-/// precedence, the same rule and for the same reason as the two operator-token
-/// sources above: it means one of two configured durability targets is being
-/// silently ignored, and this is the surface where that matters most.
+/// precedence, the same rule and for the same reason as `credentials`'s two
+/// operator-token sources: it means one of two configured durability targets
+/// is being silently ignored, and this is the surface where that matters most.
 pub(crate) fn control_postgres_url_value(
     control: Option<&str>,
     ingest: Option<&str>,

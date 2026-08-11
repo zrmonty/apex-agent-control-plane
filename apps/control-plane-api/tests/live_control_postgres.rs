@@ -6,7 +6,7 @@
 //! `deploy/compose/compose.gateway-ref.yaml -f compose.control-pg.yaml`.
 //!
 //! These exist because `--features postgres` used to change nothing about the
-//! running binary: `startup::service::open_outbox` unconditionally built a
+//! running binary: `startup::service::storage::open_outbox` unconditionally built a
 //! `FileOutbox`, and the feature only forwarded the dependency to
 //! `apex-event-ingest`. Nothing in this repository could tell the difference,
 //! because every other test either drives the crate in-process (choosing the

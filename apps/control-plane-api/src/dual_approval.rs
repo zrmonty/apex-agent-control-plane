@@ -24,7 +24,7 @@
 //! outbox, not in the inbox, not observable by the target run in any way. A
 //! second, *distinct* operator subject must submit `SubmitCommand` again with
 //! the identical `command_id` and identical command fields; only then does
-//! `service::ControlGatewayService::submit_force_stop` call through to the
+//! `service::submit::ControlGatewayService::submit_force_stop` call through to the
 //! same `build_control_request`/outbox/inbox path every other action uses.
 //! Mirrors the shape `Signed Evidence Bundles.md` documents for its own
 //! two-party export-approval gate (that feature's v2 scope, not yet

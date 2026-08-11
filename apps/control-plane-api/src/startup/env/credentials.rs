@@ -143,8 +143,9 @@ pub(crate) struct AgentRevocationEnv {
 /// the filesystem hard enough to matter.
 const DEFAULT_AGENT_REVOCATION_REFRESH_SECS: u64 = 5;
 /// Default staleness ceiling: three refresh intervals, the same ratio
-/// `DEFAULT_JWKS_MAX_AGE_SECS` uses against `DEFAULT_JWKS_REFRESH_SECS` above
-/// and for the same reason -- long enough that one or two transient read
+/// `startup::env::keycloak::DEFAULT_JWKS_MAX_AGE_SECS` uses against
+/// `startup::env::keycloak::DEFAULT_JWKS_REFRESH_SECS` and for the same
+/// reason -- long enough that one or two transient read
 /// failures (an editor's non-atomic save, a momentarily-missing file
 /// mid-rotation) do not flip every agent credential closed, short enough that
 /// a sustained failure to read the file does so within seconds, not minutes.
