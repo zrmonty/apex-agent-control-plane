@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
+use tokio::task;
 use tonic::transport::server::TlsConnectInfo;
 
 use crate::{
@@ -80,12 +83,19 @@ pub struct BearerTokenVerifier<R: BearerTokenResolver> {
     /// grant an identity its own full `AUTH_FAILURES_PER_SECOND` budget,
     /// multiplying the effective credential-stuffing budget by N.
     ephemeral: Option<Arc<Mutex<Box<dyn EphemeralStore>>>>,
+    /// Bounds concurrent blocking-thread round trips into `ephemeral` made
+    /// by `record_distributed_failure`/`distributed_deny_hint_active`. Says
+    /// nothing about any individual identity's own budget -- saturation
+    /// degrades to "no distributed signal this attempt," never to a
+    /// rejection. Same shape as control-plane-api's `accelerator_slots`.
+    accelerator_slots: Arc<Semaphore>,
 }
 
 const AUTH_FAILURES_PER_SECOND: u32 = 60;
 const AUTH_IN_FLIGHT_PER_IDENTITY: u32 = 32;
 const MAX_AUTH_IDENTITIES: usize = 4096;
 const AUTH_BUCKET_RETENTION: Duration = Duration::from_secs(60);
+const MAX_ACCELERATOR_AUTH_OPERATIONS: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
 struct RateBucket {
@@ -122,6 +132,7 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
             buckets: Arc::new(Mutex::new(HashMap::new())),
             require_peer_identity,
             ephemeral: None,
+            accelerator_slots: Arc::new(Semaphore::new(MAX_ACCELERATOR_AUTH_OPERATIONS)),
         }
     }
 
@@ -206,47 +217,86 @@ impl<R: BearerTokenResolver> BearerTokenVerifier<R> {
     /// each independently granting it a fresh local budget. Best-effort: any
     /// ephemeral-store error is swallowed, leaving the local bucket as the
     /// only ceiling for this attempt.
+    ///
+    /// The store round trip is a blocking socket call behind a
+    /// `std::sync::Mutex` (≤3s command timeout, ≤3s reconnect), and this
+    /// method runs directly on the request's async task via the sync
+    /// `CallerVerifier` trait -- with only 4 Tokio worker threads, a few
+    /// concurrent callers hitting a degraded Valkey could occupy every one
+    /// and stall the process. `block_in_place` tells the runtime this thread
+    /// is about to block so it can keep scheduling other tasks elsewhere,
+    /// and the actual I/O still runs on a `spawn_blocking` thread bounded by
+    /// `accelerator_slots` -- the same shape as control-plane-api's
+    /// `admit`/`admit_poll`, adapted to a synchronous trait method instead
+    /// of an `async fn`. Exhaustion of `accelerator_slots` degrades to "no
+    /// distributed signal this attempt," identical to an unreachable store.
     fn record_distributed_failure(&self, key: RateKey) {
         let Some(store) = &self.ephemeral else {
             return;
         };
-        let Ok(mut guard) = store.lock() else {
+        let Ok(permit) = self.accelerator_slots.clone().try_acquire_owned() else {
             return;
         };
+        let store = Arc::clone(store);
         let namespace = "auth-failures";
         let fingerprint_hex = identity_fingerprint_hex(key);
         let fingerprint = FingerprintCounterKey {
             namespace: namespace.to_owned(),
             fingerprint_hex: fingerprint_hex.clone(),
         };
-        let Ok(count) = guard.increment_fingerprint(&fingerprint, Duration::from_secs(1)) else {
-            return;
-        };
-        if count > u64::from(AUTH_FAILURES_PER_SECOND) {
-            let deny = DenyHintKey {
-                namespace: namespace.to_owned(),
-                identity_fingerprint_hex: fingerprint_hex,
-            };
-            let _ = guard.set_deny_hint(&deny, Duration::from_secs(1));
-        }
+        let _ = task::block_in_place(|| {
+            Handle::current().block_on(task::spawn_blocking(move || {
+                let _permit = permit;
+                let mut guard = store.lock().ok()?;
+                let count = guard
+                    .increment_fingerprint(&fingerprint, Duration::from_secs(1))
+                    .ok()?;
+                if count > u64::from(AUTH_FAILURES_PER_SECOND) {
+                    let deny = DenyHintKey {
+                        namespace: namespace.to_owned(),
+                        identity_fingerprint_hex: fingerprint_hex,
+                    };
+                    let _ = guard.set_deny_hint(&deny, Duration::from_secs(1));
+                }
+                Some(())
+            }))
+        });
     }
 
     /// Cheap cluster-wide short-circuit checked before any local bucket or
     /// resolver work: if another replica already tripped this identity's
     /// distributed deny hint, reject immediately rather than each replica
     /// re-discovering the same overload independently.
+    ///
+    /// Same blocking-I/O and `accelerator_slots` reasoning as
+    /// `record_distributed_failure` above. Any degrade path -- no store
+    /// attached, the concurrency permit is saturated, the lock is poisoned,
+    /// the store errors, or the blocking task panics -- resolves to `false`
+    /// ("not denied"), matching the pre-existing `unwrap_or(false)`
+    /// contract: this signal may only ever accelerate a deny the local
+    /// ceiling would also reach, never manufacture one on its own.
     fn distributed_deny_hint_active(&self, key: RateKey) -> bool {
         let Some(store) = &self.ephemeral else {
             return false;
         };
-        let Ok(mut guard) = store.lock() else {
+        let Ok(permit) = self.accelerator_slots.clone().try_acquire_owned() else {
             return false;
         };
+        let store = Arc::clone(store);
         let deny = DenyHintKey {
             namespace: "auth-failures".to_owned(),
             identity_fingerprint_hex: identity_fingerprint_hex(key),
         };
-        guard.is_denied(&deny).unwrap_or(false)
+        task::block_in_place(|| {
+            Handle::current().block_on(task::spawn_blocking(move || {
+                let _permit = permit;
+                let mut guard = store.lock().ok()?;
+                guard.is_denied(&deny).ok()
+            }))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(false)
     }
 
     fn record_malformed_attempt(&self, peer: Option<&PeerIdentity>) -> Result<(), GatewayError> {
