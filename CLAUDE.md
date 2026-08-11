@@ -89,6 +89,10 @@ python3 deploy/compose/e2e/run_gates.py      # full deploy-time gate suite (Dock
 
 CI (`.github/workflows/ci.yml`): `python-sdk`, `rust-ingest` (test + clippy), `rust-sast` (cargo audit + cargo deny), `python-sast` (bandit + pip-audit), `lab-only-settings-gate`, `signed-bundles`. `.github/workflows/live-mtls-e2e.yml` runs the live-mTLS + Postgres + MinIO gates on a real Docker daemon (push to main/master or manual dispatch; not required on every PR since runner Docker networking can be flaky).
 
+## Conventions
+
+- **File size:** any hand-written source file over 600 lines should be split into smaller files. Applies to source you'd actually edit (Rust `.rs`, Python `.py`, TS/TSX/JS) — not generated code (protobuf stubs, `_generated/`), vendored dependencies, lock files, or fixture/snapshot data, where line count is meaningless and splitting would just fight the generator.
+
 ## Architecture
 
 ### Target dataflow
