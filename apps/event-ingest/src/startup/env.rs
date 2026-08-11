@@ -46,6 +46,75 @@ pub(crate) fn attempts_value(value: Option<&str>) -> Result<usize, io::Error> {
         })
 }
 
+/// How long a `complete` outbox row survives before the retention sweep
+/// (`startup::service::run`'s analogue of the idempotency reaper) prunes it
+/// and compacts the durable journal. Bounds mirror control-plane-api's
+/// `APEX_CONTROL_COMMAND_RETENTION_SECS` (1 hour through 365 days, 30-day
+/// default): both settings retain settled delivery history for the same
+/// operational reconciliation window before it becomes safe to discard.
+pub(crate) fn outbox_retention_secs() -> Result<u64, io::Error> {
+    outbox_retention_secs_value(env::var("APEX_OUTBOX_RETENTION_SECS").ok().as_deref())
+}
+
+pub(crate) fn outbox_retention_secs_value(value: Option<&str>) -> Result<u64, io::Error> {
+    value
+        .unwrap_or("2592000")
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_OUTBOX_RETENTION_SECS must be an integer from 3600 through 31536000",
+            )
+        })
+        .and_then(|value| {
+            if (3_600..=31_536_000).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_OUTBOX_RETENTION_SECS must be an integer from 3600 through 31536000",
+                ))
+            }
+        })
+}
+
+/// How often the outbox retention sweep runs. Kept separate from
+/// `APEX_OUTBOX_RETENTION_SECS` so an operator can tune sweep frequency
+/// without changing how long completed rows are kept, matching
+/// `APEX_IDEMPOTENCY_REAP_INTERVAL_SECS`'s relationship to
+/// `APEX_IDEMPOTENCY_REAP_MAX_AGE_SECS`. Default of one minute matches
+/// control-plane-api's `RETENTION_SWEEP_INTERVAL`, which sweeps the same kind
+/// of durable outbox on the same rhythm.
+pub(crate) fn outbox_retention_interval_secs() -> Result<u64, io::Error> {
+    outbox_retention_interval_secs_value(
+        env::var("APEX_OUTBOX_RETENTION_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn outbox_retention_interval_secs_value(value: Option<&str>) -> Result<u64, io::Error> {
+    value
+        .unwrap_or("60")
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_OUTBOX_RETENTION_INTERVAL_SECS must be an integer from 1 through 86400",
+            )
+        })
+        .and_then(|value| {
+            if (1..=86_400).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_OUTBOX_RETENTION_INTERVAL_SECS must be an integer from 1 through 86400",
+                ))
+            }
+        })
+}
+
 pub(crate) fn allowed_scopes() -> Result<HashSet<String>, io::Error> {
     let scopes_value = required("APEX_ALLOWED_SCOPES")?;
     if scopes_value.len() > 64 * 1024 {

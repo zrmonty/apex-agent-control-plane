@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, TryLockError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
 use tokio::sync::Semaphore;
@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use super::verifier::{CallerVerifier, PeerIdentity};
 use crate::{
     Caller, EphemeralStore, EventPublisher, GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES,
-    PendingEventReplayer, RateLimitKey, proto,
+    OutboxMaintainer, PendingEventReplayer, RateLimitKey, proto,
 };
 
 pub struct AuthenticatedGrpcService<P: EventPublisher, V: CallerVerifier> {
@@ -246,6 +246,72 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
             }
         })
     }
+
+    /// Periodically prunes `complete` outbox rows outside the configured
+    /// retention window and compacts the durable journal. Same shape as
+    /// `spawn_replay_worker`: same locking (a busy adapter just skips this
+    /// tick rather than blocking replay or a live request), same shutdown
+    /// behavior (the caller aborts the returned handle), same error logging.
+    ///
+    /// Without this sweep running somewhere, `EventOutbox::maintain` is never
+    /// called in production even though it is fully implemented: the outbox
+    /// capacity check counts `complete` rows exactly like `pending` ones, so
+    /// a long-running deployment eventually fills to capacity purely from
+    /// settled history and starts refusing every new ingest with
+    /// `IDEMPOTENCY_CAPACITY`.
+    pub fn spawn_outbox_retention_worker(
+        &self,
+        interval: Duration,
+        retention_millis: u64,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        P: OutboxMaintainer + Send + 'static,
+        V: 'static,
+    {
+        let adapter = self.adapter.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let adapter = adapter.clone();
+                let now_millis = now_unix_millis();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut adapter = match adapter.try_lock() {
+                        Ok(adapter) => adapter,
+                        // Never let a maintenance sweep wait behind a live
+                        // admission, replay, or another sweep. The next
+                        // interval retries.
+                        Err(TryLockError::WouldBlock) => return Ok(()),
+                        Err(TryLockError::Poisoned(_)) => {
+                            return Err(GatewayError::internal());
+                        }
+                    };
+                    catch_unwind(AssertUnwindSafe(|| {
+                        adapter.maintain_outbox(now_millis, retention_millis)
+                    }))
+                    .map_err(|_| GatewayError::internal())?
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!(
+                        "event-ingest outbox retention deferred: {}: {}",
+                        error.code.public_code(),
+                        error.summary
+                    ),
+                    Err(_) => eprintln!(
+                        "event-ingest outbox retention deferred: INTERNAL_FAILURE: retention task failed"
+                    ),
+                }
+            }
+        })
+    }
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 pub fn bounded_event_ingest_server<P, V>(
