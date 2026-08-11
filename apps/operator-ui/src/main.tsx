@@ -3,13 +3,12 @@ import { Link, Outlet, RouterProvider, createRootRoute, createRoute, createRoute
 import { Activity, Archive, Bell, Bot, Boxes, ChevronDown, ChevronRight, CircleAlert, Database, FileSearch, Network, Plus, Search, Settings, ShieldCheck, UsersRound } from "lucide-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import "@fontsource/dm-mono/latin-400.css";
-import "@fontsource/dm-mono/latin-500.css";
-import "@fontsource/manrope/latin-400.css";
-import "@fontsource/manrope/latin-500.css";
-import "@fontsource/manrope/latin-600.css";
-import "@fontsource/manrope/latin-700.css";
-import "@fontsource/manrope/latin-800.css";
+import "@fontsource/ibm-plex-mono/latin-400.css";
+import "@fontsource/ibm-plex-mono/latin-500.css";
+import "@fontsource/ibm-plex-sans/latin-400.css";
+import "@fontsource/ibm-plex-sans/latin-500.css";
+import "@fontsource/ibm-plex-sans/latin-600.css";
+import "@fontsource/ibm-plex-sans/latin-700.css";
 import "./styles.css";
 
 const navItems = [["Overview", "/", Activity], ["Agent groups", "/agents", UsersRound], ["Event stream", "/events", Network], ["Findings", "/findings", ShieldCheck], ["Evidence vault", "/evidence", Archive], ["Retention", "/retention", Database], ["Deployment", "/deployment", Boxes]] as const;
