@@ -362,6 +362,48 @@ fn secret_scanner_detects_high_confidence_shapes_without_hash_field_false_positi
     );
 }
 
+/// Regression coverage for the finding where a hash/digest/id-suffixed key
+/// name (e.g. "db_credential_hash") let a live credential value bypass
+/// detection entirely: `is_sensitive_key` used to return `false`
+/// unconditionally for any such key, and separately no content heuristic
+/// caught URL-embedded userinfo credentials. A hash/id-suffixed key must now
+/// only be exempt from the blanket sensitive-key rule when its *value* is
+/// itself hash/id-shaped, and a credentialed URL/connection-string is
+/// flagged as a high-confidence secret regardless of the key name it is
+/// stored under.
+#[test]
+fn secret_scanner_flags_credentials_hidden_behind_hash_suffixed_keys() {
+    // The actual finding: a live connection string with embedded
+    // credentials, stored under a key that merely ends in "_hash", must
+    // still be flagged.
+    assert!(contains_secret_like_value(&serde_json::json!({
+        "db_credential_hash": "postgres://admin:hunter2@db.internal:5432/prod"
+    })));
+    // Same shape under other hash/digest/id-suffixed key names.
+    assert!(contains_secret_like_value(&serde_json::json!({
+        "config_digest": "mysql://root:hunter2@10.0.0.5:3306/app"
+    })));
+    assert!(contains_secret_like_value(&serde_json::json!({
+        "connection_id": "amqp://svc:s3cr3tPass@broker.internal:5672/vhost"
+    })));
+
+    // Legitimate non-secrets under hash/id-suffixed keys must still be left
+    // alone: short opaque identifiers and genuine hash digests are not
+    // credentials, regardless of the key's suffix.
+    assert!(!contains_secret_like_value(&serde_json::json!({
+        "api_key_id": "key-123"
+    })));
+    assert!(!contains_secret_like_value(&serde_json::json!({
+        "password_hash": "deadbeef"
+    })));
+    assert!(!contains_secret_like_value(&serde_json::json!({
+        "password_hash": "a".repeat(64)
+    })));
+    assert!(!contains_secret_like_value(&serde_json::json!({
+        "session_id": 42
+    })));
+}
+
 #[test]
 fn canonical_hash_and_transport_validation_cover_missing_and_invalid_fields() {
     let mut valid = envelope();

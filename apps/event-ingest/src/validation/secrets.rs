@@ -34,7 +34,16 @@ fn contains_secret_like_value_with_context(
         Value::Object(object) => object.iter().any(|(key, value)| {
             let sensitive_key = is_sensitive_key(key);
             let hash_like = is_hash_like_key(key);
-            (sensitive_key && has_sensitive_value(value))
+            // A hash/digest/id-suffixed key (e.g. "password_hash", "api_key_id")
+            // only escapes the blanket "any non-empty value is a secret" rule
+            // when its value itself looks like an opaque hash/id reference, not
+            // when the key name alone ends in a suffix that merely *sounds*
+            // like one. Otherwise a live credential stashed under a
+            // conveniently-suffixed key name (e.g. `db_credential_hash =
+            // "postgres://admin:hunter2@db.internal/prod"`) would be admitted
+            // outright.
+            let exempt_by_value_shape = hash_like && is_plausible_hash_or_id_value(value);
+            (sensitive_key && !exempt_by_value_shape && has_sensitive_value(value))
                 || contains_secret_like_value_with_context(value, control_text, hash_like)
         }),
         Value::Array(values) => values.iter().any(|value| {
@@ -59,10 +68,6 @@ fn normalized_key(key: &str) -> String {
 
 fn is_sensitive_key(key: &str) -> bool {
     let normalized = normalized_key(key);
-    if normalized.ends_with("hash") || normalized.ends_with("digest") || normalized.ends_with("id")
-    {
-        return false;
-    }
     matches!(
         normalized.as_str(),
         "authorization"
@@ -98,6 +103,36 @@ fn is_hash_reference(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Whether a value looks like a plausible hash/digest or opaque identifier
+/// reference rather than a credential. Used to decide whether a hash/digest/
+/// id-suffixed key (see `is_hash_like_key`) may skip the blanket "any
+/// non-empty value under a sensitive key is a secret" rule.
+///
+/// Deliberately conservative: opaque tokens (hex digests, UUIDs, short
+/// alphanumeric ids) are exempt, but anything containing credential/URL
+/// punctuation such as "://", "@", or whitespace is not, so it still falls
+/// through to the ordinary content-based secret heuristics.
+fn is_plausible_hash_or_id_value(value: &Value) -> bool {
+    match value {
+        // Non-string scalars (numeric ids, booleans) are never
+        // credential-shaped.
+        Value::Bool(_) | Value::Number(_) | Value::Null => true,
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return true;
+            }
+            is_hash_reference(trimmed)
+                || (trimmed.len() <= 128
+                    && trimmed.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    }))
+        }
+        Value::Array(values) => values.iter().all(is_plausible_hash_or_id_value),
+        Value::Object(object) => object.values().all(is_plausible_hash_or_id_value),
+    }
+}
+
 fn has_sensitive_value(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -111,6 +146,9 @@ fn has_sensitive_value(value: &Value) -> bool {
 fn high_confidence_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     if lower.contains("-----begin ") && lower.contains("private key-----") {
+        return true;
+    }
+    if looks_like_credentialed_url(text) {
         return true;
     }
     if lower.contains("bearer ") {
@@ -173,6 +211,35 @@ fn high_confidence_secret(text: &str) -> bool {
                 .iter()
                 .all(|character| character.is_ascii_alphanumeric() || *character == '-')
     })
+}
+
+/// Whether `text` contains a URL/connection-string with embedded userinfo
+/// credentials, e.g. `postgres://admin:hunter2@db.internal:5432/prod`.
+/// This is a high-confidence secret shape independent of the field name it
+/// is stored under, which is what actually closes the `db_credential_hash`
+/// bypass: that key name does not match any sensitive-name pattern at all,
+/// so detection must come from the value's own shape.
+fn looks_like_credentialed_url(text: &str) -> bool {
+    let Some(scheme_end) = text.find("://") else {
+        return false;
+    };
+    let after_scheme = &text[scheme_end + 3..];
+    let Some(at_index) = after_scheme.find('@') else {
+        return false;
+    };
+    let authority = &after_scheme[..at_index];
+    // Reject if the "authority" segment isn't actually userinfo (e.g. no `/`
+    // should appear before the `@`, which would mean the `@` is later in the
+    // path rather than a credential separator).
+    if authority.contains('/') || authority.is_empty() {
+        return false;
+    }
+    let Some(colon_index) = authority.find(':') else {
+        return false;
+    };
+    let user = &authority[..colon_index];
+    let password = &authority[colon_index + 1..];
+    !user.is_empty() && !password.is_empty()
 }
 
 fn looks_like_encoded_secret(text: &str) -> bool {
