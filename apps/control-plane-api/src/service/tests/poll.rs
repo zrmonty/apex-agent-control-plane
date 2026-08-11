@@ -438,6 +438,38 @@ async fn poll_is_rate_limited_per_agent_after_the_ceiling() {
         .expect("a different agent must have its own budget");
 }
 
+/// Same defect, same fix, as `admission.rs`'s equivalent test for the
+/// operator ceiling: `accelerator_slots` is a purely local concurrency
+/// limiter on the shared store, not a signal about the polling agent. A
+/// saturated limiter must fall back to the local poll ceiling, not reject a
+/// poll the local ceiling would have allowed.
+#[tokio::test]
+async fn a_saturated_accelerator_concurrency_limit_falls_back_to_the_local_poll_ceiling() {
+    let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(
+        apex_event_ingest::InMemoryEphemeralStore::new(),
+    )));
+    let service = service_with_two_agents().with_ephemeral_store(store);
+    let _permits = service
+        .accelerator_slots
+        .clone()
+        .try_acquire_many_owned(MAX_ACCELERATOR_OPERATIONS as u32)
+        .expect("nothing else has acquired a permit yet");
+    for _ in 0..DEFAULT_MAX_POLLS_PER_WINDOW {
+        service
+            .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+            .await
+            .expect(
+                "polls within the local ceiling must succeed even while the \
+                 accelerator's concurrency limiter is saturated",
+            );
+    }
+    let status = service
+        .poll_commands(poll_request("agent-a-token-abcdefgh", peer(0xaa)))
+        .await
+        .expect_err("the local poll ceiling itself must still apply");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
 /// `AckCommand` shares `PollCommands`' per-agent `admit_poll` ceiling and the
 /// gateway's shared `storage_slots` pool with every other RPC. Without its
 /// own admission check, an agent could spend an unbounded number of

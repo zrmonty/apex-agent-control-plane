@@ -283,13 +283,15 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     ///    that exists to stop a compromised operator credential flooding the
     ///    durable outbox.
     /// 2. The **process-local** ceiling, always. It is the hard floor: if the
-    ///    accelerator is unreachable, misbehaving, or its lock is poisoned,
-    ///    admission falls back to it rather than failing open. This is
-    ///    `event-ingest`'s own pattern (`auth/service.rs::admit_request`
-    ///    swallows the store's `Err` and lets the local buckets decide) and it
-    ///    is deliberate: an *explicitly non-authoritative* accelerator must
-    ///    never be able to take a control channel down with it, and must never
-    ///    be able to authorise more than the local bucket would.
+    ///    accelerator is unreachable, misbehaving, its lock is poisoned, or
+    ///    its own concurrency limiter (`accelerator_slots`, below) is
+    ///    saturated, admission falls back to it rather than failing open --
+    ///    or, in the saturated case, failing shut. This is `event-ingest`'s
+    ///    own pattern (`auth/service.rs::admit_request` swallows the store's
+    ///    `Err` and lets the local buckets decide) and it is deliberate: an
+    ///    *explicitly non-authoritative* accelerator must never be able to
+    ///    take a control channel down with it, and must never be able to
+    ///    authorise more than the local bucket would.
     ///
     /// The shared check runs on a blocking thread. `FallbackEphemeralStore`'s
     /// circuit breaker already bounds *how often* a dead accelerator is
@@ -302,24 +304,31 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     /// `spawn_blocking`.
     async fn admit(&self, subject: &str) -> Result<(), CommandError> {
         if let Some(store) = &self.ephemeral {
-            let permit = self
-                .accelerator_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CommandError::rate_limited())?;
-            let store = Arc::clone(store);
-            let key = control_admission_rate_limit_key(subject);
-            let limit = self.limit;
-            let window = self.window;
-            let shared = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let Ok(mut guard) = store.lock() else {
-                    return None;
-                };
-                guard.check_rate_limit(&key, limit, window).ok()
-            })
-            .await
-            .map_err(|_| CommandError::internal())?;
+            let shared = match self.accelerator_slots.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    let store = Arc::clone(store);
+                    let key = control_admission_rate_limit_key(subject);
+                    let limit = self.limit;
+                    let window = self.window;
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        let Ok(mut guard) = store.lock() else {
+                            return None;
+                        };
+                        guard.check_rate_limit(&key, limit, window).ok()
+                    })
+                    .await
+                    .map_err(|_| CommandError::internal())?
+                }
+                // `accelerator_slots` bounds concurrent blocking-thread
+                // round trips into the accelerator; it says nothing about
+                // `subject`. Treat exhaustion the same as an unreachable or
+                // lock-poisoned store -- no decision, fall through to the
+                // local floor -- rather than rejecting an admission the
+                // local ceiling would have allowed just because unrelated
+                // callers currently hold every permit.
+                Err(_) => None,
+            };
             if let Some(decision) = shared
                 && !decision.allowed
             {
@@ -351,24 +360,25 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
     /// channel that has to keep working when things are already bad.
     async fn admit_poll(&self, subject: &str) -> Result<(), CommandError> {
         if let Some(store) = &self.ephemeral {
-            let permit = self
-                .accelerator_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CommandError::rate_limited())?;
-            let store = Arc::clone(store);
-            let key = control_poll_rate_limit_key(subject);
-            let limit = self.poll_limit;
-            let window = self.window;
-            let shared = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let Ok(mut guard) = store.lock() else {
-                    return None;
-                };
-                guard.check_rate_limit(&key, limit, window).ok()
-            })
-            .await
-            .map_err(|_| CommandError::internal())?;
+            let shared = match self.accelerator_slots.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    let store = Arc::clone(store);
+                    let key = control_poll_rate_limit_key(subject);
+                    let limit = self.poll_limit;
+                    let window = self.window;
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        let Ok(mut guard) = store.lock() else {
+                            return None;
+                        };
+                        guard.check_rate_limit(&key, limit, window).ok()
+                    })
+                    .await
+                    .map_err(|_| CommandError::internal())?
+                }
+                // Same degrade-to-local-floor reasoning as `admit` above.
+                Err(_) => None,
+            };
             if let Some(decision) = shared
                 && !decision.allowed
             {

@@ -174,6 +174,48 @@ async fn a_permissive_shared_store_cannot_raise_the_local_ceiling() {
     assert_eq!(accepted_across(&replicas, 64).await, 16);
 }
 
+/// `accelerator_slots` bounds how many blocking-thread round trips into the
+/// shared store run at once; it says nothing about any individual subject's
+/// own admission. Saturating it must degrade to the local ceiling exactly
+/// like an unreachable or lock-poisoned store (the test above), not reject
+/// an admission the local ceiling would have allowed just because unrelated
+/// callers currently hold every permit.
+#[tokio::test]
+async fn a_saturated_accelerator_concurrency_limit_falls_back_to_the_local_ceiling_rather_than_failing_shut()
+ {
+    let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(
+        apex_event_ingest::InMemoryEphemeralStore::new(),
+    )));
+    let service = service()
+        .with_admission_limits(8, std::time::Duration::from_secs(60))
+        .with_ephemeral_store(store);
+    // Hold every accelerator concurrency slot for the whole test, without
+    // touching the process-local ceiling at all.
+    let _permits = service
+        .accelerator_slots
+        .clone()
+        .try_acquire_many_owned(MAX_ACCELERATOR_OPERATIONS as u32)
+        .expect("nothing else has acquired a permit yet");
+    for index in 0..8 {
+        let mut request = stop_request();
+        request.command_id = Some(fresh_command_id(0x6000 + index));
+        service
+            .submit_command(authed_request(request))
+            .await
+            .expect(
+                "admission within the local ceiling must succeed even while the \
+                 accelerator's concurrency limiter is saturated",
+            );
+    }
+    let mut request = stop_request();
+    request.command_id = Some(fresh_command_id(0x6100));
+    let status = service
+        .submit_command(authed_request(request))
+        .await
+        .expect_err("the local ceiling itself must still apply");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
 /// The control gateway's admission counters must be unreachable from the
 /// ingest workload's keyspace. `event-ingest` keys its own admission
 /// bucket on the envelope's `workspace_id` (or `unscoped`); this namespace
