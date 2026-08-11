@@ -2,7 +2,10 @@ use super::auth::{
     FileBearerResolver, constant_time_token_eq, default_bearer_subject,
     parse_bearer_peer_certificate_sha256, validate_bearer_subject,
 };
-use super::env::{attempts_value, optional_path_value, required, valid_identifier, valid_scope};
+use super::env::{
+    attempts_value, optional_path_value, outbox_retention_interval_secs_value,
+    outbox_retention_secs_value, required, valid_identifier, valid_scope,
+};
 use super::error::startup_gateway_error;
 use super::secrets::{read_bounded, read_token, trusted_secret_path};
 use apex_event_ingest::{BearerTokenResolver, GatewayError, PeerIdentity};
@@ -42,6 +45,33 @@ fn scope_and_retry_configuration_reject_ambiguous_values() {
     assert!(attempts_value(Some("9")).is_err());
     assert!(attempts_value(Some("not-a-number")).is_err());
     assert!(attempts_value(Some("-1")).is_err());
+}
+
+#[test]
+fn outbox_retention_configuration_defaults_and_bounds() {
+    // Default of 30 days, matching control-plane-api's command retention.
+    assert_eq!(outbox_retention_secs_value(None).unwrap(), 2_592_000);
+    assert_eq!(outbox_retention_secs_value(Some("3600")).unwrap(), 3_600);
+    assert_eq!(
+        outbox_retention_secs_value(Some("31536000")).unwrap(),
+        31_536_000
+    );
+    assert!(outbox_retention_secs_value(Some("3599")).is_err());
+    assert!(outbox_retention_secs_value(Some("31536001")).is_err());
+    assert!(outbox_retention_secs_value(Some("0")).is_err());
+    assert!(outbox_retention_secs_value(Some("not-a-number")).is_err());
+    assert!(outbox_retention_secs_value(Some("-1")).is_err());
+
+    // Default of one minute, matching control-plane-api's retention sweep tick.
+    assert_eq!(outbox_retention_interval_secs_value(None).unwrap(), 60);
+    assert_eq!(outbox_retention_interval_secs_value(Some("1")).unwrap(), 1);
+    assert_eq!(
+        outbox_retention_interval_secs_value(Some("86400")).unwrap(),
+        86_400
+    );
+    assert!(outbox_retention_interval_secs_value(Some("0")).is_err());
+    assert!(outbox_retention_interval_secs_value(Some("86401")).is_err());
+    assert!(outbox_retention_interval_secs_value(Some("not-a-number")).is_err());
 }
 
 #[test]

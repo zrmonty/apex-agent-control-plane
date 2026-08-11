@@ -17,7 +17,10 @@ use super::auth::{
     FileBearerResolver, bearer_agent_id, bearer_peer_certificate_sha256, bearer_subject,
     require_single_agent_file_bearer_ack,
 };
-use super::env::{allowed_scopes, attempts, optional_path, path, required};
+use super::env::{
+    allowed_scopes, attempts, optional_path, outbox_retention_interval_secs,
+    outbox_retention_secs, path, required,
+};
 use super::error::startup_gateway_error;
 use super::secrets::{read_bounded, read_token, trusted_secret_path};
 
@@ -109,6 +112,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "APEX_SECURITY_ALERT_CAPACITY must be a positive integer",
             )
         })?;
+    // Validated up front like every other startup setting even though it is
+    // only consumed once the runtime below spawns the retention sweep: a
+    // malformed value must fail fast at startup, not silently disable the
+    // sweep the first time it ticks.
+    let outbox_retention_secs = outbox_retention_secs()?;
+    let outbox_retention_interval_secs = outbox_retention_interval_secs()?;
     let gateway = if let Some(journal_path) = optional_path("APEX_SECURITY_FINDINGS_FILE")? {
         let journal_base = optional_path("APEX_SECURITY_FINDINGS_BASE")?.ok_or_else(|| {
             io::Error::new(
@@ -202,6 +211,16 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         // Borrows `service` to clone its internal Arc handles, so the service
         // itself can still be moved into the router below.
         let _replay_worker = service.spawn_replay_worker(Duration::from_secs(5));
+        // See FINDING #5: `EventOutbox::maintain` was fully implemented and
+        // unit-tested but had no production call site, so the outbox
+        // capacity check (which counts `complete` rows identically to
+        // `pending` ones) could eventually fill from settled history alone
+        // and refuse all new ingest with `IDEMPOTENCY_CAPACITY`. This sweep
+        // is that missing call site.
+        let _outbox_retention_worker = service.spawn_outbox_retention_worker(
+            Duration::from_secs(outbox_retention_interval_secs),
+            outbox_retention_secs.saturating_mul(1000),
+        );
         Server::builder()
             .tls_config(tls)?
             .add_service(bounded_event_ingest_server(service))

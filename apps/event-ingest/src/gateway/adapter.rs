@@ -1,7 +1,7 @@
 use super::IngestOutcome;
 use super::core::IngestGateway;
 use super::publisher::EventPublisher;
-use crate::outbox::PendingEventReplayer;
+use crate::outbox::{OutboxMaintainer, PendingEventReplayer};
 use crate::{GatewayError, GatewayErrorCode, SecuritySignal, proto, validation::Caller};
 
 pub struct AuthenticatedIngestAdapter<P: EventPublisher> {
@@ -22,6 +22,17 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         P: PendingEventReplayer,
     {
         self.gateway.replay_pending()
+    }
+
+    pub(crate) fn maintain_outbox(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError>
+    where
+        P: OutboxMaintainer,
+    {
+        self.gateway.maintain_outbox(now_millis, retention_millis)
     }
 
     pub(crate) fn record_security_signal(

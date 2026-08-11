@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::IngestOutcome;
 use super::publisher::{EventPublisher, PublishOutcome};
-use crate::outbox::PendingEventReplayer;
+use crate::outbox::{OutboxMaintainer, PendingEventReplayer};
 use crate::{
     GatewayError, GatewayErrorCode,
     idempotency::{IdempotencyKey, IdempotencyStore, InMemoryIdempotencyStore, ReservationResult},
@@ -112,6 +112,20 @@ impl<P: EventPublisher> IngestGateway<P> {
         P: PendingEventReplayer,
     {
         self.publisher.replay_pending()
+    }
+
+    /// Prunes completed outbox rows outside `retention_millis` and compacts
+    /// the durable journal where applicable. See
+    /// `EventOutbox::maintain` -- this only forwards to it.
+    pub fn maintain_outbox(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError>
+    where
+        P: OutboxMaintainer,
+    {
+        self.publisher.maintain_outbox(now_millis, retention_millis)
     }
 
     pub fn ingest(

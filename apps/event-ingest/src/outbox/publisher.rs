@@ -53,6 +53,14 @@ pub trait PendingEventReplayer {
     fn replay_pending(&mut self) -> Result<(), GatewayError>;
 }
 
+/// Lets a generic `IngestGateway<P>` conditionally expose the durable
+/// outbox's retention sweep only when its concrete publisher actually wraps
+/// one, mirroring how `PendingEventReplayer` conditionally exposes replay.
+pub trait OutboxMaintainer {
+    fn maintain_outbox(&mut self, now_millis: u64, retention_millis: u64)
+    -> Result<(), GatewayError>;
+}
+
 impl<P, O> OutboxedPublisher<P, O> {
     pub fn new(publisher: P, outbox: O) -> Self {
         Self {
@@ -191,6 +199,20 @@ where
 {
     fn replay_pending(&mut self) -> Result<(), GatewayError> {
         self.replay_pending_inner()
+    }
+}
+
+impl<P, O> OutboxMaintainer for OutboxedPublisher<P, O>
+where
+    P: EventPublisher,
+    O: EventOutbox,
+{
+    fn maintain_outbox(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        self.outbox.maintain(now_millis, retention_millis)
     }
 }
 

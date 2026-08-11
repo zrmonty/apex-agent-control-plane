@@ -18,5 +18,5 @@ pub use file::FileOutbox;
 pub use memory::InMemoryOutbox;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresOutbox;
-pub use publisher::{OutboxedPublisher, PendingEventReplayer};
+pub use publisher::{OutboxMaintainer, OutboxedPublisher, PendingEventReplayer};
 pub use types::{EnqueueResult, EventOutbox, OutboxKey};
