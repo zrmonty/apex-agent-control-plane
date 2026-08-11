@@ -438,6 +438,49 @@ async fn poll_is_rate_limited_per_agent_after_the_ceiling() {
         .expect("a different agent must have its own budget");
 }
 
+/// `AckCommand` shares `PollCommands`' per-agent `admit_poll` ceiling and the
+/// gateway's shared `storage_slots` pool with every other RPC. Without its
+/// own admission check, an agent could spend an unbounded number of
+/// `AckCommand` calls against that shared pool -- starving `PollCommands`,
+/// and every operator's `SubmitCommand`, for everyone else on the process.
+/// The command_id here is deliberately never recorded: admission is charged
+/// before the inbox is ever consulted, so an unknown command_id still counts
+/// against the ceiling exactly like a real one would.
+#[tokio::test]
+async fn ack_command_is_rate_limited_per_agent_after_the_ceiling() {
+    let service = service_with_two_agents();
+    let ack_request = |token: &str, peer_id: u8| {
+        let mut request = tonic::Request::new(proto::AckCommandRequest {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            command_id: "does-not-exist".to_owned(),
+            delivery_attempt: 1,
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request.extensions_mut().insert(peer(peer_id));
+        request
+    };
+    for _ in 0..DEFAULT_MAX_POLLS_PER_WINDOW {
+        service
+            .ack_command(ack_request("agent-a-token-abcdefgh", 0xaa))
+            .await
+            .expect("acks inside the ceiling must succeed");
+    }
+    let status = service
+        .ack_command(ack_request("agent-a-token-abcdefgh", 0xaa))
+        .await
+        .expect_err("the poll ceiling must be enforced on AckCommand too");
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+
+    // ... and the ceiling is per agent, same as PollCommands'.
+    service
+        .ack_command(ack_request("agent-b-token-abcdefgh", 0xbb))
+        .await
+        .expect("a different agent must have its own budget");
+}
+
 #[test]
 fn the_poll_rate_limit_key_is_disjoint_from_the_operator_one() {
     let subject = "spiffe://apex/workload/agent-a";

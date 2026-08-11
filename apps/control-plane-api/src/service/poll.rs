@@ -138,6 +138,10 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
         let Some(agent_id) = caller.bound_agent_id().map(str::to_owned) else {
             return Err(CommandError::unauthenticated().into_status());
         };
+        let subject = caller.subject().unwrap_or(&agent_id).to_owned();
+        self.admit_poll(&subject)
+            .await
+            .map_err(CommandError::into_status)?;
         let input = request.into_inner();
         if input.workspace_id.is_empty()
             || input.namespace_id.is_empty()
