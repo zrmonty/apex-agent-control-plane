@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Apex is a self-hosted, cloud-agnostic control plane for AI agents (observability, governance, evaluation, security, cost). Scope hierarchy: installation → workspace → namespace → AgentGroup → agent → run.
 
-**Status:** Phase 0 (event contract, Python SDK, hardened ingest admission, Security Alerts, durable outbox/fanout, storage contracts, Compose provider slots) is complete. Phase 1 (operator UI, live control-plane API) has only started — the React UI is a static preview with illustrative data; it does not call any backend yet. Don't assume control-plane API or authenticated-session code exists.
+**Status:** Phase 0 (event contract, Python SDK, hardened ingest admission, Security Alerts, durable outbox/fanout, storage contracts, Compose provider slots) is complete. The out-of-band (OOB) control gateway — originally scoped as Phase 0.5 — is also built and real: cooperative controls (`stop`/`pause`/`resume`/`inject`/`set_budget`/`resolve_hold`), a non-cooperative `force_stop` enacted by a dedicated supervisor process rather than the agent's own, durable per-command delivery tracking, and operator-facing bulk/list/cancel APIs. Phase 1 (operator UI wired to a live backend) has not started — the React UI is still a static preview with illustrative data and calls no backend. Don't assume the UI reflects real control-plane state.
 
-The only two components with real, runnable implementations today are `apps/event-ingest` (Rust gRPC gateway) and `packages/sdk-python` (Python instrumentation SDK). `crates/*` are currently empty placeholder directories reserved for future extraction from `event-ingest`. `apps/control-plane-api` is empty. `apps/operator-ui` is a static Vite preview with no backend calls.
+Four components have real, runnable implementations: `apps/event-ingest` (Rust gRPC ingest gateway), `apps/control-plane-api` (Rust gRPC OOB control gateway), `apps/agent-supervisor` (Rust process supervisor that enacts non-cooperative `force_stop`), and `packages/sdk-python` (Python instrumentation SDK, including the reference agent runtime that consumes control-plane-api's control channel). `crates/*` are still empty placeholder directories reserved for future extraction from `event-ingest`. `apps/operator-ui` is still a static Vite preview with no backend calls.
 
 ## Commands
 
@@ -29,8 +29,8 @@ cargo test --features test-support <test_name> -- --nocapture
 # Compile-check the optional Postgres/Valkey backends
 cargo check --features valkey,postgres
 
-# Clippy (CI only fails on hard errors, not style warnings)
-cargo clippy --lib --features test-support -- -W clippy::all
+# Clippy -- CI enforces this as a hard gate across every target/feature, not advisory
+cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Dependency/license hygiene (deny.toml)
 cargo audit
@@ -61,6 +61,38 @@ cargo llvm-cov --features valkey,postgres,test-support --summary-only
 ```
 Exclude `startup/service.rs` and `main.rs` from any coverage target — they're pure process-wiring code (env parsing → build sinks → start the gRPC server) only exercisable by running the compiled binary, never by a test harness. Several other functions (`startup/env.rs`, `startup/auth.rs`, `startup/secrets.rs`) are thin `env::var(...)` wrappers that structurally can't be unit-tested here: this crate has `unsafe_code = "forbid"` and Rust 2024 requires `unsafe` to call `env::set_var`/`remove_var`, so tests can't set env vars. The working pattern when a value needs to be both env-driven in production and testable is to split it into a pure `_value`-suffixed function taking an `Option<&str>`/bool parameter (see `attempts` / `attempts_value` in `startup/env.rs`, or `plaintext_explicitly_allowed` / `parse_and_classify` in `postgres_transport.rs`) — refactor for testability rather than trying to inject env vars.
 
+### Control gateway (`apps/control-plane-api`)
+
+Run all commands from `apps/control-plane-api`.
+
+```bash
+# Full test suite (postgres/valkey/live-* tests self-skip without their env vars)
+cargo test --locked --features "test-support,postgres,valkey" -- --nocapture
+
+# Compile-check the optional Postgres feature
+cargo check --locked --features postgres
+
+# Clippy -- same hard gate as event-ingest
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+**Feature flags:** `test-support` (test-only seams, e.g. injecting a peer identity without a real mTLS handshake), `postgres` (multi-replica-authoritative command inbox/outbox), `valkey` (distributed admission-rate-limit accelerator). Production defaults to file-backed inbox/outbox with no `postgres`/`valkey`.
+
+**Live-infra tests** are gated behind their own env vars and self-skip when unset: `APEX_CONTROL_LIVE_MTLS`, `APEX_CONTROL_LIVE_KEYCLOAK`, `APEX_CONTROL_LIVE_POLL` (spawns a real agent process and drives it through stop/pause/resume/budget/inject over a real poll loop — see `deploy/compose/gateway-ref/agent_under_control.py`), `APEX_CONTROL_LIVE_POSTGRES` (also needs `APEX_CONTROL_POSTGRES_URL` — this crate's own variable, deliberately never the same name as `event-ingest`'s `APEX_POSTGRES_URL`), `APEX_CONTROL_LIVE_VALKEY`.
+
+### Agent supervisor (`apps/agent-supervisor`)
+
+Run all commands from `apps/agent-supervisor`.
+
+```bash
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+No feature flags. One instance per supervised agent run: wraps and spawns the agent as this process's real OS child, in its own process group, holds a credential distinct from (and never visible to) the agent process it supervises, polls `control-plane-api` for `force_stop`, and kills the whole process group — not just the top-level process — on receipt.
+
+The real process-group-kill proof (`tests/process_group_kill.rs`) is platform-sensitive: the full multi-process-tree kill only runs `#[cfg(unix)]` (`killpg` has no Windows equivalent), so a green local run on a Windows dev box only exercises the weaker "direct child dies" fallback — it does **not** prove the Unix path works. This bit once: a real bug in that test's own liveness check (conflating a SIGKILLed zombie with a still-running process) only surfaced on real Linux CI. Don't trust this test green until you've seen it pass on CI, not just locally on Windows.
+
 ### Python SDK (`packages/sdk-python`)
 
 ```bash
@@ -87,7 +119,7 @@ python3 scripts/check_lab_only_settings.py   # fails if a lab-only escape hatch 
 python3 deploy/compose/e2e/run_gates.py      # full deploy-time gate suite (Docker required): live mTLS, Postgres, MinIO Object-Lock, optional Azure/GCS
 ```
 
-CI (`.github/workflows/ci.yml`): `python-sdk`, `rust-ingest` (test + clippy), `rust-sast` (cargo audit + cargo deny), `python-sast` (bandit + pip-audit), `lab-only-settings-gate`, `signed-bundles`. `.github/workflows/live-mtls-e2e.yml` runs the live-mTLS + Postgres + MinIO gates on a real Docker daemon (push to main/master or manual dispatch; not required on every PR since runner Docker networking can be flaky).
+CI (`.github/workflows/ci.yml`): `python-sdk`, `rust-ingest` (test + clippy), `rust-control-plane` (test + clippy), `rust-agent-supervisor` (test + clippy), `rust-sast` (cargo audit + cargo deny, matrixed across all three Rust crates — each carries its own `Cargo.lock`/`deny.toml`), `python-sast` (bandit + pip-audit), `lab-only-settings-gate`, `signed-bundles`. `.github/workflows/live-mtls-e2e.yml` runs the live-mTLS + Postgres + MinIO gates on a real Docker daemon (push to main/master or manual dispatch; not required on every PR since runner Docker networking can be flaky).
 
 ## Conventions
 
@@ -108,7 +140,7 @@ Mutable control state (Postgres), analytical trace storage (ClickHouse), and imm
 
 ### `apps/event-ingest` internals
 
-This is the one component with real depth. Module map (`src/`):
+Module map (`src/`):
 
 - **`auth/`** — gRPC service (`service.rs`: admission rate-limiting, blocking-task semaphore, replay-worker spawn) and credential verification (`verifier.rs`: `BearerTokenVerifier` with per-identity + distributed failure-rate tracking).
 - **`gateway/`** — `IngestGateway`/`AuthenticatedIngestAdapter`: the core admit → validate → idempotency-reserve → fanout → commit/abort pipeline.
@@ -121,10 +153,34 @@ This is the one component with real depth. Module map (`src/`):
 - **`postgres_transport.rs`** — fail-closed transport selection: remote Postgres requires TLS + cert verification; loopback plaintext requires *both* `sslmode=disable` on a numeric loopback host *and* an explicit `APEX_ALLOW_POSTGRES_PLAINTEXT=1` (neither alone is enough — this mirrors the same "explicit opt-in, not just a permissive default" pattern used for private sink destinations).
 - **`permissions/`** — platform-specific private-key-file permission checks (Unix mode bits vs Windows ACL via `icacls`/PowerShell). Both platforms are real, fail-closed checks; don't assume Windows is a stub.
 
+### `apps/control-plane-api` internals
+
+The OOB (out-of-band) control gateway: delivers cooperative commands to agents and tracks their delivery, independently authenticated from the ingest data path and reachable even when the rest of the platform is degraded (ADR-0006). Module map (`src/`):
+
+- **`service/`** — the `ControlGatewayService` tonic impl, split by RPC group: `submit.rs` (`SubmitCommand`/`SubmitBulkCommand`, the write path — `force_stop` specifically requires two distinct operator approvals via `dual_approval.rs` before anything is recorded), `poll.rs` (`PollCommands`/`AckCommand`, the agent-facing path), `query.rs` (`GetCommandStatus`/`ListCommands`/`CancelCommand`, operator query/management), `proto_mapping.rs` (the internal-type ↔ wire-type mapping every handler group shares).
+- **`inbox.rs` + `inbox/`** — durable per-command *delivery-state* tracking, a different question from the outbox's fanout-completion tracking (outbox: "did this reach the queryable trace"; inbox: "did the targeted agent retrieve it"). `inbox/state.rs` is the shared delivery-state machine the in-memory and file backends both build on; `inbox/file.rs` is the file-backed backend plus its append/replay journal; `inbox/backend.rs` is the trait/dispatch layer. `inbox_postgres.rs` (+ `inbox_postgres/`) is the multi-replica-authoritative Postgres backend, feature-gated. Enforces two independent capacity ceilings — one global, one per `(workspace_id, namespace_id)` — so a single tenant filling the inbox can never block delivery, including an emergency `stop`, to every other tenant.
+- **`agent_auth.rs` (+ `agent_auth/`)** — agent-workload authentication for `PollCommands`/`AckCommand`: mTLS client certificate pinned to a bearer token, a third credential space distinct from both the ingest workload's and the operator's (see `auth.rs`). `agent_auth/revocation.rs` is a background-refreshed, file-backed revocation list (structurally mirrors `keycloak.rs`'s JWKS-cache pattern) so a compromised agent's credential can be pulled in seconds by editing a file, not by redeploying the process.
+- **`auth.rs`** — independent operator authentication (static token table, lab/CI seam). **`keycloak.rs` (+ `keycloak/`)** — the production operator-credential path: verifies short-lived, scope-bound Keycloak-issued JWTs, closing the standard JWT pitfalls explicitly (algorithm confusion, missing issuer/audience checks, ID/access/refresh-token confusion, stale keys) rather than trusting library defaults.
+- **`envelope.rs`** — validates operator input and builds the outbox-ready request plus the agent-facing delivery record, reusing the same admission rules `event-ingest` enforces on its own data path. `derive_target_command_id` deterministically derives each bulk-fanout target's own idempotency key from one operator-supplied `bulk_id`, so an operator never has to track one idempotency key per target.
+- **`dual_approval.rs`** — the two-distinct-operator approval gate `force_stop`, and only `force_stop`, must pass before `SubmitCommand` ever records it.
+- **`outbox.rs` / `replay.rs`** — the durable command outbox and its fanout-to-trace worker; the event-ingest outbox pattern reapplied to commands.
+- **`startup/`** — binary-only wiring: `env/` (env parsing, split into `credentials.rs`/`keycloak.rs`/`limits.rs`/`backends.rs`), `service/` (the `run()` entrypoint's setup phases, split into `resolvers.rs`/`storage.rs`/`workers.rs`), plus `secrets.rs`, `fanout.rs`, `valkey.rs`.
+
+The operator and agent-workload credential spaces must never be conflated — an operator credential cannot poll, an agent credential cannot submit. See `contracts/proto/apex/v1/control.proto`'s own module doc.
+
+### `apps/agent-supervisor` internals
+
+A separate binary from `control-plane-api`, one instance per supervised agent run, that exists to close a specific gap: every other control is *cooperative* — it relies on the agent's own process choosing to honor it — which is exactly the trust assumption that breaks once that process is compromised (the incident motivating this whole gateway: an agent-spawned PowerShell child process, not the agent's own top-level process, was the actual threat). `force_stop` is the backstop, and it needs real OS kill authority held by a process the supervised agent never has access to.
+
+- **`process_group.rs`** — spawns the agent as this process's real OS child, in a new process group with itself as leader, and kills the whole group (not just the top process) on `force_stop`. The full guarantee is Unix-only (`killpg`); Windows falls back to killing the direct child alone, documented as an honest gap rather than silently claimed parity.
+- **`child_env.rs`** — builds the agent's environment from scratch (`env_clear()` plus an explicit allowlist) instead of inheriting this process's own — the mechanism behind the credential-isolation property: a compromised agent process cannot read the credential that can order its own termination.
+- **`credentials.rs`** — loads this process's own agent-workload credential, under a distinct `agent_id` convention from the agent it supervises (see `apps/control-plane-api/src/agent_auth.rs::supervisor_agent_id`).
+- **`control_client.rs`** — the mTLS `PollCommands`/`AckCommand` client, built from its own independently generated proto stubs rather than a path-dependency on `control-plane-api`, so the one process holding the system's most sensitive credential doesn't also pull in that crate's Keycloak/Postgres/reqwest dependency tree.
+
 ### Repository layout
 
 ```
-apps/            event-ingest (real), control-plane-api (empty), operator-ui (static preview), reference-providers (Python mTLS stub providers for local/CI)
+apps/            event-ingest, control-plane-api, agent-supervisor (all real), operator-ui (static preview, no backend calls), reference-providers (Python mTLS stub providers for local/CI)
 crates/           domain, event-contract, policy-engine, authz, cost-ledger, archive-provider, diagnostics -- all currently EMPTY placeholders
 packages/         sdk-python
 contracts/        proto/apex/v1 (versioned protobuf), jsonschema
