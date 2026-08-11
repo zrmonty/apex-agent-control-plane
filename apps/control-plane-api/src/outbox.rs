@@ -15,9 +15,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use apex_event_ingest::{
-    EnqueueResult, EventOutbox, GatewayError, GatewayErrorCode, IngestRequest,
-};
+use apex_event_ingest::{EnqueueResult, EventOutbox, IngestRequest};
+// `GatewayError`/`GatewayErrorCode` are only referenced by bare name inside
+// `RecoveringPostgresOutbox` below, which is itself `postgres`-only -- a
+// non-`postgres` build never uses either name (the one unconditional
+// `GatewayError` reference, in the `From` impl just below, spells the type
+// out fully-qualified on purpose so that impl does not need this import).
+#[cfg(feature = "postgres")]
+use apex_event_ingest::{GatewayError, GatewayErrorCode};
 
 use crate::errors::CommandError;
 

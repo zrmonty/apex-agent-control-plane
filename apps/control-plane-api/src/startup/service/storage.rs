@@ -11,9 +11,9 @@ use apex_control_plane_api::{
 #[cfg(feature = "postgres")]
 use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
 
-use super::super::env::{
-    control_postgres_url, control_valkey_env, inbox_scope_quota, postgres_pool_size,
-};
+use super::super::env::{control_postgres_url, control_valkey_env, inbox_scope_quota};
+#[cfg(feature = "postgres")]
+use super::super::env::postgres_pool_size;
 
 const OUTBOX_CAPACITY: usize = 1_000_000;
 

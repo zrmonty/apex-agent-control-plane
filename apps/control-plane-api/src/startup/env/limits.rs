@@ -127,9 +127,15 @@ const DEFAULT_FANOUT_INTERVAL_SECS: u64 = 5;
 /// so -- rather than leave a worker running on a tick nobody will notice.
 const MAX_FANOUT_INTERVAL_SECS: u64 = 3600;
 
+#[cfg(feature = "postgres")]
 const DEFAULT_POSTGRES_POOL_SIZE: usize = 4;
+#[cfg(feature = "postgres")]
 const MAX_POSTGRES_POOL_SIZE: usize = 16;
 
+/// Only meaningful -- and only called -- once a Postgres outbox/inbox is
+/// actually selectable, i.e. under the `postgres` feature; a non-`postgres`
+/// binary has no pool to size.
+#[cfg(feature = "postgres")]
 pub(crate) fn postgres_pool_size() -> Result<usize, io::Error> {
     let invalid = || {
         io::Error::new(

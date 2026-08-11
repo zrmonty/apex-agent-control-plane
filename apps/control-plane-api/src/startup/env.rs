@@ -145,8 +145,10 @@ pub(crate) use credentials::{AgentTokenSource, OperatorTokenSource, agent_revoca
 pub(crate) use keycloak::keycloak_env;
 pub(crate) use limits::{
     admission_limits, command_retention, fanout_interval, inbox_scope_quota,
-    nats_retry_attempts, postgres_pool_size,
+    nats_retry_attempts,
 };
+#[cfg(feature = "postgres")]
+pub(crate) use limits::postgres_pool_size;
 
 // Only `startup::tests` (a sibling of `env`, not a descendant, so it cannot
 // reach `env::credentials`/`env::keycloak`/`env::limits`/`env::backends`
