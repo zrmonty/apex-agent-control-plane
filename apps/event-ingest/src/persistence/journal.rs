@@ -88,23 +88,65 @@ impl FindingJournal {
             return Err(FindingPersistenceError::OversizedJournal);
         }
         let mut store = FindingStore::new(capacity).map_err(FindingPersistenceError::Store)?;
+        // Set when the final line in the file is a torn trailing write (see
+        // below), so the file can be truncated back to the last known-good
+        // record once the writer handle is open below.
+        let mut torn_trailing_len: Option<u64> = None;
         if resolved.exists() {
             let reader =
                 BufReader::new(File::open(&resolved).map_err(|_| FindingPersistenceError::Io)?);
             let mut replayed_bytes = 0_u64;
-            for line in reader.lines() {
+            let mut good_bytes = 0_u64;
+            let mut parsed_any = false;
+            let mut lines = reader.lines().peekable();
+            while let Some(line) = lines.next() {
                 let line = line.map_err(|_| FindingPersistenceError::Io)?;
-                replayed_bytes = replayed_bytes
+                let is_last_line = lines.peek().is_none();
+                if line.is_empty() {
+                    // A file ending in `\n` never yields a trailing empty
+                    // element from `BufRead::lines()`, but a stray blank
+                    // line (e.g. a doubled trailing newline) can. Treat a
+                    // blank FINAL line as harmless end-of-file noise, not a
+                    // torn record; a blank line anywhere else is corruption
+                    // and fails closed exactly as today.
+                    if is_last_line {
+                        break;
+                    }
+                    return Err(FindingPersistenceError::MalformedRecord);
+                }
+                let candidate_bytes = replayed_bytes
                     .saturating_add(line.len() as u64)
                     .saturating_add(1);
-                if replayed_bytes > MAX_JOURNAL_BYTES {
+                if candidate_bytes > MAX_JOURNAL_BYTES {
                     return Err(FindingPersistenceError::OversizedJournal);
                 }
                 if line.len() > MAX_JOURNAL_LINE_BYTES {
                     return Err(FindingPersistenceError::OversizedJournal);
                 }
-                let record: JournalRecord = serde_json::from_str(&line)
-                    .map_err(|_| FindingPersistenceError::MalformedRecord)?;
+                let record: JournalRecord = match serde_json::from_str(&line) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        // A record can only end up malformed on a real crash
+                        // if the process/OS died mid-write/before
+                        // `sync_data()` returned for the LAST record
+                        // physically present in the file. Such a torn write
+                        // was never acknowledged to any caller (the
+                        // `append`/`transition` that produced it returned an
+                        // error, or never returned, before the crash), so it
+                        // can never represent committed state — discarding
+                        // it loses nothing. Require at least one prior
+                        // record to have parsed cleanly (`parsed_any`) so a
+                        // file whose ONLY record is corrupt still fails
+                        // closed: with no known-good prefix, "recovering"
+                        // would be indistinguishable from silently accepting
+                        // arbitrary corruption.
+                        if is_last_line && parsed_any {
+                            torn_trailing_len = Some(good_bytes);
+                            break;
+                        }
+                        return Err(FindingPersistenceError::MalformedRecord);
+                    }
+                };
                 match record {
                     JournalRecord::Finding(finding) => {
                         store
@@ -124,7 +166,24 @@ impl FindingJournal {
                             .map_err(FindingPersistenceError::Store)?;
                     }
                 }
+                replayed_bytes = candidate_bytes;
+                good_bytes = replayed_bytes;
+                parsed_any = true;
             }
+        }
+        if let Some(len) = torn_trailing_len {
+            // Self-heal: drop the torn trailing record so the file is clean
+            // for the next append. This uses a fresh, non-append handle:
+            // on Windows an append-mode handle is granted `FILE_APPEND_DATA`
+            // but never `FILE_WRITE_DATA` (even when `.write` is also
+            // requested), and `set_len`/`SetEndOfFile` requires the latter.
+            let truncator = OpenOptions::new()
+                .write(true)
+                .open(&resolved)
+                .map_err(|_| FindingPersistenceError::Io)?;
+            truncator
+                .set_len(len)
+                .map_err(|_| FindingPersistenceError::Io)?;
         }
         let file = OpenOptions::new()
             .create(true)

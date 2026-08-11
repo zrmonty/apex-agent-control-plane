@@ -1,7 +1,8 @@
 use super::*;
 use crate::{EventPublisher, GatewayError, IngestRequest, proto};
 use prost::Message;
-use std::fs::{create_dir, remove_dir_all, write};
+use std::fs::{OpenOptions, create_dir, remove_dir_all, write};
+use std::io::Write as _;
 
 #[derive(Default)]
 struct CountingPublisher(usize);
@@ -452,6 +453,114 @@ fn file_outbox_rejects_corrupt_records_without_dropping_state() {
     create_dir(&base).unwrap();
     let path = base.join("events.jsonl");
     write(&path, b"{\"op\":\"pending\"}\n").unwrap();
+    let error = FileOutbox::open(&path, &base, 4).unwrap_err();
+    assert_eq!(
+        error.code,
+        crate::GatewayErrorCode::InvalidOutboxConfiguration
+    );
+    remove_dir_all(base).unwrap();
+}
+
+/// A trailing write torn by a crash mid-`write_all`/before `sync_data()`
+/// returned must not be indistinguishable from real corruption: it was never
+/// acknowledged to any caller, so it is always safe to discard. The journal
+/// must load successfully, keep every record that parsed cleanly before the
+/// torn tail, and self-heal by truncating the torn bytes off the file.
+#[test]
+fn file_outbox_recovers_from_a_torn_trailing_record() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-torn-trailing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let good = sample_event("018f5c91-2d88-7c00-8000-000000000001");
+    {
+        let mut outbox = FileOutbox::open(&path, &base, 4).unwrap();
+        assert_eq!(outbox.enqueue(&good).unwrap(), EnqueueResult::Enqueued);
+    }
+    let good_len = std::fs::metadata(&path).unwrap().len();
+
+    // Simulate the crash: the next record's bytes only partially made it to
+    // disk (process/OS died mid-`write_all`, before the trailing `\n` and
+    // `sync_data()`), leaving an unparseable, newline-less fragment at EOF.
+    let torn_source = sample_event("018f5c91-2d88-7c00-8000-000000000002");
+    let full_line = serde_json::json!({
+        "op": "pending",
+        "workspace_id": "acme",
+        "namespace_id": "prod",
+        "event_id": torn_source.event_id,
+        "envelope": torn_source.envelope,
+    });
+    let full_line_bytes = serde_json::to_vec(&full_line).unwrap();
+    let torn_prefix = &full_line_bytes[..full_line_bytes.len() / 2];
+    {
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn_prefix).unwrap();
+    }
+
+    let mut reopened = FileOutbox::open(&path, &base, 4)
+        .expect("a torn trailing record must not permanently block the journal from loading");
+    assert_eq!(reopened.pending(), vec![good.clone()]);
+    assert_eq!(
+        reopened.enqueue(&good).unwrap(),
+        EnqueueResult::AlreadyPending
+    );
+
+    // Self-healing: the torn fragment was truncated off on load, so the file
+    // is back to exactly the last known-good state.
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), good_len);
+
+    drop(reopened);
+    let mut final_open = FileOutbox::open(&path, &base, 4).unwrap();
+    assert_eq!(final_open.pending(), vec![good]);
+    remove_dir_all(base).unwrap();
+}
+
+/// A malformed record in the MIDDLE of the file — even with a good record
+/// after it — must keep failing closed exactly as before. Guessing at intent
+/// there would risk silently dropping committed state.
+#[test]
+fn file_outbox_still_fails_closed_on_a_corrupt_middle_record_with_a_good_record_after_it() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-corrupt-middle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let first = sample_event("018f5c91-2d88-7c00-8000-000000000001");
+    let second = sample_event("018f5c91-2d88-7c00-8000-000000000002");
+    let line1 = serde_json::json!({
+        "op": "pending",
+        "workspace_id": "acme",
+        "namespace_id": "prod",
+        "event_id": first.event_id,
+        "envelope": first.envelope,
+    });
+    let line3 = serde_json::json!({
+        "op": "pending",
+        "workspace_id": "acme",
+        "namespace_id": "prod",
+        "event_id": second.event_id,
+        "envelope": second.envelope,
+    });
+    write(
+        &path,
+        format!(
+            "{}\n{{\"op\":\"pending\"}}\n{}\n",
+            serde_json::to_string(&line1).unwrap(),
+            serde_json::to_string(&line3).unwrap()
+        ),
+    )
+    .unwrap();
     let error = FileOutbox::open(&path, &base, 4).unwrap_err();
     assert_eq!(
         error.code,

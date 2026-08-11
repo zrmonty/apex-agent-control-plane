@@ -184,13 +184,56 @@ impl FileOutbox {
                 .try_clone()
                 .map_err(|_| GatewayError::invalid_outbox_configuration())?,
         );
-        for line in reader.lines() {
+        // Tracks the byte offset immediately after the last successfully
+        // parsed record, and whether at least one record has parsed so far.
+        // Together these let us recognize a torn TRAILING write (see below)
+        // without ever forgiving corruption anywhere else in the file.
+        let mut good_bytes: u64 = 0;
+        let mut parsed_any = false;
+        let mut lines = reader.lines().peekable();
+        while let Some(line) = lines.next() {
             let line = line.map_err(|_| GatewayError::invalid_outbox_configuration())?;
+            let is_last_line = lines.peek().is_none();
+            if line.is_empty() {
+                // A file that ends in `\n` never yields a trailing empty
+                // element from `BufRead::lines()`, but a stray blank line
+                // (e.g. a doubled trailing newline) can. Treat a blank FINAL
+                // line as harmless end-of-file noise rather than a torn
+                // record; a blank line anywhere else is corruption and falls
+                // through to the fail-closed path below exactly as today.
+                if is_last_line {
+                    break;
+                }
+                return Err(GatewayError::invalid_outbox_configuration());
+            }
             if line.len() > MAX_OUTBOX_RECORD_BYTES {
                 return Err(GatewayError::invalid_outbox_configuration());
             }
-            let record: FileOutboxRecord = serde_json::from_str(&line)
-                .map_err(|_| GatewayError::invalid_outbox_configuration())?;
+            let record: FileOutboxRecord = match serde_json::from_str(&line) {
+                Ok(record) => record,
+                Err(_) => {
+                    // A record can only end up malformed on a real crash if
+                    // the process/OS died mid-`write_all`/before
+                    // `sync_data()` returned for the LAST record physically
+                    // present in the file. Such a torn write was never
+                    // acknowledged to any caller (the `enqueue`/
+                    // `mark_complete` that produced it returned an error, or
+                    // never returned, before the crash), so it can never
+                    // represent committed state — discarding it loses
+                    // nothing. Require at least one prior record to have
+                    // parsed cleanly (`parsed_any`) so a file whose ONLY
+                    // record is corrupt still fails closed: with no known-good
+                    // prefix, "recovering" would be indistinguishable from
+                    // silently accepting arbitrary corruption. Self-heal by
+                    // truncating the file back to the last known-good byte
+                    // offset so the journal is clean on the next append.
+                    if is_last_line && parsed_any {
+                        self.truncate_to(good_bytes)?;
+                        break;
+                    }
+                    return Err(GatewayError::invalid_outbox_configuration());
+                }
+            };
             match record {
                 FileOutboxRecord::Pending {
                     workspace_id,
@@ -320,6 +363,10 @@ impl FileOutbox {
                     self.quarantined.insert(key, event);
                 }
             }
+            good_bytes = good_bytes
+                .saturating_add(line.len() as u64)
+                .saturating_add(1);
+            parsed_any = true;
             if self.pending.len() + self.complete.len() + self.quarantined.len() > self.capacity {
                 return Err(GatewayError::new(
                     crate::GatewayErrorCode::IdempotencyCapacity,
@@ -327,6 +374,24 @@ impl FileOutbox {
             }
         }
         Ok(())
+    }
+
+    /// Truncates the journal file to `len` bytes. Used only to drop a
+    /// confirmed torn trailing record so the file is clean (self-healing)
+    /// for the next append.
+    ///
+    /// This intentionally opens a fresh, non-append handle rather than
+    /// reusing `self.file`: on Windows, an append-mode handle is granted
+    /// `FILE_APPEND_DATA` but never `FILE_WRITE_DATA` (even when `.write`
+    /// is also requested), and `set_len`/`SetEndOfFile` requires the latter.
+    fn truncate_to(&self, len: u64) -> Result<(), GatewayError> {
+        let truncator = OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .map_err(|_| GatewayError::invalid_outbox_configuration())?;
+        truncator
+            .set_len(len)
+            .map_err(|_| GatewayError::invalid_outbox_configuration())
     }
 
     fn append(&mut self, record: &FileOutboxRecord) -> Result<(), GatewayError> {
