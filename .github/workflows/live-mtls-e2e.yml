@@ -686,7 +686,7 @@ jobs:
           set -euo pipefail
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/generate_adversarial_pki.py" \
             --out "${GITHUB_WORKSPACE}/deploy/compose/live-mtls/adversarial"
-          cargo test --test adversarial_ingest --features test-support -- --test-threads=1
+          cargo test --test adversarial_integrity --test adversarial_malformed_payloads --test adversarial_scope_and_replay --test adversarial_transport --features test-support -- --test-threads=1
 
       - name: Validate compose overlays (config only)
         working-directory: deploy/compose
