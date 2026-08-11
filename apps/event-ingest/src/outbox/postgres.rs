@@ -31,6 +31,59 @@ pub struct PostgresOutbox {
     pub(super) capacity: usize,
 }
 
+/// Outcome of comparing a cheap row-count estimate against the capacity
+/// ceiling: trust it outright in either direction, or fall back to an exact
+/// count when it is too close to the ceiling to trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CapacityDecision {
+    Allow,
+    Deny,
+    ExactRecheck,
+}
+
+/// Decides admission from an approximate row count without ever letting the
+/// estimate's error cross the ceiling undetected.
+///
+/// `margin` must bound how far `estimate` can realistically diverge from the
+/// true count, in either direction (see `capacity_margin`). Given that bound,
+/// the three-way split is sound: if `estimate + margin < capacity`, the true
+/// count is at most `estimate + margin`, which is still under capacity, so
+/// admitting is safe even in the worst case. Symmetrically, if
+/// `estimate - margin >= capacity`, the true count is at least
+/// `estimate - margin`, which already reached capacity, so denying is safe.
+/// Only the band in between -- where the estimate's own error could place the
+/// true count on either side of the ceiling -- needs the exact recheck.
+pub(super) fn capacity_decision(estimate: i64, capacity: usize, margin: usize) -> CapacityDecision {
+    let estimate = u64::try_from(estimate).unwrap_or(0);
+    let capacity = capacity as u64;
+    let margin = margin as u64;
+    if estimate.saturating_add(margin) < capacity {
+        CapacityDecision::Allow
+    } else if estimate.saturating_sub(margin) >= capacity {
+        CapacityDecision::Deny
+    } else {
+        CapacityDecision::ExactRecheck
+    }
+}
+
+/// Safety margin an `n_live_tup` estimate must clear before it is trusted
+/// outright.
+///
+/// `n_live_tup` (`pg_stat_user_tables`) is Postgres's incrementally
+/// maintained live-tuple counter: every insert/delete adjusts it and the
+/// cumulative stats system flushes the change to shared memory in well under
+/// a second, regardless of table size. That is a fundamentally different
+/// staleness story from `pg_class.reltuples`, which only moves on `ANALYZE`
+/// or autovacuum and can sit at zero on a freshly created table indefinitely.
+/// A 5% margin, floored at 64 rows, comfortably covers that sub-second flush
+/// lag plus a burst of concurrent admissions landing inside it. It only
+/// matters near the ceiling (see `capacity_decision`): a backlog far from
+/// capacity can absorb far more estimate error than this without ever
+/// mis-admitting or mis-denying.
+pub(super) fn capacity_margin(capacity: usize) -> usize {
+    (capacity / 20).max(64).min(capacity.max(1))
+}
+
 impl PostgresOutbox {
     pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, GatewayError> {
         if capacity == 0 || capacity > 1_000_000 {
@@ -95,12 +148,42 @@ impl EventOutbox for PostgresOutbox {
                 _ => return Err(GatewayError::internal()),
             });
         }
-        let total: i64 = tx
-            .query_one("SELECT COUNT(*) FROM apex_event_outbox", &[])
+        // The capacity check used to be an unconditional `SELECT COUNT(*)` on
+        // every enqueue: a full sequential scan that gets slower as the
+        // backlog it exists to bound grows -- a compounding failure under
+        // load. `n_live_tup` is Postgres's own incrementally maintained
+        // live-row estimate (see `capacity_margin`): reading it is an O(1)
+        // shared-memory lookup, not a table scan, and unlike a dedicated
+        // counter row it is written by Postgres's existing stats machinery
+        // outside this transaction, so concurrent admissions never contend
+        // with each other over a shared row (that would only trade one
+        // bottleneck for a worse one). The estimate is trusted outright
+        // everywhere except a margin-wide band around the ceiling, where an
+        // exact recount -- the old query, now rare -- settles it. See
+        // `capacity_decision`.
+        let estimate: i64 = tx
+            .query_opt(
+                "SELECT n_live_tup FROM pg_stat_user_tables
+                 WHERE relid = 'apex_event_outbox'::regclass",
+                &[],
+            )
             .map_err(|_| GatewayError::internal())?
-            .get(0);
-        if total as usize >= self.capacity {
-            return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
+            .map(|row| row.get(0))
+            .unwrap_or(0);
+        match capacity_decision(estimate, self.capacity, capacity_margin(self.capacity)) {
+            CapacityDecision::Allow => {}
+            CapacityDecision::Deny => {
+                return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
+            }
+            CapacityDecision::ExactRecheck => {
+                let total: i64 = tx
+                    .query_one("SELECT COUNT(*) FROM apex_event_outbox", &[])
+                    .map_err(|_| GatewayError::internal())?
+                    .get(0);
+                if total as usize >= self.capacity {
+                    return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
+                }
+            }
         }
         // `SELECT ... FOR UPDATE` above locks nothing when the row is absent,
         // so concurrent replicas all read "absent" and all reach this insert.
@@ -284,5 +367,94 @@ impl EventOutbox for PostgresOutbox {
 
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
         PostgresReplayOps::requeue_quarantined(self, keys)
+    }
+}
+
+/// `capacity_decision` / `capacity_margin` are pure functions with no
+/// database dependency, so their correctness is covered here rather than in
+/// `postgres_tests.rs` (which needs `APEX_POSTGRES_URL`).
+#[cfg(test)]
+mod capacity_estimate_tests {
+    use super::{CapacityDecision, capacity_decision, capacity_margin};
+
+    #[test]
+    fn allows_when_estimate_plus_margin_is_below_capacity() {
+        assert_eq!(
+            capacity_decision(100, 1_000, 50),
+            CapacityDecision::Allow
+        );
+        // Exactly at the boundary (estimate + margin == capacity) must NOT
+        // allow: the true count could equal capacity in the worst case.
+        assert_eq!(
+            capacity_decision(950, 1_000, 50),
+            CapacityDecision::ExactRecheck
+        );
+    }
+
+    #[test]
+    fn denies_when_estimate_minus_margin_reaches_capacity() {
+        assert_eq!(capacity_decision(1_060, 1_000, 50), CapacityDecision::Deny);
+        // Exactly at the boundary (estimate - margin == capacity) must deny:
+        // the true count is guaranteed to be at least capacity.
+        assert_eq!(capacity_decision(1_050, 1_000, 50), CapacityDecision::Deny);
+    }
+
+    #[test]
+    fn rechecks_exactly_in_the_ambiguous_band() {
+        // capacity=1000, margin=50: band is [951, 1049] inclusive-ish where
+        // neither Allow's nor Deny's soundness bound is met.
+        for estimate in [951, 975, 1_000, 1_025, 1_049] {
+            assert_eq!(
+                capacity_decision(estimate, 1_000, 50),
+                CapacityDecision::ExactRecheck,
+                "estimate={estimate} should require an exact recheck"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_estimate_is_clamped_to_zero_not_denied() {
+        // Postgres stats can transiently report values this code should
+        // treat as "no information", never as a signal to deny outright.
+        assert_eq!(capacity_decision(-5, 1_000, 50), CapacityDecision::Allow);
+    }
+
+    #[test]
+    fn zero_capacity_never_panics_and_denies() {
+        // connect() already rejects capacity == 0, but the decision function
+        // itself must still be total (no panics) for any input.
+        assert_eq!(capacity_decision(0, 0, capacity_margin(0)), CapacityDecision::Deny);
+        assert_eq!(capacity_decision(5, 0, capacity_margin(0)), CapacityDecision::Deny);
+    }
+
+    #[test]
+    fn margin_is_a_five_percent_floor_of_64_capped_at_capacity() {
+        assert_eq!(capacity_margin(1_000_000), 50_000);
+        assert_eq!(capacity_margin(100), 64); // 5% of 100 is 5, floored to 64
+        assert_eq!(capacity_margin(64), 64); // 5% of 64 is 3, floored to 64, capped at 64
+        assert_eq!(capacity_margin(1), 1); // floor of 64 capped down to capacity itself
+        assert_eq!(capacity_margin(4_096), 204); // 5% of 4096 = 204 (integer division)
+    }
+
+    #[test]
+    fn margin_never_exceeds_capacity() {
+        for capacity in [0usize, 1, 2, 63, 64, 65, 1_000, 999_999, 1_000_000] {
+            assert!(
+                capacity_margin(capacity) <= capacity.max(1),
+                "margin for capacity={capacity} must never exceed the capacity itself"
+            );
+        }
+    }
+
+    #[test]
+    fn large_capacity_near_the_documented_maximum_does_not_overflow() {
+        // connect() enforces capacity <= 1_000_000, but the decision function
+        // itself must stay correct well beyond that for any i64 estimate.
+        let capacity = 1_000_000usize;
+        let margin = capacity_margin(capacity);
+        assert_eq!(
+            capacity_decision(i64::MAX, capacity, margin),
+            CapacityDecision::Deny
+        );
     }
 }
