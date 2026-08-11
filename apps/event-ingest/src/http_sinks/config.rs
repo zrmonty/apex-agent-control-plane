@@ -205,10 +205,22 @@ fn safe_endpoint_address(address: IpAddr) -> bool {
                 && !is_carrier_grade_nat(value)
         }
         IpAddr::V6(value) => {
+            // IPv4-mapped (and other IPv4-compatible) IPv6 addresses must be
+            // judged by the exact same rules as their IPv4 form, not the
+            // native IPv6 checks below. Otherwise an embedded address like
+            // `::ffff:127.0.0.1` or `::ffff:169.254.169.254` sails past the
+            // v6 checks (none of which recognize it as loopback/link-local)
+            // even though it resolves straight into loopback/RFC1918/CGNAT
+            // space. `to_canonical` folds IPv4-mapped IPv6 down to `V4`, so
+            // recursing here reuses the IPv4 arm's full ruleset unchanged.
+            if let IpAddr::V4(mapped) = value.to_canonical() {
+                return safe_endpoint_address(IpAddr::V4(mapped));
+            }
             !value.is_loopback()
                 && !value.is_unique_local()
                 && !value.is_unicast_link_local()
                 && !value.is_unspecified()
+                && !value.is_multicast()
         }
     }
 }
@@ -329,5 +341,44 @@ mod tests {
                 "{safe_address} is outside CGNAT space and should not be rejected by this check"
             );
         }
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_addresses_in_unsafe_ranges() {
+        // Embedded/mapped IPv4 addresses must be judged by the same rules as
+        // their plain IPv4 form (loopback, RFC1918, link-local, CGNAT), not
+        // the (looser) native IPv6 checks, which don't recognize them.
+        for unsafe_ip in [
+            "::ffff:127.0.0.1",     // loopback
+            "::ffff:10.0.0.5",      // RFC1918 private
+            "::ffff:169.254.169.254", // cloud metadata endpoint
+            "::ffff:100.64.0.5",    // CGNAT shared address space
+        ] {
+            let address: IpAddr = unsafe_ip.parse().unwrap();
+            assert!(
+                !safe_endpoint_address(address),
+                "{unsafe_ip} is an IPv4-mapped address in unsafe space and must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_ipv4_mapped_ipv6_address_for_public_ip() {
+        // The mapped-address fix must not over-block: a mapped address whose
+        // underlying IPv4 form is public should still be allowed.
+        let address: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        assert!(
+            safe_endpoint_address(address),
+            "::ffff:93.184.216.34 wraps a public IPv4 address and must be allowed"
+        );
+    }
+
+    #[test]
+    fn rejects_ipv6_multicast_addresses() {
+        let address: IpAddr = "ff02::1".parse().unwrap();
+        assert!(
+            !safe_endpoint_address(address),
+            "ff02::1 is an IPv6 multicast address and must be rejected"
+        );
     }
 }
