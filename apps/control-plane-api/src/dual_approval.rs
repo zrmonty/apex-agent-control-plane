@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use prost::Message;
+use prost_types::value::Kind;
 use sha2::{Digest, Sha256};
 
 use crate::envelope::ControlCommandInput;
@@ -206,14 +206,96 @@ pub(crate) fn fingerprint(input: &ControlCommandInput) -> [u8; 32] {
     field(input.trace_id.as_bytes());
     field(&(input.action as i32).to_le_bytes());
     field(input.reason_code.as_deref().unwrap_or_default().as_bytes());
-    field(
-        &input
-            .parameters
-            .as_ref()
-            .map(Message::encode_to_vec)
-            .unwrap_or_default(),
+    // `Message::encode_to_vec()` is deliberately *not* used here the way it
+    // is for every field above: `parameters` is a `google.protobuf.Struct`,
+    // i.e. a map, and nothing pins the order that map's underlying
+    // representation iterates in across two independently constructed but
+    // semantically-equal inputs -- e.g. the same `{"foo": 1, "bar": 2}`
+    // built by two different gRPC client libraries/languages, or by the
+    // same library fed the same keys in a different order. Raw-encoding a
+    // map is only ever as order-stable as whatever that map type's
+    // iteration happens to be; two operators submitting a genuinely
+    // identical `force_stop` must fingerprint identically *on purpose*, not
+    // by an incidental property of a dependency this crate does not
+    // control. `canonical_struct` below walks the map itself and imposes an
+    // explicit sorted-key order before any of it reaches the hasher, so the
+    // guarantee holds regardless of what map implementation `parameters`'s
+    // type happens to use today or in a future dependency upgrade. `None`
+    // and an explicitly-empty `Struct` fingerprint identically here, the
+    // same equivalence raw `Message::encode_to_vec()` produced for that
+    // pair before this change (both encode to zero bytes).
+    let empty_parameters = prost_types::Struct::default();
+    canonical_struct(
+        input.parameters.as_ref().unwrap_or(&empty_parameters),
+        &mut field,
     );
     hasher.finalize().into()
+}
+
+/// Canonically encodes a `google.protobuf.Struct` into `field` -- the same
+/// length-prefixed sink [`fingerprint`] threads through all of its own
+/// fields. Entries are sorted lexicographically by key before encoding, and
+/// the entry count is written first: sorting makes the byte output
+/// independent of insertion order, and the count makes a nested `Struct`'s
+/// field list unambiguous against whatever follows it once everything is
+/// flattened into one hash input -- without a count, a one-entry struct
+/// whose value is itself a two-entry nested struct can encode to the exact
+/// same bytes as a two-entry struct whose second entry duplicates the first
+/// entry's nested content, since both would otherwise produce the same flat
+/// sequence of length-prefixed key/value tokens.
+fn canonical_struct<F: FnMut(&[u8])>(value: &prost_types::Struct, field: &mut F) {
+    let mut entries: Vec<(&String, &prost_types::Value)> = value.fields.iter().collect();
+    entries.sort_unstable_by_key(|entry| entry.0);
+    field(&(entries.len() as u64).to_le_bytes());
+    for (key, val) in entries {
+        field(key.as_bytes());
+        canonical_value(val, field);
+    }
+}
+
+/// Canonically encodes one `google.protobuf.Value` into `field`. Every
+/// [`Kind`] is matched explicitly -- including `kind` itself being `None`,
+/// which the proto docs call a producer error but which a caller-supplied
+/// `force_stop` request can still arrive carrying, so this still needs a
+/// defined encoding rather than a silent skip -- so that a variant added to
+/// `Kind` by a future `prost-types` upgrade fails this match at compile
+/// time instead of silently hashing as nothing. Each variant is written as
+/// a one-byte discriminant followed by its payload (if any): without that
+/// discriminant, two different variants whose payloads happen to produce
+/// the same length-prefixed bytes -- an 8-byte `NumberValue` and an
+/// 8-byte `StringValue`, for instance -- would be indistinguishable once
+/// merged into the same hash input.
+fn canonical_value<F: FnMut(&[u8])>(value: &prost_types::Value, field: &mut F) {
+    match &value.kind {
+        None => field(&[0]),
+        Some(Kind::NullValue(raw)) => {
+            field(&[1]);
+            field(&raw.to_le_bytes());
+        }
+        Some(Kind::NumberValue(number)) => {
+            field(&[2]);
+            field(&number.to_le_bytes());
+        }
+        Some(Kind::StringValue(string)) => {
+            field(&[3]);
+            field(string.as_bytes());
+        }
+        Some(Kind::BoolValue(boolean)) => {
+            field(&[4]);
+            field(&[u8::from(*boolean)]);
+        }
+        Some(Kind::StructValue(nested)) => {
+            field(&[5]);
+            canonical_struct(nested, field);
+        }
+        Some(Kind::ListValue(list)) => {
+            field(&[6]);
+            field(&(list.values.len() as u64).to_le_bytes());
+            for element in &list.values {
+                canonical_value(element, field);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +324,45 @@ mod tests {
             reason_code: Some("incident-42".to_owned()),
             parameters: None,
         }
+    }
+
+    fn number_value(number: f64) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(Kind::NumberValue(number)),
+        }
+    }
+
+    fn string_value(value: &str) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(Kind::StringValue(value.to_owned())),
+        }
+    }
+
+    fn bool_value(value: bool) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(Kind::BoolValue(value)),
+        }
+    }
+
+    fn struct_value(value: prost_types::Struct) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(Kind::StructValue(value)),
+        }
+    }
+
+    /// Builds a `parameters`-shaped `Struct` from `pairs`, inserting them in
+    /// the order given. `Struct::fields` is a `BTreeMap` (see
+    /// `canonical_struct`'s doc comment), so the map's own final layout
+    /// never actually depends on this order -- what these tests are
+    /// asserting is the *fingerprint*'s independence from it, as an explicit,
+    /// locally-enforced property of this module rather than an accident of
+    /// whatever collection type `parameters` happens to be backed by today.
+    fn struct_from(pairs: &[(&str, prost_types::Value)]) -> prost_types::Struct {
+        let mut fields = std::collections::BTreeMap::new();
+        for (key, value) in pairs {
+            fields.insert((*key).to_owned(), value.clone());
+        }
+        prost_types::Struct { fields }
     }
 
     #[test]
@@ -329,5 +450,104 @@ mod tests {
         let mut variant = input("agent-1");
         variant.parent_run_id = Some("parent-1".to_owned());
         assert_ne!(fingerprint(&base), fingerprint(&variant));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_regardless_of_parameters_field_insertion_order() {
+        let mut base = input("agent-1");
+        base.parameters = Some(struct_from(&[
+            ("action_scope", string_value("workspace")),
+            ("severity", string_value("critical")),
+            ("retries", number_value(3.0)),
+            ("dry_run", bool_value(false)),
+        ]));
+
+        // Same keys, same values, inserted in a different order -- exactly
+        // what two different gRPC client libraries serializing the same
+        // logical object are free to produce on the wire.
+        let mut reordered = input("agent-1");
+        reordered.parameters = Some(struct_from(&[
+            ("dry_run", bool_value(false)),
+            ("retries", number_value(3.0)),
+            ("action_scope", string_value("workspace")),
+            ("severity", string_value("critical")),
+        ]));
+
+        assert_eq!(fingerprint(&base), fingerprint(&reordered));
+    }
+
+    #[test]
+    fn fingerprint_still_distinguishes_genuinely_different_parameters() {
+        let mut base = input("agent-1");
+        base.parameters = Some(struct_from(&[
+            ("severity", string_value("critical")),
+            ("retries", number_value(3.0)),
+        ]));
+        let base_fp = fingerprint(&base);
+
+        // Same key set, one value changed.
+        let mut different_value = input("agent-1");
+        different_value.parameters = Some(struct_from(&[
+            ("severity", string_value("critical")),
+            ("retries", number_value(4.0)),
+        ]));
+        assert_ne!(base_fp, fingerprint(&different_value));
+
+        // Same keys as `base`, plus one more.
+        let mut extra_key = input("agent-1");
+        extra_key.parameters = Some(struct_from(&[
+            ("severity", string_value("critical")),
+            ("retries", number_value(3.0)),
+            ("extra", string_value("present")),
+        ]));
+        assert_ne!(base_fp, fingerprint(&extra_key));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_nested_struct_regardless_of_insertion_order() {
+        let mut base = input("agent-1");
+        base.parameters = Some(struct_from(&[
+            ("severity", string_value("critical")),
+            (
+                "context",
+                struct_value(struct_from(&[
+                    ("region", string_value("us-east-1")),
+                    ("incident_id", string_value("inc-42")),
+                ])),
+            ),
+        ]));
+
+        // Both the outer and the nested struct's keys are inserted in a
+        // different order than `base`.
+        let mut reordered = input("agent-1");
+        reordered.parameters = Some(struct_from(&[
+            (
+                "context",
+                struct_value(struct_from(&[
+                    ("incident_id", string_value("inc-42")),
+                    ("region", string_value("us-east-1")),
+                ])),
+            ),
+            ("severity", string_value("critical")),
+        ]));
+
+        assert_eq!(fingerprint(&base), fingerprint(&reordered));
+
+        // A genuinely different nested value must still change the
+        // fingerprint -- this is the part a fix that only sorted the
+        // top-level `Struct` (and encoded nested `StructValue`s with raw
+        // `Message::encode_to_vec()`) would miss.
+        let mut different_nested = input("agent-1");
+        different_nested.parameters = Some(struct_from(&[
+            ("severity", string_value("critical")),
+            (
+                "context",
+                struct_value(struct_from(&[
+                    ("region", string_value("us-west-2")),
+                    ("incident_id", string_value("inc-42")),
+                ])),
+            ),
+        ]));
+        assert_ne!(fingerprint(&base), fingerprint(&different_nested));
     }
 }
