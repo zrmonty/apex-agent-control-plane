@@ -288,6 +288,157 @@ fn file_outbox_settles_a_published_batch_in_one_journal_operation() {
     remove_dir_all(base).unwrap();
 }
 
+/// Fails fanout for exactly one configured event id and succeeds for every
+/// other event -- the "sink that 4xx/5xx's forever for a single valid event"
+/// scenario from the finding, as opposed to a malformed/poison row (which
+/// `pending`/`pending_batch` quarantine separately, before replay ever sees
+/// it).
+struct SinglePoisonPublisher {
+    poison_event_id: String,
+    published: Vec<String>,
+}
+
+impl EventPublisher for SinglePoisonPublisher {
+    fn publish(&mut self, event: &IngestRequest) -> Result<crate::PublishOutcome, GatewayError> {
+        if event.event_id == self.poison_event_id {
+            return Err(GatewayError::publish_failed());
+        }
+        self.published.push(event.event_id.clone());
+        Ok(crate::PublishOutcome::Published)
+    }
+}
+
+#[test]
+fn one_permanently_failing_event_does_not_block_the_rest_of_the_replay_batch() {
+    use crate::outbox::PendingEventReplayer;
+
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-replay-isolation-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let mut outbox = FileOutbox::open(&path, &base, 8).unwrap();
+    let poison = sample_event("018f5c91-2d88-7c00-8000-0000000000a1");
+    let good_events = [
+        sample_event("018f5c91-2d88-7c00-8000-0000000000a2"),
+        sample_event("018f5c91-2d88-7c00-8000-0000000000a3"),
+        sample_event("018f5c91-2d88-7c00-8000-0000000000a4"),
+    ];
+    outbox.enqueue(&poison).unwrap();
+    for event in &good_events {
+        outbox.enqueue(event).unwrap();
+    }
+
+    let publisher = SinglePoisonPublisher {
+        poison_event_id: poison.event_id.clone(),
+        published: Vec::new(),
+    };
+    let mut outboxed = OutboxedPublisher::new(publisher, outbox);
+
+    // Regression target: with the old `?`-propagating loop, whichever of
+    // these four rows the backend's (unordered, in this in-process test)
+    // iteration visited first would decide the outcome -- if the poison row
+    // came first, every other row silently never got attempted at all. The
+    // fix processes every row unconditionally, so the outcome no longer
+    // depends on iteration order.
+    outboxed
+        .replay_pending()
+        .expect("one isolated publish failure must not surface as a hard replay error");
+
+    let mut published = outboxed.publisher().published.clone();
+    published.sort();
+    let mut expected: Vec<String> = good_events.iter().map(|e| e.event_id.clone()).collect();
+    expected.sort();
+    assert_eq!(
+        published, expected,
+        "every non-poison event in the batch must still be published"
+    );
+
+    let remaining = outboxed.outbox_mut().pending();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the permanently-failing event should remain pending"
+    );
+    assert_eq!(remaining[0].event_id, poison.event_id);
+
+    remove_dir_all(base).unwrap();
+}
+
+/// Fails every publish it is asked to perform, counting attempts.
+#[derive(Default)]
+struct AlwaysFailingPublisher(usize);
+
+impl EventPublisher for AlwaysFailingPublisher {
+    fn publish(&mut self, _event: &IngestRequest) -> Result<crate::PublishOutcome, GatewayError> {
+        self.0 += 1;
+        Err(GatewayError::publish_failed())
+    }
+}
+
+#[test]
+fn a_permanently_failing_event_is_quarantined_after_the_replay_ceiling_instead_of_retried_forever()
+ {
+    use crate::outbox::PendingEventReplayer;
+
+    let base = std::env::temp_dir().join(format!(
+        "apex-outbox-replay-ceiling-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_dir(&base).unwrap();
+    let path = base.join("events.jsonl");
+    let mut outbox = FileOutbox::open(&path, &base, 4).unwrap();
+    let poison = sample_event("018f5c91-2d88-7c00-8000-0000000000b1");
+    outbox.enqueue(&poison).unwrap();
+
+    let mut outboxed = OutboxedPublisher::new(AlwaysFailingPublisher::default(), outbox);
+
+    // `FileOutbox::reschedule` (outbox/file_ops.rs) enforces
+    // MAX_PERSISTED_ATTEMPTS = 8: attempts 1..=7 push the row's
+    // `next_attempt_at` out and keep it pending; attempt 8 quarantines it
+    // instead of scheduling a 9th. `FileOutbox::pending()` (unlike
+    // `pending_batch`, which Postgres uses in production and applies the
+    // `next_attempt_at <= now()` gate server-side) does not itself gate on
+    // that deadline, so this loop reaches the ceiling without advancing a
+    // clock.
+    for _ in 0..8 {
+        outboxed
+            .replay_pending()
+            .expect("a failing publish must not surface as a hard replay error");
+    }
+
+    assert_eq!(
+        outboxed.publisher().0,
+        8,
+        "every attempt up to the ceiling must actually call publish"
+    );
+    assert!(
+        outboxed.outbox_mut().pending().is_empty(),
+        "the row must stop being offered for replay once quarantined"
+    );
+    assert_eq!(
+        outboxed.outbox_mut().quarantined_batch(4).unwrap().len(),
+        1,
+        "the row must be quarantined, not lost"
+    );
+
+    // The failure mode this guards against: retried forever. One more cycle
+    // must not call publish again for a row that is no longer pending.
+    outboxed.replay_pending().unwrap();
+    assert_eq!(outboxed.publisher().0, 8);
+
+    remove_dir_all(base).unwrap();
+}
+
 #[test]
 fn file_outbox_rejects_corrupt_records_without_dropping_state() {
     let base = std::env::temp_dir().join(format!(
