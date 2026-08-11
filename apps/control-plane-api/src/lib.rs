@@ -95,8 +95,8 @@ pub const MAX_CONTROL_REQUEST_BYTES: usize = 300 * 1024;
 /// this is generous headroom (a few thousand entries) while still bounding
 /// what a mounted file can make this process allocate on a background thread
 /// -- the same size class as `MAX_AGENT_TABLE_BYTES` in
-/// `startup::service`, which this constant lets that module reuse rather than
-/// guess a second number that has to be kept in sync by hand.
+/// `startup::service::resolvers`, which this constant lets that module reuse
+/// rather than guess a second number that has to be kept in sync by hand.
 pub const MAX_AGENT_REVOCATION_FILE_BYTES: usize = 256 * 1024;
 
 pub fn install_rustls_provider() {
