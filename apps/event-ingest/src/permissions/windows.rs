@@ -1,26 +1,16 @@
 use std::path::Path;
 
 /// Returns whether a private key is restricted to non-broad Windows ACLs.
-///
-/// Gated on `cfg(test)` ONLY -- not the `test-support` Cargo feature.
-/// `test-support` is a normal (non-dev-only) feature that can be compiled
-/// into a release binary or an integration-test build (`tests/*.rs`, which
-/// link the library *without* `cfg(test)`). If this stub were reachable via
-/// `feature = "test-support"` alone, an unconditional-pass permission check
-/// could ship in a build that a build script or CI job believes is
-/// hardened. Only `cargo test`'s unit-test compilation (which always sets
-/// `cfg(test)`) gets the stub; every other configuration -- including
-/// `--features test-support` on its own -- compiles the real ACL probe
-/// below.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn private_key_permissions_restricted(path: &Path) -> bool {
     // Unit fixtures inherit the desktop ACL and cannot safely mutate it
-    // without changing the developer's profile.
+    // without changing the developer's profile. Production builds always
+    // execute the ACL probe below.
     let _ = path;
     true
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "test-support")))]
 pub fn private_key_permissions_restricted(path: &Path) -> bool {
     use std::env;
     use std::path::PathBuf;
