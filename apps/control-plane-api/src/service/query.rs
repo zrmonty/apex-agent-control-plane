@@ -24,6 +24,10 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             .auth
             .authenticate(request.metadata())
             .map_err(CommandError::into_status)?;
+        self.admit(operator.subject())
+            .await
+            .map_err(CommandError::into_status)?;
+
         let input = request.into_inner();
         if input.workspace_id.is_empty()
             || input.namespace_id.is_empty()
@@ -73,6 +77,10 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             .auth
             .authenticate(request.metadata())
             .map_err(CommandError::into_status)?;
+        self.admit(operator.subject())
+            .await
+            .map_err(CommandError::into_status)?;
+
         let input = request.into_inner();
         if input.workspace_id.is_empty() || input.namespace_id.is_empty() {
             return Err(CommandError::invalid_command().into_status());
@@ -178,6 +186,10 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             .auth
             .authenticate(request.metadata())
             .map_err(CommandError::into_status)?;
+        self.admit(operator.subject())
+            .await
+            .map_err(CommandError::into_status)?;
+
         let input = request.into_inner();
         if input.workspace_id.is_empty()
             || input.namespace_id.is_empty()

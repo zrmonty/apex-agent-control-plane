@@ -438,3 +438,138 @@ async fn cancel_command_of_an_unknown_command_id_reports_neither_flag_set() {
     assert!(!response.cancelled);
     assert!(!response.already_cancelled);
 }
+
+// --- Admission (shared per-operator ceiling) ---------------------------
+//
+// `GetCommandStatus`, `ListCommands`, and `CancelCommand` used to be the
+// only three RPCs on this service that authenticated and scope-checked the
+// caller but never charged `self.admit(operator.subject())`. That let one
+// valid-but-unthrottled operator credential hold an unbounded share of the
+// shared `storage_slots` semaphore (`service.rs`, `MAX_STORAGE_OPERATIONS`)
+// via a tight query loop, starving `SubmitCommand` calls -- including a
+// `stop`/`force_stop` from a *different* operator -- of storage permits.
+// These tests pin that all three now charge the same ceiling
+// `SubmitCommand` already enforces, using `.with_admission_limits` (the
+// pattern `admission.rs` uses) to make the ceiling reachable without
+// sending dozens of real requests or racing the 1-second default window.
+
+#[tokio::test]
+async fn get_command_status_rate_limits_a_single_operator_after_the_configured_ceiling() {
+    let service = service().with_admission_limits(3, std::time::Duration::from_secs(60));
+    let command_id = fresh_command_id(0x900);
+    for _ in 0..3 {
+        service
+            .get_command_status(status_request("acme", "prod", &command_id))
+            .await
+            .unwrap();
+    }
+    let status = service
+        .get_command_status(status_request("acme", "prod", &command_id))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
+/// Also pins that the admission cost is exactly one unit per *call*, not
+/// per result or per requested `page_size`: every one of the three calls
+/// below asks for, and receives, a full `MAX_LIST_COMMANDS_PAGE_SIZE` page.
+/// If `do_list_commands` ever charged admission proportionally to
+/// `page_size` or to the number of rows returned, the 3-call ceiling would
+/// be exhausted before this test reaches its final, expected rejection.
+#[tokio::test]
+async fn list_commands_rate_limits_a_single_operator_after_the_configured_ceiling_regardless_of_page_size() {
+    let service = service().with_admission_limits(3, std::time::Duration::from_secs(60));
+    for index in 0..crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE + 25 {
+        seed_command(&service, "acme", "prod", "agent-a", &format!("cmd-{index}"));
+    }
+    let big_page_request = || {
+        list_commands_request(
+            "acme",
+            "prod",
+            None,
+            proto::CommandDeliveryState::Unspecified,
+            crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE as u32,
+            "",
+        )
+    };
+    for _ in 0..3 {
+        let response = service
+            .list_commands(list_request("op-token", big_page_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.commands.len(),
+            crate::inbox::MAX_LIST_COMMANDS_PAGE_SIZE,
+            "each call in this loop must return a genuinely full page"
+        );
+    }
+    let status = service
+        .list_commands(list_request("op-token", big_page_request()))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn cancel_command_rate_limits_a_single_operator_after_the_configured_ceiling() {
+    let service = service().with_admission_limits(3, std::time::Duration::from_secs(60));
+    // An unknown command_id still returns `Ok` with both flags unset (see
+    // `cancel_command_of_an_unknown_command_id_reports_neither_flag_set`
+    // above), so looping on one never-recorded id isolates the admission
+    // ceiling from `cancel`'s own state machine.
+    let command_id = fresh_command_id(0x901);
+    for _ in 0..3 {
+        service
+            .cancel_command(cancel_request("acme", "prod", &command_id))
+            .await
+            .unwrap();
+    }
+    let status = service
+        .cancel_command(cancel_request("acme", "prod", &command_id))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
+/// The fix's design choice, pinned directly: these three RPCs must charge
+/// the *same* per-operator bucket `SubmitCommand` does, not a second,
+/// query-specific ceiling (see `service.rs`'s `admit`/`admission` doc).
+/// Interleaving submissions and status checks from one operator must
+/// exhaust one shared ceiling exactly as fast as either kind alone.
+#[tokio::test]
+async fn submit_and_query_rpcs_share_one_admission_ceiling_per_operator() {
+    let service = service().with_admission_limits(4, std::time::Duration::from_secs(60));
+
+    let mut first_submit = stop_request();
+    first_submit.command_id = Some(fresh_command_id(0x9100));
+    service
+        .submit_command(authed_request(first_submit))
+        .await
+        .unwrap();
+    let mut second_submit = stop_request();
+    second_submit.command_id = Some(fresh_command_id(0x9101));
+    service
+        .submit_command(authed_request(second_submit))
+        .await
+        .unwrap();
+
+    let command_id = fresh_command_id(0x902);
+    service
+        .get_command_status(status_request("acme", "prod", &command_id))
+        .await
+        .unwrap();
+    service
+        .get_command_status(status_request("acme", "prod", &command_id))
+        .await
+        .unwrap();
+
+    // The ceiling of 4 is now spent: 2 submissions + 2 status checks. A
+    // 5th call of either kind must be rejected -- proving the two RPC
+    // families draw from one bucket rather than independent ones.
+    let status = service
+        .get_command_status(status_request("acme", "prod", &command_id))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
