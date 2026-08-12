@@ -376,10 +376,13 @@ fn converge(event_id: &str, seconds: u64) {
 // Test
 // ---------------------------------------------------------------------------
 
-/// The deterministic window: the archive is down, so the fanout is guaranteed
-/// to be mid-flight (JetStream published, ClickHouse written, archive
-/// retrying) when the gateway is SIGKILLed. The Pending outbox record is
-/// already fsynced; nothing has marked it complete.
+/// The deterministic window: the archive is down, so once the dedicated
+/// fanout worker picks the row up, its delivery is guaranteed to be stuck
+/// retrying against the archive (JetStream published, ClickHouse written)
+/// when the gateway is SIGKILLed. Admission itself (Phase 0.6: durable
+/// enqueue only, decoupled from fanout) returns almost immediately
+/// regardless of archive health -- the Pending outbox record is fsynced by
+/// the `send` call below; nothing has marked it complete yet either way.
 ///
 /// After restart the event must be durable exactly once and the outbox row
 /// must be settled.

@@ -437,6 +437,13 @@ fn an_identical_replay_after_outbox_reconciliation_is_reported_as_duplicate() {
 ///
 /// Guards the other direction: making duplicates truthful must not make every
 /// answer "duplicate".
+///
+/// Phase 0.6: `Accepted` now means "durably enqueued", not "fanned out" --
+/// `OutboxedPublisher::publish` no longer calls the fanout publisher inline.
+/// This test proves both halves of that: the fanout publisher sees nothing
+/// until the dedicated worker (`replay_pending`, driven in production by
+/// `spawn_fanout_worker`) actually runs, and once it does, delivery still
+/// happens exactly once.
 #[test]
 fn a_first_submission_through_the_outbox_still_reports_accepted() {
     let outbox = InMemoryOutbox::new(8).unwrap();
@@ -448,6 +455,14 @@ fn a_first_submission_through_the_outbox_still_reports_accepted() {
         gateway.ingest(&scope_caller(), sample_request(EVENT)).unwrap(),
         IngestOutcome::Accepted
     );
+    assert!(
+        gateway.publisher().publisher().published_event_ids().is_empty(),
+        "admission must durably enqueue only -- fanout must not happen on this call stack"
+    );
+
+    // Driving the fanout worker's replay pass is what actually delivers the
+    // durably-enqueued row.
+    gateway.replay_pending().expect("fanout worker pass drains the pending row");
     assert_eq!(
         gateway.publisher().publisher().published_event_ids(),
         [EVENT.to_owned()]

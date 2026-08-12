@@ -6,10 +6,10 @@ use zeroize::Zeroizing;
 use apex_event_ingest::{
     ArchiveHttpPublisher, AsyncNatsJetStreamClient, AuthenticatedGrpcService,
     AuthenticatedHttpConfig, AuthenticatedIngestAdapter, BearerTokenVerifier,
-    DurableFanoutPublisher, EventOutbox, FileIdempotencyStore, FileOutbox, FindingJournal,
-    IdempotencyStore, IngestGateway, NatsJetStreamTransport, NatsTlsConfig, OutboxedPublisher,
-    PendingEventReplayer, RetryingDurableSink, RetryingJetStreamTransport,
-    bounded_event_ingest_server,
+    DurableFanoutPublisher, EventOutbox, EventPublisher, FileIdempotencyStore, FileOutbox,
+    FindingJournal, IdempotencyStore, IngestGateway, NatsJetStreamTransport, NatsTlsConfig,
+    OutboxedPublisher, PendingEventReplayer, RetryingDurableSink, RetryingJetStreamTransport,
+    SharedOutbox, bounded_event_ingest_server, spawn_fanout_worker,
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
@@ -25,16 +25,31 @@ use super::error::startup_gateway_error;
 use super::secrets::{read_bounded, read_token, trusted_secret_path};
 
 const MAX_IDEMPOTENCY_CAPACITY: usize = 1_000_000;
-type DurabilityStores = (Box<dyn EventOutbox>, Box<dyn IdempotencyStore + Send>);
-type DurabilityResult = Result<DurabilityStores, Box<dyn std::error::Error>>;
 
-/// Synchronous by design: every client built below owns an internal runtime and
-/// blocks on it during construction, so this must not run on a thread that
-/// already has a tokio runtime entered. The runtime this process serves on is
-/// created at the end, once construction is complete.
-pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let trusted_base = path("APEX_TRUSTED_SECRET_BASE")?;
-    let retry_attempts = attempts()?;
+/// Admission's outbox handle, the fanout worker's outbox handle (see
+/// `open_durability_stores`), and the idempotency store.
+type DurabilityStores = (
+    Box<dyn EventOutbox>,
+    Box<dyn EventOutbox>,
+    Box<dyn IdempotencyStore + Send>,
+);
+
+/// Builds one complete, independently-connected JetStream/ClickHouse/archive
+/// fanout stack. Called twice by `run`: once for the durable-enqueue-only
+/// admission publisher (which only still needs a real fanout to satisfy
+/// `OutboxedPublisher<P, O>`'s `P` and to run the one-shot pre-serve replay
+/// below -- it is never invoked on the live admission path after Phase 0.6),
+/// and once for the dedicated background fanout worker's own
+/// `OutboxedPublisher`, so the two never share a NATS connection or HTTP
+/// client and neither can stall the other.
+///
+/// Synchronous by design, like `run` itself: every client built here owns an
+/// internal runtime and blocks on it during construction, so this must not
+/// run on a thread that already has a tokio runtime entered.
+fn build_fanout_publisher(
+    trusted_base: &std::path::Path,
+    retry_attempts: usize,
+) -> Result<impl EventPublisher + Send + 'static, Box<dyn std::error::Error>> {
     let nats_config = NatsTlsConfig {
         server_url: required("APEX_NATS_URL")?,
         ca_file: path("APEX_NATS_CA_FILE")?,
@@ -43,9 +58,9 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         username_file: optional_path("APEX_NATS_USERNAME_FILE")?,
         password_file: optional_path("APEX_NATS_PASSWORD_FILE")?,
     };
-    let nats = AsyncNatsJetStreamClient::connect(&nats_config, &trusted_base)
+    let nats = AsyncNatsJetStreamClient::connect(&nats_config, trusted_base)
         .map_err(startup_gateway_error)?;
-    let nats = NatsJetStreamTransport::new(nats, nats_config, &trusted_base)
+    let nats = NatsJetStreamTransport::new(nats, nats_config, trusted_base)
         .map_err(startup_gateway_error)?;
     let nats =
         RetryingJetStreamTransport::new(nats, retry_attempts).map_err(startup_gateway_error)?;
@@ -57,7 +72,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         client_key_file: path("APEX_CLICKHOUSE_CLIENT_KEY_FILE")?,
         bearer_token_file: optional_path("APEX_CLICKHOUSE_BEARER_FILE")?,
     };
-    let clickhouse = apex_event_ingest::ClickHouseHttpPublisher::new(http_base, &trusted_base)
+    let clickhouse = apex_event_ingest::ClickHouseHttpPublisher::new(http_base, trusted_base)
         .map_err(startup_gateway_error)?;
     let clickhouse =
         RetryingDurableSink::new(clickhouse, retry_attempts).map_err(startup_gateway_error)?;
@@ -70,11 +85,84 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         bearer_token_file: optional_path("APEX_ARCHIVE_BEARER_FILE")?,
     };
     let archive =
-        ArchiveHttpPublisher::new(archive_config, &trusted_base).map_err(startup_gateway_error)?;
+        ArchiveHttpPublisher::new(archive_config, trusted_base).map_err(startup_gateway_error)?;
     let archive =
         RetryingDurableSink::new(archive, retry_attempts).map_err(startup_gateway_error)?;
 
-    let fanout = DurableFanoutPublisher::new(nats, clickhouse, archive);
+    Ok(DurableFanoutPublisher::new(nats, clickhouse, archive))
+}
+
+/// Opens the durable outbox for both admission and the dedicated fanout
+/// worker (Phase 0.6 item 2/3).
+///
+/// Postgres is the scale target: admission and the worker each get their own
+/// connection, and `PostgresOutbox`'s atomic claim (`pending_batch`'s
+/// `SELECT ... FOR UPDATE SKIP LOCKED`, see `outbox/postgres_replay.rs`)
+/// makes two independent connections safe without any in-process
+/// coordination between them.
+///
+/// File/memory are single-writer lab/embedded backends, not the scale
+/// target: a single instance is opened once and wrapped in `SharedOutbox` so
+/// admission and the worker share the exact same in-process state instead of
+/// each keeping a diverging view of the same file. They contend on
+/// `SharedOutbox`'s mutex; that contention is an accepted trade-off for
+/// these backends, not something worth engineering around.
+fn open_durability_stores(
+    capacity: usize,
+) -> Result<DurabilityStores, Box<dyn std::error::Error>> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Ok(url) = std::env::var("APEX_POSTGRES_URL")
+            && !url.trim().is_empty()
+        {
+            let admission_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
+                .map_err(startup_gateway_error)?;
+            let worker_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
+                .map_err(startup_gateway_error)?;
+            let idempotency = apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
+                .map_err(startup_gateway_error)?;
+            return Ok((
+                Box::new(admission_outbox),
+                Box::new(worker_outbox),
+                Box::new(idempotency),
+            ));
+        }
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        if std::env::var("APEX_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_POSTGRES_URL is set but this binary was not built with --features postgres",
+            )
+            .into());
+        }
+    }
+    let outbox_file = path("APEX_OUTBOX_FILE")?;
+    let outbox_base = path("APEX_OUTBOX_BASE")?;
+    let outbox =
+        FileOutbox::open(&outbox_file, &outbox_base, capacity).map_err(startup_gateway_error)?;
+    let shared: Box<dyn EventOutbox> = Box::new(outbox);
+    let shared = SharedOutbox::new(shared);
+    let idempotency_file = path("APEX_IDEMPOTENCY_FILE")?;
+    let idempotency_base = path("APEX_IDEMPOTENCY_BASE")?;
+    let idempotency = FileIdempotencyStore::open(&idempotency_file, &idempotency_base, capacity)
+        .map_err(startup_gateway_error)?;
+    Ok((
+        Box::new(shared.clone()),
+        Box::new(shared),
+        Box::new(idempotency),
+    ))
+}
+
+pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let trusted_base = path("APEX_TRUSTED_SECRET_BASE")?;
+    let retry_attempts = attempts()?;
+    let fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
     let capacity = std::env::var("APEX_IDEMPOTENCY_CAPACITY")
         .unwrap_or_else(|_| "50000".to_owned())
         .parse::<usize>()
@@ -91,8 +179,15 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let (outbox, idempotency) = open_durability_stores(capacity)?;
-    let mut publisher = OutboxedPublisher::new(fanout, outbox);
+    let (admission_outbox, worker_outbox, idempotency) = open_durability_stores(capacity)?;
+    let mut publisher = OutboxedPublisher::new(fanout, admission_outbox);
+    // One-shot pre-serve catch-up: replays whatever was left `pending` by a
+    // previous process before this one accepts any traffic, using the same
+    // admission-side fanout built above. Safe to run synchronously here
+    // because nothing is serving yet, so there is no concurrent admission
+    // call to contend with. After this point `publisher` is enqueue-only
+    // (see `OutboxedPublisher::publish` in `outbox/publisher.rs`); the
+    // dedicated fanout worker below is what performs fanout from here on.
     if let Err(error) = publisher.replay_pending() {
         if !error.retryable {
             return Err(startup_gateway_error(error).into());
@@ -103,6 +198,15 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             error.summary
         );
     }
+    // The dedicated background fanout worker (Phase 0.6): its own fanout
+    // publisher (a second, independent JetStream/ClickHouse/archive stack)
+    // and its own outbox handle (`worker_outbox` -- a second Postgres
+    // connection, or the other `SharedOutbox` clone for file/memory), so its
+    // slow archive PUT+verify never runs under the admission adapter's
+    // mutex. Built here, before the runtime exists, for the same reason
+    // `fanout` above is: construction blocks on an internal runtime.
+    let worker_fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
+    let fanout_worker = OutboxedPublisher::new(worker_fanout, worker_outbox);
     let alert_capacity = std::env::var("APEX_SECURITY_ALERT_CAPACITY")
         .unwrap_or_else(|_| "100000".to_owned())
         .parse::<usize>()
@@ -208,9 +312,16 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     runtime.block_on(async move {
         let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
-        // Borrows `service` to clone its internal Arc handles, so the service
-        // itself can still be moved into the router below.
-        let _replay_worker = service.spawn_replay_worker(Duration::from_secs(5));
+        // Phase 0.6: the dedicated fanout worker is now the PRIMARY fanout
+        // path, and it deliberately does not go through `service`/the
+        // admission adapter mutex at all -- see `spawn_fanout_worker`'s doc
+        // comment in `outbox/publisher.rs`. `AuthenticatedGrpcService::
+        // spawn_replay_worker` still exists (and is still exercised by
+        // tests) as a manual/fallback replay path reachable through the
+        // admission adapter, but wiring it here as well would reintroduce
+        // exactly the contention this refactor removes, so it is not
+        // spawned in production.
+        let _fanout_worker = spawn_fanout_worker(fanout_worker, Duration::from_secs(5));
         // See FINDING #5: `EventOutbox::maintain` was fully implemented and
         // unit-tested but had no production call site, so the outbox
         // capacity check (which counts `complete` rows identically to
@@ -323,44 +434,6 @@ fn spawn_idempotency_reaper(
     _capacity: usize,
 ) -> Result<Option<tokio::task::JoinHandle<()>>, Box<dyn std::error::Error>> {
     Ok(None)
-}
-
-fn open_durability_stores(capacity: usize) -> DurabilityResult {
-    #[cfg(feature = "postgres")]
-    {
-        if let Ok(url) = std::env::var("APEX_POSTGRES_URL")
-            && !url.trim().is_empty()
-        {
-            let outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
-                .map_err(startup_gateway_error)?;
-            let idempotency = apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
-                .map_err(startup_gateway_error)?;
-            return Ok((Box::new(outbox), Box::new(idempotency)));
-        }
-    }
-    #[cfg(not(feature = "postgres"))]
-    {
-        if std::env::var("APEX_POSTGRES_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "APEX_POSTGRES_URL is set but this binary was not built with --features postgres",
-            )
-            .into());
-        }
-    }
-    let outbox_file = path("APEX_OUTBOX_FILE")?;
-    let outbox_base = path("APEX_OUTBOX_BASE")?;
-    let outbox =
-        FileOutbox::open(&outbox_file, &outbox_base, capacity).map_err(startup_gateway_error)?;
-    let idempotency_file = path("APEX_IDEMPOTENCY_FILE")?;
-    let idempotency_base = path("APEX_IDEMPOTENCY_BASE")?;
-    let idempotency = FileIdempotencyStore::open(&idempotency_file, &idempotency_base, capacity)
-        .map_err(startup_gateway_error)?;
-    Ok((Box::new(outbox), Box::new(idempotency)))
 }
 
 type SharedEphemeralStore = Arc<Mutex<Box<dyn apex_event_ingest::EphemeralStore>>>;

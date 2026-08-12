@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -225,6 +226,22 @@ where
         true
     }
 
+    /// Phase 0.6: admission is durable-enqueue-only. No downstream fanout
+    /// happens on this call stack any more -- `self.publisher` (the actual
+    /// JetStream/ClickHouse/archive fanout) is deliberately never called
+    /// here. `Enqueued` maps to `Published`, which from this call forward
+    /// means "durably committed to the outbox", not "delivered to every
+    /// sink"; delivery is the dedicated fanout worker's job
+    /// (`spawn_fanout_worker` below), running off a separate outbox handle
+    /// so it never contends with admission's mutex. See
+    /// `IngestGateway::ingest_inner` in `gateway/core.rs`, which maps this
+    /// outcome to `IngestOutcome::Accepted` -- "durably enqueued", the same
+    /// semantics change documented there.
+    ///
+    /// The `AlreadyPending`/`AlreadyComplete` handling is unchanged: a live
+    /// request still never races a replay worker or another request into a
+    /// second fanout, and a request for an already-completed event still
+    /// never touches `self.publisher` either.
     fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError> {
         match self.outbox.enqueue(event)? {
             // The outbox already holds a completed row for this exact payload
@@ -232,24 +249,70 @@ where
             // really is the same event, not merely the same id). Say so
             // instead of returning a bare Ok that the caller cannot tell apart
             // from a fresh publish.
-            EnqueueResult::AlreadyComplete => return Ok(PublishOutcome::AlreadyComplete),
+            EnqueueResult::AlreadyComplete => Ok(PublishOutcome::AlreadyComplete),
             EnqueueResult::AlreadyPending => {
                 // A live request must never race a replay worker or another
                 // request into a second fanout. Workers need a separate claim
                 // API that atomically transfers ownership before publishing.
-                return Err(GatewayError::new(
+                Err(GatewayError::new(
                     crate::GatewayErrorCode::IdempotencyInProgress,
-                ));
+                ))
             }
-            EnqueueResult::Enqueued => {}
+            EnqueueResult::Enqueued => Ok(PublishOutcome::Published),
         }
-        self.publisher.publish(event)?;
-        let key = OutboxKey {
-            workspace_id: event.workspace_id.clone(),
-            namespace_id: event.namespace_id.clone(),
-            event_id: event.event_id.clone(),
-        };
-        self.outbox.mark_complete(&key)?;
-        Ok(PublishOutcome::Published)
     }
+}
+
+/// Spawns the dedicated background fanout worker.
+///
+/// This is the PRIMARY fanout path as of Phase 0.6: `EventPublisher::publish`
+/// above only durably enqueues, so nothing downstream of the outbox commit
+/// runs on the admission call stack, and nothing downstream blocks on the
+/// admission adapter's mutex (`AuthenticatedGrpcService`'s
+/// `adapter: Arc<Mutex<...>>`) any more. This loop is what actually delivers
+/// a durably-enqueued row to JetStream/ClickHouse/archive.
+///
+/// `worker` should own its OWN fanout publisher and its OWN outbox handle,
+/// entirely separate from the admission path's -- a second `PostgresOutbox`
+/// connection for the scale target, or a `SharedOutbox` handle shared with
+/// admission for the file/memory lab backends (see
+/// `startup::service::open_durability_stores`, the only production caller).
+/// Either way, a slow archive PUT+verify in this loop never blocks a
+/// concurrent `ingest` call.
+///
+/// Runs on a dedicated blocking OS thread (`spawn_blocking`), not a plain
+/// `tokio::spawn` async task calling a sync method directly:
+/// `PostgresOutbox` blocks its own internal runtime for every query (see
+/// `control-plane-api/src/replay.rs`'s `with_lock_from_async` doc comment
+/// for the exact hazard this avoids), which panics with "Cannot start a
+/// runtime from within a runtime" if driven from a tokio worker thread.
+/// `spawn_idempotency_reaper` in `startup/service.rs` uses the identical
+/// pattern for the same reason.
+///
+/// Reuses `replay_pending`'s existing per-event isolation and bounded
+/// backoff (`replay_pending_inner` above) unchanged: one permanently-failing
+/// event is rescheduled and, past the backend's own durable attempt
+/// ceiling, quarantined -- and never blocks any other row in the batch.
+pub fn spawn_fanout_worker<P, O>(
+    mut worker: OutboxedPublisher<P, O>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()>
+where
+    P: EventPublisher + Send + 'static,
+    O: EventOutbox + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        loop {
+            std::thread::sleep(interval);
+            let result = catch_unwind(AssertUnwindSafe(|| worker.replay_pending()))
+                .unwrap_or_else(|_| Err(GatewayError::internal()));
+            if let Err(error) = result {
+                eprintln!(
+                    "event-ingest fanout worker deferred: {}: {}",
+                    error.code.public_code(),
+                    error.summary
+                );
+            }
+        }
+    })
 }

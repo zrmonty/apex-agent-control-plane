@@ -165,10 +165,24 @@ fn outboxed_publisher_skips_fanout_for_already_complete_and_replays_pending() {
         "prod",
         b"payload".to_vec(),
     );
+    // Phase 0.6: `publish` only durably enqueues now -- it must not fan out
+    // inline, so the fanout publisher sees zero calls right after admission
+    // accepts the event. Driving `replay_pending` is what actually delivers
+    // it, off the admission call stack entirely (see `spawn_fanout_worker`).
     outboxed
         .publish(&event)
-        .expect("first publish enqueues and fans out");
+        .expect("first publish durably enqueues");
+    assert_eq!(
+        outboxed.publisher.0, 0,
+        "publish must not fan out inline -- that is the dedicated fanout worker's job"
+    );
+    outboxed
+        .replay_pending()
+        .expect("replay drains the freshly enqueued row");
     assert_eq!(outboxed.publisher.0, 1);
+
+    // A second `publish` of the now-complete event must still be a no-op:
+    // no re-enqueue, no second fanout call.
     outboxed.publish(&event).expect("complete row is a no-op");
     assert_eq!(outboxed.publisher.0, 1);
 
