@@ -268,6 +268,21 @@ fn assert_landed_exactly_once(label: &str, event_id: &str) {
     assert_eq!(archive_objects(event_id), 1, "{label}: expected exactly one archive object");
 }
 
+/// Phase 0.6: admission durably enqueues and acknowledges independently of
+/// downstream fanout, which now happens in a background worker off the
+/// admission call stack. An accepted response is therefore no longer proof
+/// that JetStream/ClickHouse/archive already have the event -- callers that
+/// need to assert on sink state must poll for the worker to catch up first.
+fn wait_for_landed_exactly_once(event_id: &str, seconds: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < deadline {
+        if clickhouse_rows(event_id) == 1 && archive_objects(event_id) == 1 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 fn skip(name: &str) -> bool {
     if gateway_endpoint().is_none() {
         eprintln!("skip {name}: set APEX_ADVERSARIAL_GATEWAY to a running gateway");
@@ -394,6 +409,7 @@ fn replay_is_idempotent_and_tampered_replay_is_rejected() {
         send_envelope(&channel, envelope.clone()).await.expect("first submission");
         let second = send_envelope(&channel, envelope.clone()).await.expect("exact replay accepted");
         assert!(second.duplicate, "exact replay must report duplicate");
+        wait_for_landed_exactly_once(&id, 30);
         assert_landed_exactly_once("exact replay", &id);
 
         // Replay with one field changed under the same event_id: an idempotency
@@ -440,6 +456,9 @@ fn concurrent_identical_submissions_land_exactly_once() {
         }
         assert!(accepted >= 1, "at least one concurrent submission must succeed");
         // Regardless of how many callers got an OK, the stores must hold one.
+        // Fanout is a background worker now, so give it time to catch up
+        // before asserting on sink state.
+        wait_for_landed_exactly_once(&id, 30);
         assert_landed_exactly_once("8 concurrent identical submissions", &id);
     });
 }

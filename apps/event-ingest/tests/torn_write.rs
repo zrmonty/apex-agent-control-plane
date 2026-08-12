@@ -302,7 +302,16 @@ fn clickhouse_outage_does_not_produce_a_partial_landing() {
     });
 
     let (valid, invalid) = outage_result;
-    assert!(valid.is_err(), "a valid event must not be acknowledged while a sink is down");
+    // Phase 0.6: admission durably enqueues and acknowledges independently of
+    // downstream sink health -- fanout runs in a background worker, off this
+    // call stack entirely. A *valid* event is therefore acknowledged even
+    // while ClickHouse is down; only a structurally/cryptographically
+    // invalid event is refused, because that check runs before the outbox is
+    // ever touched.
+    let valid = valid.expect(
+        "a valid event must be durably enqueued and acknowledged even while a downstream sink is down",
+    );
+    assert!(!valid.duplicate, "first submission of a new event must not be reported as a duplicate");
     assert!(invalid.is_err(), "a forged event must be refused during an outage too");
 
     // The archive is still up. The fanout reached it only if ClickHouse
@@ -359,7 +368,13 @@ fn archive_outage_converges_to_exactly_once_after_recovery() {
         let channel = channel().await;
         send(&channel, sign(base(&id))).await
     });
-    assert!(result.is_err(), "an event must not be acknowledged while the archive is down");
+    // Phase 0.6: admission acknowledges once the event is durably enqueued,
+    // independent of archive health -- the archive write happens later, in
+    // the background fanout worker.
+    let response = result.expect(
+        "a valid event must be durably enqueued and acknowledged even while the archive is down",
+    );
+    assert!(!response.duplicate, "first submission of a new event must not be reported as a duplicate");
     assert_eq!(archive_objects_when_down(), 0, "archive is down; nothing can have landed there");
 
     // The outbox must still own the row.
@@ -403,7 +418,13 @@ fn pending_outbox_rows_survive_and_do_not_duplicate() {
         let channel = channel().await;
         send(&channel, sign(base(&id))).await
     });
-    assert!(result.is_err(), "fanout must fail while ClickHouse is down");
+    // Phase 0.6: admission enqueues and acknowledges durably, independent of
+    // ClickHouse health, so the first submission succeeds even with
+    // ClickHouse down. Because the outbox commit -- not fanout -- is now the
+    // durability boundary, the idempotency reservation also commits on this
+    // same call; there is no torn reservation to reconcile later.
+    let first = result.expect("a valid event must be durably enqueued and acknowledged while ClickHouse is down");
+    assert!(!first.duplicate, "first submission of a new event must not be reported as a duplicate");
 
     let pending = outbox_lines(&id);
     assert!(!pending.is_empty(), "no pending outbox row to recover from");
@@ -421,28 +442,27 @@ fn pending_outbox_rows_survive_and_do_not_duplicate() {
     assert_eq!(archive_objects(&id), 1, "pending row replayed into a duplicate archive object");
 
     // Re-submitting the same event afterwards must be a duplicate, not a
-    // second fanout -- the idempotency key has to have survived the tear.
+    // second fanout.
     let second = runtime().block_on(async {
         let channel = channel().await;
         send(&channel, sign(base(&id))).await
     });
     let response = second.expect("an identical replay after recovery must not be rejected");
 
-    // The event was made durable by the replay worker, not by this call, so
-    // this call must say `duplicate`. It used to say `duplicate: false`: a
-    // publish failure aborts the idempotency reservation while the outbox row
-    // survives and is later completed by the replay worker, leaving the
-    // idempotency journal with no memory of the key while the outbox answered
-    // AlreadyComplete -- and `publish` returned a bare `Ok(())` that the
-    // gateway could not tell apart from a fresh publish.
-    //
-    // `EventPublisher::publish` now returns `PublishOutcome`, so the gateway
-    // distinguishes the two and settles the reservation, healing the
-    // divergence. See src/gateway/publisher.rs.
+    // Because the first submission's idempotency commit already succeeded
+    // (it never depended on fanout completing -- see
+    // `src/gateway/publisher.rs`), this resubmission takes the fast
+    // idempotency-store duplicate path, the same path an ordinary duplicate
+    // always took. There is no admission-time reconciliation to prove here
+    // any more: the outbox-completed/idempotency-missing divergence this
+    // assertion originally guarded against can now only arise from an
+    // idempotency *commit* failure (unrelated to sink health), which is
+    // exercised directly in
+    // `an_identical_replay_after_outbox_reconciliation_is_reported_as_duplicate`
+    // in `src/gateway/tests.rs`.
     assert!(
         response.duplicate,
-        "an event already made durable by outbox replay must be reported as a \
-         duplicate, not as though this call stored it"
+        "a resubmission of an already-accepted event must be reported as a duplicate"
     );
 
     // The next identical submission must also be a duplicate, now via the fast
@@ -460,15 +480,24 @@ fn pending_outbox_rows_survive_and_do_not_duplicate() {
     assert_eq!(archive_objects(&id), 1, "post-recovery replay duplicated the archive object");
 }
 
-/// After a torn fanout has been reconciled by outbox replay, reusing the same
-/// `event_id` with DIFFERENT content must still be an idempotency conflict.
+/// After a delayed fanout has completed, reusing the same `event_id` with
+/// DIFFERENT content must still be an idempotency conflict.
 ///
-/// Regression guard. A publish failure aborts the idempotency reservation while
-/// the outbox row survives and is later completed by the replay worker. That
-/// leaves the two journals disagreeing: the idempotency store has no record of
-/// the key, and the outbox's completed-key set carried no payload fingerprint,
-/// so a re-submission under the same id was answered `Accepted` no matter what
-/// it contained -- acknowledging an event the system never stored.
+/// Regression guard, updated for Phase 0.6's decoupled admission. The
+/// original scenario this guarded (a publish failure aborting the
+/// idempotency reservation while the outbox row survived and was later
+/// completed by the replay worker, leaving the idempotency store with no
+/// memory of the key) can no longer be induced by a downstream sink outage:
+/// admission commits the idempotency reservation as soon as the event is
+/// durably enqueued, before fanout ever runs. This test now proves the
+/// simpler, still-necessary property it implies: a payload change under an
+/// already-accepted `event_id` is rejected as a conflict by the fast
+/// idempotency-store path, regardless of whether fanout has delivered the
+/// original payload yet. The admission-time outbox/idempotency divergence
+/// itself is still exercised directly -- via `IdempotencyStore::commit`
+/// failing, not a sink outage -- by
+/// `an_identical_replay_after_outbox_reconciliation_is_reported_as_duplicate`
+/// in `src/gateway/tests.rs`.
 #[test]
 fn tampered_replay_after_a_torn_fanout_is_still_a_conflict() {
     if skip("tampered_replay_after_a_torn_fanout_is_still_a_conflict") {
@@ -476,15 +505,20 @@ fn tampered_replay_after_a_torn_fanout_is_still_a_conflict() {
     }
     let id = event_id(31);
 
-    // 1. Tear the fanout: ClickHouse down, so the outbox row stays pending.
+    // 1. Enqueue while ClickHouse is down, so the outbox row stays pending.
+    // Phase 0.6: admission acknowledges this durably-enqueued submission
+    // immediately -- it no longer waits on ClickHouse -- so this is the
+    // original, accepted payload for `id`, not a rejected attempt.
     stop(&ch_container());
-    let torn = runtime().block_on(async {
+    let original = runtime().block_on(async {
         let channel = channel().await;
         send(&channel, sign(base(&id))).await
     });
-    assert!(torn.is_err(), "fanout must fail while ClickHouse is down");
+    let original =
+        original.expect("a valid event must be durably enqueued and acknowledged while ClickHouse is down");
+    assert!(!original.duplicate, "first submission of a new event must not be reported as a duplicate");
 
-    // 2. Recover and let the replay worker complete the original payload.
+    // 2. Recover and let the fanout worker deliver the original payload.
     start(&ch_container());
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {

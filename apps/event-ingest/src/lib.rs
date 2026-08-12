@@ -56,7 +56,7 @@ pub use nats::{AsyncNatsJetStreamClient, NatsClient, NatsJetStreamTransport, Nat
 pub use outbox::PostgresOutbox;
 pub use outbox::{
     EnqueueResult, EventOutbox, FileOutbox, InMemoryOutbox, OutboxKey, OutboxMaintainer,
-    OutboxedPublisher, PendingEventReplayer,
+    OutboxedPublisher, PendingEventReplayer, SharedOutbox, spawn_fanout_worker,
 };
 pub use persistence::{FindingJournal, FindingPersistenceError};
 #[cfg(feature = "postgres")]
