@@ -263,7 +263,19 @@ fn assert_nothing_landed(label: &str, event_id: &str) {
 }
 
 /// Proves an accepted event landed exactly once everywhere.
+///
+/// Phase 0.6: admission durably enqueues and acknowledges independently of
+/// downstream fanout, which now runs in a background worker off the admission
+/// call stack. An accepted response is no longer proof that ClickHouse/archive
+/// already hold the event, so this polls for the worker to catch up before
+/// asserting -- and still fails informatively if the event never lands.
 fn assert_landed_exactly_once(label: &str, event_id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline
+        && !(clickhouse_rows(event_id) == 1 && archive_objects(event_id) == 1)
+    {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     assert_eq!(clickhouse_rows(event_id), 1, "{label}: expected exactly one ClickHouse row");
     assert_eq!(archive_objects(event_id), 1, "{label}: expected exactly one archive object");
 }
