@@ -18,6 +18,7 @@ impl FileOutbox {
                 envelope: event.envelope.clone(),
                 next_attempt_at_millis: self.next_attempt_at_millis.get(key).copied(),
                 attempts: self.attempts.get(key).copied(),
+                created_at_millis: self.pending_since_millis.get(key).copied(),
             });
         }
         for (key, fingerprint) in &self.complete {
@@ -144,6 +145,7 @@ impl EventOutbox for FileOutbox {
                 crate::GatewayErrorCode::IdempotencyCapacity,
             ));
         }
+        let created_at_millis = now_millis();
         self.append(&FileOutboxRecord::Pending {
             workspace_id: key.workspace_id.clone(),
             namespace_id: key.namespace_id.clone(),
@@ -151,7 +153,9 @@ impl EventOutbox for FileOutbox {
             envelope: event.envelope.clone(),
             next_attempt_at_millis: None,
             attempts: None,
+            created_at_millis: Some(created_at_millis),
         })?;
+        self.pending_since_millis.insert(key.clone(), created_at_millis);
         self.pending.insert(key, event.clone());
         Ok(EnqueueResult::Enqueued)
     }
@@ -176,6 +180,7 @@ impl EventOutbox for FileOutbox {
                 envelope: event.as_ref().map(|event| event.envelope.clone()),
             })?;
             self.pending.remove(key);
+            self.pending_since_millis.remove(key);
             self.complete.insert(key.clone(), fingerprint);
             if let Some(event) = event {
                 self.complete_events.insert(key.clone(), event);
@@ -212,6 +217,7 @@ impl EventOutbox for FileOutbox {
         self.append_batch(&records)?;
         for (key, event, completed_at_millis) in completed {
             self.pending.remove(&key);
+            self.pending_since_millis.remove(&key);
             let fingerprint = payload_fingerprint(&event.envelope);
             self.complete.insert(key.clone(), Some(fingerprint));
             self.complete_events.insert(key.clone(), event);
@@ -295,6 +301,12 @@ impl EventOutbox for FileOutbox {
                 envelope: event.envelope,
                 next_attempt_at_millis: Some(next),
                 attempts: Some(attempts),
+                // Carry the ORIGINAL pending-since timestamp forward. A
+                // reschedule is a retry of already-pending work, not a new
+                // arrival -- resetting this here would hide exactly the
+                // "stuck backlog" case `oldest_pending_millis` exists to
+                // surface.
+                created_at_millis: self.pending_since_millis.get(key).copied(),
             });
         }
         for key in &quarantine_keys {
@@ -314,6 +326,7 @@ impl EventOutbox for FileOutbox {
             if let Some(event) = self.pending.remove(&key) {
                 self.next_attempt_at_millis.remove(&key);
                 self.attempts.remove(&key);
+                self.pending_since_millis.remove(&key);
                 self.quarantined.insert(key, event);
             }
         }
@@ -341,6 +354,7 @@ impl EventOutbox for FileOutbox {
             if let Some(event) = self.pending.remove(key) {
                 self.next_attempt_at_millis.remove(key);
                 self.attempts.remove(key);
+                self.pending_since_millis.remove(key);
                 self.quarantined.insert(key.clone(), event);
             }
         }
@@ -356,6 +370,7 @@ impl EventOutbox for FileOutbox {
     }
 
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
+        let requeued_at = now_millis();
         let mut records = Vec::new();
         for key in keys {
             let Some(event) = self.quarantined.get(key) else {
@@ -368,11 +383,16 @@ impl EventOutbox for FileOutbox {
                 envelope: event.envelope.clone(),
                 next_attempt_at_millis: None,
                 attempts: None,
+                // A requeue starts a fresh replay window (also why attempts
+                // resets to `None`/0 above), so the pending age starts over
+                // too rather than resuming the original enqueue time.
+                created_at_millis: Some(requeued_at),
             });
         }
         self.append_batch(&records)?;
         for key in keys {
             if let Some(event) = self.quarantined.remove(key) {
+                self.pending_since_millis.insert(key.clone(), requeued_at);
                 self.pending.insert(key.clone(), event);
             }
         }
@@ -404,5 +424,14 @@ impl EventOutbox for FileOutbox {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        let now = now_millis();
+        Ok(self
+            .pending_since_millis
+            .values()
+            .min()
+            .map(|oldest| now.saturating_sub(*oldest)))
     }
 }

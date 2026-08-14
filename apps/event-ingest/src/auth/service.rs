@@ -8,8 +8,8 @@ use tokio::sync::Semaphore;
 
 use super::verifier::{CallerVerifier, PeerIdentity};
 use crate::{
-    Caller, EphemeralStore, EventPublisher, GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES,
-    OutboxMaintainer, PendingEventReplayer, RateLimitKey, proto,
+    BacklogObserver, Caller, EphemeralStore, EventPublisher, GatewayError, GatewayErrorCode,
+    MAX_ENVELOPE_BYTES, OutboxMaintainer, PendingEventReplayer, RateLimitKey, proto,
 };
 
 pub struct AuthenticatedGrpcService<P: EventPublisher, V: CallerVerifier> {
@@ -305,6 +305,164 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
             }
         })
     }
+
+    /// Starts the Phase 0.6 item 6 backlog monitor: samples outbox depth and
+    /// oldest-pending age every `interval` and, on a threshold breach, logs a
+    /// structured operational warning and records a redacted operational
+    /// Security Finding (see `IngestGateway::record_backlog_alert` and the
+    /// reserved `OPERATIONAL_WORKSPACE_ID`/`OPERATIONAL_NAMESPACE_ID` scope in
+    /// `gateway/core.rs`).
+    ///
+    /// This is early-warning observability, one layer above the hard
+    /// backpressure bound: Phase 0.6 item 5's outbox capacity ceiling already
+    /// makes `enqueue` refuse admission with `IDEMPOTENCY_CAPACITY` once the
+    /// outbox is full (`InMemoryOutbox`/`FileOutbox`/`PostgresOutbox::enqueue`
+    /// all check capacity before inserting a new pending row), so the backlog
+    /// can never grow unbounded regardless of whether this monitor is even
+    /// running. This monitor exists so an operator finds out the backlog is
+    /// degrading long before it reaches that ceiling -- nothing here changes
+    /// an admission decision.
+    ///
+    /// Shape mirrors `spawn_outbox_retention_worker` exactly: interval loop,
+    /// `spawn_blocking` + `try_lock` (a busy adapter just skips this tick),
+    /// best-effort with every failure logged and swallowed. A sample or alert
+    /// failure must never affect ingestion.
+    ///
+    /// Edge-triggered, not polled-and-spammed: a structured warning and a
+    /// finding are recorded only when the backlog *newly* crosses into
+    /// breach, or -- for a breach that never clears -- at most once every
+    /// `BACKLOG_RE_ALERT_TICKS` ticks, so a stuck sink produces one alert per
+    /// re-alert window instead of one every `interval`. See
+    /// `backlog_should_alert`.
+    pub fn spawn_backlog_monitor(
+        &self,
+        interval: Duration,
+        alert_depth: u64,
+        alert_age_millis: u64,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        P: BacklogObserver + Send + 'static,
+        V: 'static,
+    {
+        let adapter = self.adapter.clone();
+        tokio::spawn(async move {
+            let mut was_breached = false;
+            let mut ticks_since_alert: u64 = 0;
+            loop {
+                tokio::time::sleep(interval).await;
+                let sample_adapter = adapter.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut adapter = match sample_adapter.try_lock() {
+                        Ok(adapter) => adapter,
+                        // Never let a backlog sample wait behind a live
+                        // admission, replay, or another sweep. The next
+                        // interval retries.
+                        Err(TryLockError::WouldBlock) => return Ok(None),
+                        Err(TryLockError::Poisoned(_)) => {
+                            return Err(GatewayError::internal());
+                        }
+                    };
+                    catch_unwind(AssertUnwindSafe(|| adapter.backlog_stats()))
+                        .map_err(|_| GatewayError::internal())?
+                        .map(Some)
+                })
+                .await;
+                let (depth, oldest_pending_millis) = match result {
+                    Ok(Ok(Some(stats))) => stats,
+                    // Adapter busy this tick: not a failure, just no sample.
+                    Ok(Ok(None)) => continue,
+                    Ok(Err(error)) => {
+                        eprintln!(
+                            "event-ingest backlog monitor deferred: {}: {}",
+                            error.code.public_code(),
+                            error.summary
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "event-ingest backlog monitor deferred: INTERNAL_FAILURE: monitor task failed"
+                        );
+                        continue;
+                    }
+                };
+                let breached =
+                    backlog_is_breached(depth, oldest_pending_millis, alert_depth, alert_age_millis);
+                ticks_since_alert = ticks_since_alert.saturating_add(1);
+                if backlog_should_alert(
+                    breached,
+                    was_breached,
+                    ticks_since_alert,
+                    BACKLOG_RE_ALERT_TICKS,
+                ) {
+                    eprintln!(
+                        "event-ingest backlog WARNING: BACKLOG_THRESHOLD_EXCEEDED depth={depth} oldest_pending_ms={} alert_depth={alert_depth} alert_age_ms={alert_age_millis}",
+                        oldest_pending_millis
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "unknown".to_owned())
+                    );
+                    let alert_adapter = adapter.clone();
+                    // Best-effort: a failed or skipped finding write must
+                    // never affect ingestion, and must never stall this loop
+                    // waiting for a busy adapter -- the structured `eprintln!`
+                    // above already carries the operationally-actionable
+                    // signal regardless of whether the finding lands.
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut adapter = match alert_adapter.try_lock() {
+                            Ok(adapter) => adapter,
+                            Err(_) => return,
+                        };
+                        let _ = catch_unwind(AssertUnwindSafe(|| {
+                            adapter.record_backlog_alert(
+                                depth,
+                                oldest_pending_millis,
+                                alert_depth,
+                                alert_age_millis,
+                            )
+                        }));
+                    })
+                    .await;
+                    ticks_since_alert = 0;
+                }
+                was_breached = breached;
+            }
+        })
+    }
+}
+
+/// How many `spawn_backlog_monitor` ticks a still-breached backlog is
+/// re-alerted at, once the initial threshold-crossing alert has already
+/// fired. Twenty ticks (10 minutes at the default 30s interval) keeps a
+/// stuck sink from being silent for hours while never approaching "an alert
+/// every tick" -- see `backlog_should_alert`.
+const BACKLOG_RE_ALERT_TICKS: u64 = 20;
+
+/// Pure threshold decision: has the backlog crossed into a state worth
+/// alerting on? Depth and age are independent triggers -- either one alone
+/// is sufficient, matching the Phase 0.6 item 6 plan ("depth exceeds ...
+/// OR age exceeds ..."). A `None` age (outbox currently empty) can never
+/// itself breach the age threshold.
+fn backlog_is_breached(
+    depth: u64,
+    oldest_pending_millis: Option<u64>,
+    alert_depth: u64,
+    alert_age_millis: u64,
+) -> bool {
+    depth > alert_depth || oldest_pending_millis.is_some_and(|age| age > alert_age_millis)
+}
+
+/// Pure edge/re-alert decision, independent of any adapter or clock so it is
+/// directly unit-testable. Alerts on the transition into breach
+/// (`!was_breached`), and otherwise at most once every `re_alert_cadence_ticks`
+/// while the breach persists. A cleared breach (`!breached`) never alerts,
+/// regardless of history.
+fn backlog_should_alert(
+    breached: bool,
+    was_breached: bool,
+    ticks_since_last_alert: u64,
+    re_alert_cadence_ticks: u64,
+) -> bool {
+    breached && (!was_breached || ticks_since_last_alert >= re_alert_cadence_ticks)
 }
 
 fn now_unix_millis() -> u64 {
@@ -571,5 +729,57 @@ mod tests {
             "admission within the local ceiling must succeed even while the \
              accelerator's concurrency limiter is saturated"
         );
+    }
+
+    #[test]
+    fn backlog_is_breached_triggers_on_depth_alone() {
+        assert!(backlog_is_breached(101, None, 100, 300_000));
+        assert!(!backlog_is_breached(100, None, 100, 300_000));
+        assert!(!backlog_is_breached(0, None, 100, 300_000));
+    }
+
+    #[test]
+    fn backlog_is_breached_triggers_on_age_alone() {
+        assert!(backlog_is_breached(0, Some(300_001), 100, 300_000));
+        assert!(!backlog_is_breached(0, Some(300_000), 100, 300_000));
+        assert!(!backlog_is_breached(0, None, 100, 300_000));
+    }
+
+    #[test]
+    fn backlog_is_breached_is_an_or_not_an_and() {
+        // Depth alone over threshold, age fine: still a breach.
+        assert!(backlog_is_breached(101, Some(0), 100, 300_000));
+        // Age alone over threshold, depth fine: still a breach.
+        assert!(backlog_is_breached(0, Some(300_001), 100, 300_000));
+    }
+
+    #[test]
+    fn backlog_should_alert_fires_on_the_crossing_into_breach() {
+        // First tick of a fresh breach: always alert, regardless of the tick
+        // counter (a freshly crossed breach must never wait out a cadence it
+        // hasn't started yet).
+        assert!(backlog_should_alert(true, false, 1, 20));
+        assert!(backlog_should_alert(true, false, 0, 20));
+    }
+
+    #[test]
+    fn backlog_should_alert_does_not_spam_every_tick_of_a_sustained_breach() {
+        // Still breached, alerted last tick (counter reset to 0 then ticked
+        // to 1): must not re-alert until the cadence elapses.
+        assert!(!backlog_should_alert(true, true, 1, 20));
+        assert!(!backlog_should_alert(true, true, 19, 20));
+    }
+
+    #[test]
+    fn backlog_should_alert_re_alerts_at_the_bounded_cadence() {
+        assert!(backlog_should_alert(true, true, 20, 20));
+        assert!(backlog_should_alert(true, true, 21, 20));
+    }
+
+    #[test]
+    fn backlog_should_alert_never_fires_once_the_breach_clears() {
+        assert!(!backlog_should_alert(false, true, 1, 20));
+        assert!(!backlog_should_alert(false, true, 20, 20));
+        assert!(!backlog_should_alert(false, false, 0, 20));
     }
 }

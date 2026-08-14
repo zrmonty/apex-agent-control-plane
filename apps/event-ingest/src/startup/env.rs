@@ -156,6 +156,117 @@ pub(crate) fn fanout_workers_value(value: Option<&str>) -> Result<usize, io::Err
         })
 }
 
+/// How often `AuthenticatedGrpcService::spawn_backlog_monitor` (Phase 0.6
+/// item 6) samples outbox depth and oldest-pending age. Same bounds/rationale
+/// shape as `outbox_retention_interval_secs_value`: bounded from below so a
+/// misconfigured value cannot spin the sampling loop, bounded above so a
+/// degrading backlog is never silently unmonitored for more than a day.
+/// Default of 30s is tighter than the retention sweep's 60s default -- this
+/// is the early-warning signal an on-call operator reacts to, so it should
+/// notice a degradation faster than the hygiene sweep needs to run.
+pub(crate) fn backlog_monitor_interval_secs() -> Result<u64, io::Error> {
+    backlog_monitor_interval_secs_value(
+        env::var("APEX_BACKLOG_MONITOR_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn backlog_monitor_interval_secs_value(value: Option<&str>) -> Result<u64, io::Error> {
+    value
+        .unwrap_or("30")
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_BACKLOG_MONITOR_INTERVAL_SECS must be an integer from 1 through 86400",
+            )
+        })
+        .and_then(|value| {
+            if (1..=86_400).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_BACKLOG_MONITOR_INTERVAL_SECS must be an integer from 1 through 86400",
+                ))
+            }
+        })
+}
+
+/// Pending-row depth above which the backlog monitor treats the outbox as
+/// degraded and raises an early-warning alert (Phase 0.6 item 6). Default of
+/// 10,000 is a fifth of `DEFAULT_IDEMPOTENCY_CAPACITY` (50,000, also the
+/// default outbox capacity via `APEX_IDEMPOTENCY_CAPACITY`) -- a deliberately
+/// early trip point well below the item-5 hard capacity ceiling
+/// (`enqueue`/`IDEMPOTENCY_CAPACITY`) that actually refuses admission, so an
+/// operator has real headroom to react before ingestion is affected. Upper
+/// bound matches the outbox backends' own capacity ceiling
+/// (`InMemoryOutbox`/`FileOutbox`/`PostgresOutbox` all cap at 1,000,000) --
+/// alerting above that is meaningless, since the outbox itself can never hold
+/// that many pending rows.
+pub(crate) fn backlog_alert_depth() -> Result<u64, io::Error> {
+    backlog_alert_depth_value(env::var("APEX_BACKLOG_ALERT_DEPTH").ok().as_deref())
+}
+
+pub(crate) fn backlog_alert_depth_value(value: Option<&str>) -> Result<u64, io::Error> {
+    value
+        .unwrap_or("10000")
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_BACKLOG_ALERT_DEPTH must be an integer from 1 through 1000000",
+            )
+        })
+        .and_then(|value| {
+            if (1..=1_000_000).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_BACKLOG_ALERT_DEPTH must be an integer from 1 through 1000000",
+                ))
+            }
+        })
+}
+
+/// Oldest-pending-row age, in seconds, above which the backlog monitor raises
+/// an early-warning alert even if depth alone is still under
+/// `APEX_BACKLOG_ALERT_DEPTH` (Phase 0.6 item 6) -- a shallow-but-stuck
+/// backlog (a handful of rows a degraded sink can never drain) looks fine on
+/// depth alone. Default of 300s (5 minutes) comfortably exceeds
+/// `OUTBOX_CLAIM_LEASE_SECONDS` (120s, the longest a healthy in-flight replay
+/// should hold a row) plus the bounded retry ladder's backoff, so a healthy,
+/// merely-retrying row never false-positives. Upper bound of one day matches
+/// `outbox_retention_interval_secs_value`'s ceiling for the same reason: past
+/// that, "alert" has stopped being early-warning.
+pub(crate) fn backlog_alert_age_secs() -> Result<u64, io::Error> {
+    backlog_alert_age_secs_value(env::var("APEX_BACKLOG_ALERT_AGE_SECS").ok().as_deref())
+}
+
+pub(crate) fn backlog_alert_age_secs_value(value: Option<&str>) -> Result<u64, io::Error> {
+    value
+        .unwrap_or("300")
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_BACKLOG_ALERT_AGE_SECS must be an integer from 1 through 86400",
+            )
+        })
+        .and_then(|value| {
+            if (1..=86_400).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_BACKLOG_ALERT_AGE_SECS must be an integer from 1 through 86400",
+                ))
+            }
+        })
+}
+
 pub(crate) fn allowed_scopes() -> Result<HashSet<String>, io::Error> {
     let scopes_value = required("APEX_ALLOWED_SCOPES")?;
     if scopes_value.len() > 64 * 1024 {
@@ -237,5 +348,104 @@ mod fanout_workers_tests {
         assert!(fanout_workers_value(Some("-1")).is_err());
         assert!(fanout_workers_value(Some("")).is_err());
         assert!(fanout_workers_value(Some("4.5")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod backlog_monitor_interval_secs_tests {
+    use super::backlog_monitor_interval_secs_value;
+
+    #[test]
+    fn defaults_to_thirty_seconds_when_unset() {
+        assert_eq!(backlog_monitor_interval_secs_value(None).unwrap(), 30);
+    }
+
+    #[test]
+    fn accepts_the_full_bounded_range() {
+        assert_eq!(backlog_monitor_interval_secs_value(Some("1")).unwrap(), 1);
+        assert_eq!(
+            backlog_monitor_interval_secs_value(Some("86400")).unwrap(),
+            86_400
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_values_past_the_ceiling() {
+        assert!(backlog_monitor_interval_secs_value(Some("0")).is_err());
+        assert!(backlog_monitor_interval_secs_value(Some("86401")).is_err());
+    }
+
+    #[test]
+    fn fails_closed_on_non_numeric_or_negative_input() {
+        assert!(backlog_monitor_interval_secs_value(Some("not-a-number")).is_err());
+        assert!(backlog_monitor_interval_secs_value(Some("-1")).is_err());
+        assert!(backlog_monitor_interval_secs_value(Some("")).is_err());
+        assert!(backlog_monitor_interval_secs_value(Some("30.5")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod backlog_alert_depth_tests {
+    use super::backlog_alert_depth_value;
+
+    #[test]
+    fn defaults_to_ten_thousand_when_unset() {
+        assert_eq!(backlog_alert_depth_value(None).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn accepts_the_full_bounded_range() {
+        assert_eq!(backlog_alert_depth_value(Some("1")).unwrap(), 1);
+        assert_eq!(
+            backlog_alert_depth_value(Some("1000000")).unwrap(),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_values_past_the_ceiling() {
+        assert!(backlog_alert_depth_value(Some("0")).is_err());
+        assert!(backlog_alert_depth_value(Some("1000001")).is_err());
+    }
+
+    #[test]
+    fn fails_closed_on_non_numeric_or_negative_input() {
+        assert!(backlog_alert_depth_value(Some("not-a-number")).is_err());
+        assert!(backlog_alert_depth_value(Some("-1")).is_err());
+        assert!(backlog_alert_depth_value(Some("")).is_err());
+        assert!(backlog_alert_depth_value(Some("10000.5")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod backlog_alert_age_secs_tests {
+    use super::backlog_alert_age_secs_value;
+
+    #[test]
+    fn defaults_to_three_hundred_seconds_when_unset() {
+        assert_eq!(backlog_alert_age_secs_value(None).unwrap(), 300);
+    }
+
+    #[test]
+    fn accepts_the_full_bounded_range() {
+        assert_eq!(backlog_alert_age_secs_value(Some("1")).unwrap(), 1);
+        assert_eq!(
+            backlog_alert_age_secs_value(Some("86400")).unwrap(),
+            86_400
+        );
+    }
+
+    #[test]
+    fn rejects_zero_and_values_past_the_ceiling() {
+        assert!(backlog_alert_age_secs_value(Some("0")).is_err());
+        assert!(backlog_alert_age_secs_value(Some("86401")).is_err());
+    }
+
+    #[test]
+    fn fails_closed_on_non_numeric_or_negative_input() {
+        assert!(backlog_alert_age_secs_value(Some("not-a-number")).is_err());
+        assert!(backlog_alert_age_secs_value(Some("-1")).is_err());
+        assert!(backlog_alert_age_secs_value(Some("")).is_err());
+        assert!(backlog_alert_age_secs_value(Some("300.5")).is_err());
     }
 }

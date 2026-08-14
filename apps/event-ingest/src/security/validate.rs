@@ -72,6 +72,11 @@ pub(crate) fn expected_classification(
         | FindingType::ToolPolicyDenied
         | FindingType::AuthAbuse
         | FindingType::AdmissionAbuse => (FindingSeverity::High, PolicyDecision::Deny),
+        // An operational early-warning, not an admission decision on any one
+        // event -- `Contain` reads as "operator should consider throttling
+        // upstream / scaling the sink", never as "deny this request". See
+        // `gateway::core::IngestGateway::record_backlog_alert`.
+        FindingType::BacklogDegraded => (FindingSeverity::High, PolicyDecision::Contain),
     }
 }
 
@@ -127,6 +132,7 @@ fn finding_type_tag(value: FindingType) -> &'static str {
         FindingType::ToolPolicyDenied => "tool.policy.denied",
         FindingType::AuthAbuse => "auth.abuse",
         FindingType::AdmissionAbuse => "ingest.admission.abuse",
+        FindingType::BacklogDegraded => "ingest.backlog.degraded",
     }
 }
 

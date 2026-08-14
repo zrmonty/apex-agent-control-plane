@@ -1,7 +1,7 @@
 use super::IngestOutcome;
 use super::core::IngestGateway;
 use super::publisher::EventPublisher;
-use crate::outbox::{OutboxMaintainer, PendingEventReplayer};
+use crate::outbox::{BacklogObserver, OutboxMaintainer, PendingEventReplayer};
 use crate::{GatewayError, GatewayErrorCode, SecuritySignal, proto, validation::Caller};
 
 pub struct AuthenticatedIngestAdapter<P: EventPublisher> {
@@ -33,6 +33,27 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         P: OutboxMaintainer,
     {
         self.gateway.maintain_outbox(now_millis, retention_millis)
+    }
+
+    /// See `IngestGateway::backlog_stats`. Used only by
+    /// `AuthenticatedGrpcService::spawn_backlog_monitor` (Phase 0.6 item 6).
+    pub(crate) fn backlog_stats(&mut self) -> Result<(u64, Option<u64>), GatewayError>
+    where
+        P: BacklogObserver,
+    {
+        self.gateway.backlog_stats()
+    }
+
+    /// See `IngestGateway::record_backlog_alert`.
+    pub(crate) fn record_backlog_alert(
+        &mut self,
+        depth: u64,
+        oldest_pending_millis: Option<u64>,
+        alert_depth: u64,
+        alert_age_millis: u64,
+    ) {
+        self.gateway
+            .record_backlog_alert(depth, oldest_pending_millis, alert_depth, alert_age_millis);
     }
 
     pub(crate) fn record_security_signal(

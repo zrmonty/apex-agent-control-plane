@@ -18,7 +18,8 @@ use super::auth::{
     require_single_agent_file_bearer_ack,
 };
 use super::env::{
-    allowed_scopes, attempts, fanout_workers, optional_path, outbox_retention_interval_secs,
+    allowed_scopes, attempts, backlog_alert_age_secs, backlog_alert_depth,
+    backlog_monitor_interval_secs, fanout_workers, optional_path, outbox_retention_interval_secs,
     outbox_retention_secs, path, required,
 };
 use super::error::startup_gateway_error;
@@ -253,6 +254,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // sweep the first time it ticks.
     let outbox_retention_secs = outbox_retention_secs()?;
     let outbox_retention_interval_secs = outbox_retention_interval_secs()?;
+    // Phase 0.6 item 6: validated up front like every other bounded startup
+    // setting, even though the monitor itself only starts once the runtime
+    // below spawns it.
+    let backlog_monitor_interval_secs = backlog_monitor_interval_secs()?;
+    let backlog_alert_depth = backlog_alert_depth()?;
+    let backlog_alert_age_millis = backlog_alert_age_secs()?.saturating_mul(1000);
     let gateway = if let Some(journal_path) = optional_path("APEX_SECURITY_FINDINGS_FILE")? {
         let journal_base = optional_path("APEX_SECURITY_FINDINGS_BASE")?.ok_or_else(|| {
             io::Error::new(
@@ -374,6 +381,16 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         let _outbox_retention_worker = service.spawn_outbox_retention_worker(
             Duration::from_secs(outbox_retention_interval_secs),
             outbox_retention_secs.saturating_mul(1000),
+        );
+        // Phase 0.6 item 6: early-warning backlog observability, one layer
+        // above the item-5 hard capacity ceiling that already bounds outbox
+        // growth (see `AuthenticatedGrpcService::spawn_backlog_monitor`'s doc
+        // comment). Kept alive for the life of the server like every other
+        // background worker here.
+        let _backlog_monitor = service.spawn_backlog_monitor(
+            Duration::from_secs(backlog_monitor_interval_secs),
+            backlog_alert_depth,
+            backlog_alert_age_millis,
         );
         Server::builder()
             .tls_config(tls)?

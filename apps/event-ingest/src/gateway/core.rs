@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::IngestOutcome;
 use super::publisher::{EventPublisher, PublishOutcome};
-use crate::outbox::{OutboxMaintainer, PendingEventReplayer};
+use crate::outbox::{BacklogObserver, OutboxMaintainer, PendingEventReplayer};
 use crate::{
     GatewayError, GatewayErrorCode,
     idempotency::{IdempotencyKey, IdempotencyStore, InMemoryIdempotencyStore, ReservationResult},
@@ -17,6 +17,25 @@ use crate::{
     },
     validation::{Caller, IngestRequest, is_lowercase_uuidv7, is_scope_identifier},
 };
+
+/// Reserved operational scope for Phase 0.6 item 6's outbox backlog alerts.
+/// Security Findings are otherwise always tenant-scoped
+/// (`workspace_id`/`namespace_id`), but backlog depth/age is a GLOBAL,
+/// process-wide operational signal -- it says nothing about any one tenant.
+/// Rather than inventing a parallel non-scoped alert channel (event-ingest
+/// has no metrics/Prometheus endpoint by design), this reuses the existing
+/// scoped Security Alerts path with a fixed, reserved "scope" that is not,
+/// and can never be, a real tenant: both constants pass `is_scope_identifier`
+/// (so `validate_scope` accepts them unchanged) but neither can collide with
+/// an operator-issued tenant scope, because `APEX_ALLOWED_SCOPES` is the only
+/// way a caller's bearer token is ever bound to a scope, and an operator
+/// would have to deliberately allow-list `apex-operations/ingest-backlog` as
+/// a tenant for that collision to happen. Findings recorded here are read
+/// through the same `security_findings_for_scope` API as any tenant's,
+/// scoped to whichever caller is authorized for this reserved scope (an
+/// operator/on-call identity, not a tenant).
+pub(crate) const OPERATIONAL_WORKSPACE_ID: &str = "apex-operations";
+pub(crate) const OPERATIONAL_NAMESPACE_ID: &str = "ingest-backlog";
 
 pub struct IngestGateway<P: EventPublisher> {
     publisher: P,
@@ -260,7 +279,60 @@ impl<P: EventPublisher> IngestGateway<P> {
             &event.workspace_id,
             &event.namespace_id,
             &event.event_id,
+            "event.envelope",
             &event.envelope,
+        );
+    }
+
+    /// Reports current backlog depth and oldest-pending age. Forwards to the
+    /// durable outbox behind `self.publisher` -- see `BacklogObserver`. Only
+    /// available when `P` actually wraps one (`OutboxedPublisher`), exactly
+    /// like `maintain_outbox`/`replay_pending` above.
+    pub fn backlog_stats(&mut self) -> Result<(u64, Option<u64>), GatewayError>
+    where
+        P: BacklogObserver,
+    {
+        self.publisher.backlog_stats()
+    }
+
+    /// Records a redacted, best-effort operational finding for a backlog
+    /// threshold breach (Phase 0.6 item 6). Scoped to the reserved
+    /// `OPERATIONAL_WORKSPACE_ID`/`OPERATIONAL_NAMESPACE_ID` pair (see their
+    /// doc comment) rather than any tenant scope. `depth`/`oldest_pending_
+    /// millis`/the thresholds that triggered this call are folded into the
+    /// evidence's `value_hash` only -- never stored in the clear -- matching
+    /// every other finding this gateway records; the structured `eprintln!`
+    /// the caller (`auth::service::AuthenticatedGrpcService::
+    /// spawn_backlog_monitor`) emits alongside this call is what carries the
+    /// human-readable numbers.
+    ///
+    /// Never fails outward: no security store configured, a bad synthetic
+    /// event id, or a rejected/duplicate finding all silently no-op, exactly
+    /// like `record_security_signal_parts`'s existing failure handling. A
+    /// backlog alert must never be able to affect admission.
+    pub(crate) fn record_backlog_alert(
+        &mut self,
+        depth: u64,
+        oldest_pending_millis: Option<u64>,
+        alert_depth: u64,
+        alert_age_millis: u64,
+    ) {
+        let Ok(event_id) = synthetic_operational_event_id() else {
+            return;
+        };
+        let detail = format!(
+            "depth={depth} oldest_pending_ms={} alert_depth={alert_depth} alert_age_ms={alert_age_millis}",
+            oldest_pending_millis
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+        self.record_security_signal_parts(
+            SecuritySignal::BacklogDegraded,
+            OPERATIONAL_WORKSPACE_ID,
+            OPERATIONAL_NAMESPACE_ID,
+            &event_id,
+            "outbox.backlog",
+            detail.as_bytes(),
         );
     }
 
@@ -287,6 +359,7 @@ impl<P: EventPublisher> IngestGateway<P> {
             &scope.workspace_id,
             &scope.namespace_id,
             &envelope.event_id,
+            "event.envelope",
             &bytes,
         );
     }
@@ -297,6 +370,7 @@ impl<P: EventPublisher> IngestGateway<P> {
         workspace_id: &str,
         namespace_id: &str,
         event_id: &str,
+        field_path: &str,
         envelope: &[u8],
     ) {
         let Some(store) = self.security_store.as_mut() else {
@@ -311,7 +385,7 @@ impl<P: EventPublisher> IngestGateway<P> {
             workspace_id: workspace_id.to_owned(),
             namespace_id: namespace_id.to_owned(),
             event_id: event_id.to_owned(),
-            field_path: "event.envelope".to_owned(),
+            field_path: field_path.to_owned(),
             value_hash,
         };
         match store {
@@ -323,6 +397,47 @@ impl<P: EventPublisher> IngestGateway<P> {
             }
         }
     }
+}
+
+/// Synthesizes a UUIDv7-shaped identifier for a backlog alert's evidence.
+/// `EvidenceRef::new` (via `is_lowercase_uuidv7`) requires one, but a backlog
+/// alert has no real `event_id` -- it is not about any single event. This is
+/// a process-local, per-call random id, not derived from any tenant data;
+/// its only job is to satisfy the evidence shape and give repeated alerts
+/// distinct identities. Mirrors `security::ids::uuid7`'s format (that
+/// function is `pub(crate)` inside the private `security::ids` module, so it
+/// is not reachable from here) rather than adding a new crate-wide export for
+/// a single caller.
+fn synthetic_operational_event_id() -> Result<String, GatewayError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| GatewayError::internal())?;
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0);
+    let timestamp = now_millis & 0x0000_ffff_ffff_ffff;
+    bytes[..6].copy_from_slice(&timestamp.to_be_bytes()[2..]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
 }
 
 fn signal_for_error(code: GatewayErrorCode) -> Option<SecuritySignal> {

@@ -14,6 +14,11 @@ pub enum FindingType {
     ToolPolicyDenied,
     AuthAbuse,
     AdmissionAbuse,
+    /// Outbox backlog depth or oldest-pending age crossed the Phase 0.6
+    /// item 6 early-warning threshold. Not tied to any single tenant event;
+    /// recorded against the reserved operational scope (see
+    /// `gateway::core::OPERATIONAL_WORKSPACE_ID`/`OPERATIONAL_NAMESPACE_ID`).
+    BacklogDegraded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -68,6 +73,7 @@ pub enum SecuritySignal {
     AgentTemplateNoncompliant,
     AuthAbuse,
     AdmissionAbuse,
+    BacklogDegraded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

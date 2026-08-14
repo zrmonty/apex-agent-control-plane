@@ -25,6 +25,7 @@ pub(super) trait PostgresReplayOps {
     fn quarantined_batch(&mut self, limit: usize) -> Result<Vec<OutboxKey>, GatewayError>;
     fn quarantined_count(&mut self) -> Result<u64, GatewayError>;
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError>;
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError>;
 }
 
 impl PostgresReplayOps for PostgresOutbox {
@@ -341,5 +342,27 @@ impl PostgresReplayOps for PostgresOutbox {
             )
             .map_err(|_| GatewayError::internal())?;
         Ok(())
+    }
+
+    /// Age, in milliseconds, of the oldest non-quarantined pending row.
+    /// `created_at` is set once at INSERT (see `deploy/postgres/outbox.sql`)
+    /// and never updated by `reschedule`/`pending_batch`'s claim, so this is
+    /// the original enqueue time, not the most recent retry attempt --
+    /// exactly the "how long has this actually been stuck" signal Phase 0.6
+    /// item 6 needs. `min(created_at)` over zero matching rows returns SQL
+    /// NULL, which `Option<f64>` decodes as `None` -- no separate empty-outbox
+    /// branch needed.
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        let age_millis: Option<f64> = self
+            .client
+            .query_one(
+                "SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000.0
+                 FROM apex_event_outbox
+                 WHERE state = 'pending' AND quarantined_at IS NULL",
+                &[],
+            )
+            .map_err(|_| GatewayError::internal())?
+            .get(0);
+        Ok(age_millis.map(|value| value.max(0.0) as u64))
     }
 }
