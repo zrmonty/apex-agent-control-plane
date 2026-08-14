@@ -1,0 +1,182 @@
+# Overlay: cold-storage analytical tier (Phase 0.6, item 8).
+#
+# Vector consumes the same apex.events.> JetStream subjects the ingest
+# gateway already publishes onto, and writes gzip-NDJSON batches to a
+# separate, mutable MinIO bucket (apex-coldstore) for cheap long-range
+# analytical query (DuckDB / ClickHouse s3() / Athena-style engines).
+#
+# THIS IS NOT THE COMPLIANCE ARCHIVE. It is purely additive:
+#   - It does not change ingest-gateway, archive-provider, or the
+#     Object-Lock-retained apex-events bucket in any way.
+#   - It reuses the existing archive-store MinIO *server* (no new MinIO
+#     instance) but writes into a distinct bucket created WITHOUT
+#     --with-lock, because this tier must stay mutable/compactable -- that is
+#     the whole point of an analytical tier and is a deliberate difference
+#     from the archive, not an oversight.
+#   - It reuses the existing NATS/JetStream broker with its own
+#     subscribe-only credential (see templates/nats-coldstore-consumer.template),
+#     never the ingest publisher's.
+#
+# Usage:
+#   docker compose --env-file .env -f compose.yaml -f compose.coldstore.yaml up -d
+#
+# Prerequisites (see coldstore/README.md for the full walkthrough):
+#   - VECTOR_IMAGE set to an approved, digest-pinned Vector image.
+#   - templates/vector-coldstore.toml.template rendered into secrets/.
+#   - A coldstore-scoped NATS consumer credential + mTLS client cert, merged
+#     into the shared nats.conf per templates/nats-coldstore-consumer.template.
+#   - A least-privilege MinIO writer identity for apex-coldstore (separate
+#     from the archive's writer identity and from MinIO root).
+#   - An AWS-shared-credentials-format secret file for Vector's aws_s3 sink,
+#     containing that same writer identity's keys.
+
+services:
+  # One-shot: create the coldstore bucket (no Object-Lock, versioning left
+  # off -- this tier is meant to be mutable and eventually compactable) and
+  # provision a least-privilege MinIO user scoped to only that bucket, so
+  # Vector never touches MinIO root credentials or the archive bucket.
+  coldstore-store-init:
+    image: ${MINIO_MC_IMAGE:?set MINIO_MC_IMAGE to an approved, digest-pinned MinIO client image}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        root_user="$$(cat /run/secrets/minio_root_user)" || { echo 'coldstore-store-init: cannot read MinIO root username' >&2; exit 1; }
+        root_password="$$(cat /run/secrets/minio_root_password)" || { echo 'coldstore-store-init: cannot read MinIO root password' >&2; exit 1; }
+        writer_access_key="$$(cat /run/secrets/coldstore_writer_access_key)" || { echo 'coldstore-store-init: cannot read coldstore writer access key' >&2; exit 1; }
+        writer_secret_key="$$(cat /run/secrets/coldstore_writer_secret_key)" || { echo 'coldstore-store-init: cannot read coldstore writer secret key' >&2; exit 1; }
+        bucket="$${APEX_COLDSTORE_BUCKET}"
+        test "$$root_user" != REPLACE_WITH || { echo 'coldstore-store-init: replace the MinIO root username placeholder' >&2; exit 1; }
+        test "$$root_password" != REPLACE_WITH || { echo 'coldstore-store-init: replace the MinIO root password placeholder' >&2; exit 1; }
+        test "$$writer_access_key" != REPLACE_WITH || { echo 'coldstore-store-init: replace the coldstore writer access key placeholder' >&2; exit 1; }
+        test "$$writer_secret_key" != REPLACE_WITH || { echo 'coldstore-store-init: replace the coldstore writer secret key placeholder' >&2; exit 1; }
+        case "$$bucket" in *[!a-z0-9.-]*|'') echo 'coldstore-store-init: bucket must be lowercase DNS-safe text' >&2; exit 1;; esac
+        test "$${#bucket}" -ge 3 && test "$${#bucket}" -le 63 || { echo 'coldstore-store-init: bucket length must be 3 through 63 characters' >&2; exit 1; }
+        case "$$root_user" in *[!A-Za-z0-9_-]*|'') echo 'invalid MinIO root username format' >&2; exit 1;; esac
+        case "$$root_password" in *[!A-Za-z0-9._~-]*|'') echo 'invalid MinIO root password format' >&2; exit 1;; esac
+        case "$$writer_access_key" in *[!A-Za-z0-9_-]*|'') echo 'invalid coldstore writer access key format' >&2; exit 1;; esac
+        case "$$writer_secret_key" in *[!A-Za-z0-9._~-]*|'') echo 'invalid coldstore writer secret key format' >&2; exit 1;; esac
+        mkdir -p /tmp/mc/certs/CAs
+        cp /run/secrets/minio_server_ca /tmp/mc/certs/CAs/minio-server-ca.pem || { echo 'coldstore-store-init: cannot install MinIO server CA' >&2; exit 1; }
+        chmod 0400 /tmp/mc/certs/CAs/minio-server-ca.pem
+        printf '{"version":"10","aliases":{"apex":{"url":"https://archive-store:9000","accessKey":"%s","secretKey":"%s","api":"S3v4","path":"auto"}}}' "$$root_user" "$$root_password" > /tmp/mc/config.json
+        chmod 0400 /tmp/mc/config.json
+        MC_CONFIG_DIR=/tmp/mc mc alias import apex /tmp/mc/config.json || { echo 'coldstore-store-init: failed to configure the TLS MinIO client' >&2; exit 1; }
+        # Deliberately no --with-lock: this bucket is mutable analytical
+        # storage, not the compliance archive. Do not add lock here.
+        MC_CONFIG_DIR=/tmp/mc mc mb --ignore-existing "apex/$$bucket" || { echo 'coldstore-store-init: failed to create the coldstore bucket' >&2; exit 1; }
+        cat >/tmp/mc/coldstore-writer-policy.json <<POLICY
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+              "Resource": ["arn:aws:s3:::$$bucket/*"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+              "Resource": ["arn:aws:s3:::$$bucket"]
+            }
+          ]
+        }
+        POLICY
+        MC_CONFIG_DIR=/tmp/mc mc admin policy create apex apex-coldstore-writer /tmp/mc/coldstore-writer-policy.json || { echo 'coldstore-store-init: failed to create the writer policy' >&2; exit 1; }
+        MC_CONFIG_DIR=/tmp/mc mc admin user add apex "$$writer_access_key" "$$writer_secret_key" || { echo 'coldstore-store-init: failed to create the writer identity (already exists is fine if keys match)' >&2; }
+        MC_CONFIG_DIR=/tmp/mc mc admin policy attach apex apex-coldstore-writer --user "$$writer_access_key" || { echo 'coldstore-store-init: failed to attach the writer policy' >&2; exit 1; }
+        echo "coldstore-store-init: bucket $$bucket ready with write-only, single-bucket-scoped credentials"
+    environment:
+      APEX_COLDSTORE_BUCKET: ${APEX_COLDSTORE_BUCKET:?set APEX_COLDSTORE_BUCKET to the coldstore bucket name}
+    depends_on:
+      archive-store:
+        condition: service_started
+    networks: [apex-internal]
+    secrets:
+      - source: minio_root_user
+        target: /run/secrets/minio_root_user
+        mode: "0400"
+      - source: minio_root_password
+        target: /run/secrets/minio_root_password
+        mode: "0400"
+      - minio_server_ca
+      - source: coldstore_writer_access_key
+        target: /run/secrets/coldstore_writer_access_key
+        mode: "0400"
+      - source: coldstore_writer_secret_key
+        target: /run/secrets/coldstore_writer_secret_key
+        mode: "0400"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    restart: "no"
+
+  vector:
+    image: ${VECTOR_IMAGE:?set VECTOR_IMAGE to an approved, digest-pinned Vector image}
+    command: ["--config", "/run/secrets/vector_coldstore_config"]
+    environment:
+      # File-based, never a plaintext value: the AWS SDK inside the aws_s3
+      # sink reads its default credential-provider chain, which includes the
+      # shared-credentials-file path below. This must contain the SAME
+      # access/secret pair as coldstore_writer_access_key /
+      # coldstore_writer_secret_key -- coldstore-store-init provisions the
+      # MinIO identity from the latter; this file is what Vector authenticates
+      # with. See coldstore/README.md.
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/coldstore_aws_credentials
+      AWS_EC2_METADATA_DISABLED: "true"
+    depends_on:
+      jetstream:
+        condition: service_started
+      coldstore-store-init:
+        condition: service_completed_successfully
+    networks: [apex-internal]
+    secrets:
+      - source: vector_coldstore_config
+        target: vector_coldstore_config
+      - nats_client_ca
+      - coldstore_nats_client_cert
+      - source: coldstore_nats_client_key
+        target: /run/secrets/coldstore_nats_client_key
+        mode: "0400"
+      - source: coldstore_nats_username
+        target: /run/secrets/coldstore_nats_username
+        mode: "0400"
+      - source: coldstore_nats_password
+        target: /run/secrets/coldstore_nats_password
+        mode: "0400"
+      - minio_server_ca
+      - source: coldstore_aws_credentials
+        target: /run/secrets/coldstore_aws_credentials
+        mode: "0400"
+    volumes:
+      - coldstore-vector-buffer:/var/lib/vector/buffer
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    # No host-published ports: this is an internal fanout consumer, the same
+    # posture as the rest of apex-internal. Point a query engine at MinIO
+    # through your own operator-controlled tunnel/overlay if you need direct
+    # host access -- see coldstore/README.md.
+
+volumes:
+  coldstore-vector-buffer:
+
+secrets:
+  vector_coldstore_config:
+    file: ${VECTOR_COLDSTORE_CONFIG_FILE:?set VECTOR_COLDSTORE_CONFIG_FILE to the rendered vector-coldstore.toml}
+  coldstore_nats_client_cert:
+    file: ${COLDSTORE_NATS_CLIENT_CERT_FILE:?set COLDSTORE_NATS_CLIENT_CERT_FILE to the coldstore consumer's NATS client certificate}
+  coldstore_nats_client_key:
+    file: ${COLDSTORE_NATS_CLIENT_KEY_FILE:?set COLDSTORE_NATS_CLIENT_KEY_FILE to the coldstore consumer's NATS client key}
+  coldstore_nats_username:
+    file: ${COLDSTORE_NATS_USERNAME_FILE:?set COLDSTORE_NATS_USERNAME_FILE to the coldstore consumer's NATS username file}
+  coldstore_nats_password:
+    file: ${COLDSTORE_NATS_PASSWORD_FILE:?set COLDSTORE_NATS_PASSWORD_FILE to the coldstore consumer's NATS password file}
+  coldstore_writer_access_key:
+    file: ${COLDSTORE_WRITER_ACCESS_KEY_FILE:?set COLDSTORE_WRITER_ACCESS_KEY_FILE to a least-privilege coldstore MinIO access key}
+  coldstore_writer_secret_key:
+    file: ${COLDSTORE_WRITER_SECRET_KEY_FILE:?set COLDSTORE_WRITER_SECRET_KEY_FILE to a least-privilege coldstore MinIO secret key}
+  coldstore_aws_credentials:
+    file: ${COLDSTORE_AWS_CREDENTIALS_FILE:?set COLDSTORE_AWS_CREDENTIALS_FILE to an AWS shared-credentials-format file for the coldstore writer identity}
