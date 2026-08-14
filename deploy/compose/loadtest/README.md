@@ -161,6 +161,53 @@ python loadtest.py --endpoint 127.0.0.1:18445 --secrets ../live-mtls/secrets \
 Exits `0` on PASS, `1` on FAIL — wire this into CI or a pre-merge check the
 same way `run_gates.py`'s gates are used.
 
+## Phase 0.6 exit gate (item 7): the decoupled + concurrent gateway
+
+The baseline above (`~80 ev/s` on the reference stack) was measured against the
+**pre-decouple** gateway, where fanout ran inline on the admission path. Phase
+0.6 items 2 and 4 changed that: admission now durably enqueues and
+acknowledges immediately, and a pool of concurrent background workers fans out
+to JetStream/ClickHouse/archive. To measure the *decoupled* throughput — the
+number the exit gate is about — the gateway under test must be configured for
+it:
+
+- **Use the Postgres outbox, not the file outbox.** Concurrent fanout workers
+  are a Postgres-only capability: `PostgresOutbox`'s claim (`FOR UPDATE SKIP
+  LOCKED`) lets N workers drain disjoint rows safely. The file/memory backends
+  do not lease on `pending()`, so the gateway caps them to a single worker
+  (see `startup::service::open_durability_stores`). The `gateway-ref` profile
+  runs the *file* outbox — fine for the baseline, but the exit-gate run needs a
+  gateway pointed at Postgres (`APEX_POSTGRES_URL`, built `--features
+  postgres`).
+- **Raise `APEX_FANOUT_WORKERS`.** Default is a conservative `4` (sized for
+  single-node MinIO's PUT/sec ceiling). Raise it toward `8`–`16` when the
+  archive target is managed S3, which sustains far higher concurrent
+  PUT+verify. This is the throughput knob; the archive stays one Object-Lock
+  object per event, so its throughput comes from concurrency, not batching.
+- **Sample the backlog.** Pass `--postgres-dsn` so the harness records outbox
+  pending depth over time (`SELECT count(*) FROM apex_event_outbox WHERE
+  state = 'pending'`). The gateway also exposes this operationally: the
+  Phase 0.6 item-6 backlog monitor emits a `BACKLOG_DEGRADED` alert (and the
+  `oldest_pending_millis` signal) when depth/age breach
+  `APEX_BACKLOG_ALERT_DEPTH` / `APEX_BACKLOG_ALERT_AGE_SECS`.
+
+**PASS is not just "admission keeps up."** Because admission now acks on
+durable enqueue, it can *out-run* fanout and pile up a backlog. The exit gate
+is met only when, at 20M/day average (~231/s) sustained and a 10x burst
+(~2,315/s), admission stays healthy **and** the outbox backlog stays
+**bounded and draining** — it must recover to near-zero after the burst, not
+grow monotonically. A growing-forever backlog means the worker pool /
+downstream sinks can't keep up and `APEX_FANOUT_WORKERS` (or the archive
+backend) needs to scale, or admission must apply backpressure via the item-5
+capacity ceiling.
+
+**This run is infra-gated.** It needs a real deployed stack (Postgres +
+ClickHouse + NATS + a MinIO/S3 archive) sized for the target rate and a load
+generator that can push thousands of events/sec — not achievable on a single
+dev box, and the `gateway-ref`/`e2e` compose profiles are functional but not
+sized for 20M/day. Run it in the target environment; the harness, the
+backlog signal, and the config knobs above are all in place for it.
+
 ## How to read the output
 
 ```
