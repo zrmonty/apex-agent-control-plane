@@ -70,13 +70,12 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         caller: &Caller,
         envelope: proto::EventEnvelope,
     ) -> Result<proto::IngestResponse, GatewayError> {
-        let validation_copy = envelope.clone();
-        let request = match crate::IngestRequest::from_validated_transport(envelope) {
+        let request = match crate::IngestRequest::from_validated_transport_ref(&envelope) {
             Ok(request) => request,
             Err(error) => {
                 if let Some(signal) = validation_signal_for_error(error.code) {
                     self.gateway
-                        .record_rejected_envelope_signal(signal, &validation_copy);
+                        .record_rejected_envelope_signal(signal, &envelope);
                 }
                 return Err(error);
             }

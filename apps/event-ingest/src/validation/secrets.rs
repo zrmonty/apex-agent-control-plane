@@ -1,8 +1,16 @@
 use serde_json::Value;
 
+#[cfg(test)]
 use super::convert::prost_struct_to_json;
+#[cfg(test)]
 use crate::GatewayError;
 
+/// Struct-input twin of [`contains_secret_like_value`], kept for test
+/// coverage of the conversion+detection combination. Production admission
+/// (`validation::request::from_validated_transport_ref`) converts `data` to
+/// JSON once itself and calls `contains_secret_like_value` directly so that
+/// conversion is not repeated for the canonical hash.
+#[cfg(test)]
 pub(crate) fn contains_secret_like_data(data: &prost_types::Struct) -> Result<bool, GatewayError> {
     Ok(contains_secret_like_value(&prost_struct_to_json(data)?))
 }
@@ -11,18 +19,29 @@ pub(crate) fn contains_secret_like_value(value: &Value) -> bool {
     contains_secret_like_value_with_context(value, false, false)
 }
 
-/// Control injection is valid untrusted text, so only high-confidence
-/// credential shapes are rejected there. This still catches credentials
-/// embedded in otherwise harmless prose without treating ordinary words such
-/// as "secret_hash" as secrets.
+/// Struct-input twin of [`contains_secret_like_control_value`], kept for
+/// test coverage of the conversion+detection combination; see
+/// [`contains_secret_like_data`]'s doc comment for why production code
+/// calls the JSON-input form directly instead.
+#[cfg(test)]
 pub(crate) fn contains_secret_like_control_data(
     data: &prost_types::Struct,
 ) -> Result<bool, GatewayError> {
-    Ok(contains_secret_like_value_with_context(
-        &prost_struct_to_json(data)?,
-        true,
-        false,
-    ))
+    Ok(contains_secret_like_control_value(&prost_struct_to_json(
+        data,
+    )?))
+}
+
+/// Control injection is valid untrusted text, so only high-confidence
+/// credential shapes are rejected there. This still catches credentials
+/// embedded in otherwise harmless prose without treating ordinary words such
+/// as "secret_hash" as secrets. JSON-input twin of
+/// [`contains_secret_like_control_data`], for callers that already
+/// converted `data` to JSON for another purpose on the same request and
+/// want to avoid doing that conversion a second time. See
+/// `validation::request::from_validated_transport_ref`.
+pub(crate) fn contains_secret_like_control_value(value: &Value) -> bool {
+    contains_secret_like_value_with_context(value, true, false)
 }
 
 fn contains_secret_like_value_with_context(
