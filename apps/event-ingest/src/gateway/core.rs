@@ -111,7 +111,15 @@ impl<P: EventPublisher> IngestGateway<P> {
     where
         P: PendingEventReplayer,
     {
-        self.publisher.replay_pending()
+        // Callers through this API (the admission-side one-shot pre-serve
+        // catch-up in `startup::service::run`, and the manual/fallback
+        // `spawn_replay_worker` path in `auth/service.rs`) only ever cared
+        // whether the cycle succeeded, never whether it settled anything --
+        // that distinction is Phase 0.6 item 4's continuous-drain signal,
+        // consumed directly by `spawn_fanout_worker` instead. Preserve this
+        // method's original `()` contract rather than threading the new bool
+        // through every caller.
+        self.publisher.replay_pending().map(|_| ())
     }
 
     /// Prunes completed outbox rows outside `retention_millis` and compacts
