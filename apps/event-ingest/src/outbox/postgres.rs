@@ -368,6 +368,10 @@ impl EventOutbox for PostgresOutbox {
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
         PostgresReplayOps::requeue_quarantined(self, keys)
     }
+
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        PostgresReplayOps::oldest_pending_millis(self)
+    }
 }
 
 /// `capacity_decision` / `capacity_margin` are pure functions with no

@@ -20,6 +20,13 @@ fn payload_fingerprint(envelope: &[u8]) -> [u8; 32] {
     Sha256::digest(envelope).into()
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 fn hex_fingerprint(fingerprint: [u8; 32]) -> String {
     fingerprint
         .iter()
@@ -51,6 +58,14 @@ enum FileOutboxRecord {
         next_attempt_at_millis: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempts: Option<u32>,
+        /// When this row first entered `pending`. `None` only for journals
+        /// written before this field existed; `load()` falls back to the
+        /// replay-time clock for those rows rather than refusing to start,
+        /// matching every other backward-compatible `Option` field on this
+        /// record. Reschedule/compaction always carry the ORIGINAL value
+        /// forward (see `file_ops.rs`), so this stays stable across restarts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at_millis: Option<u64>,
     },
     Complete {
         workspace_id: String,
@@ -103,6 +118,11 @@ pub struct FileOutbox {
     next_attempt_at_millis: HashMap<OutboxKey, u64>,
     attempts: HashMap<OutboxKey, u32>,
     quarantined: HashMap<OutboxKey, IngestRequest>,
+    /// When each currently-pending row first entered `pending`. Backs
+    /// `oldest_pending_millis` (Phase 0.6 item 6). See the doc comment on
+    /// `FileOutboxRecord::Pending::created_at_millis` for how this survives
+    /// reschedule, compaction, and restart.
+    pending_since_millis: HashMap<OutboxKey, u64>,
 }
 
 impl FileOutbox {
@@ -171,6 +191,7 @@ impl FileOutbox {
             next_attempt_at_millis: HashMap::new(),
             attempts: HashMap::new(),
             quarantined: HashMap::new(),
+            pending_since_millis: HashMap::new(),
         };
         outbox.load()?;
         Ok(outbox)
@@ -242,6 +263,7 @@ impl FileOutbox {
                     envelope,
                     next_attempt_at_millis,
                     attempts,
+                    created_at_millis,
                 } => {
                     let key = OutboxKey {
                         workspace_id: workspace_id.clone(),
@@ -282,6 +304,23 @@ impl FileOutbox {
                         self.attempts.insert(key.clone(), attempts);
                     } else {
                         self.attempts.remove(&key);
+                    }
+                    match created_at_millis {
+                        Some(value) => {
+                            self.pending_since_millis.insert(key.clone(), value);
+                        }
+                        // Legacy journal entry predating this field. Do not
+                        // overwrite an already-known value (a later
+                        // reschedule/compaction record for the same key may
+                        // have already supplied one); only seed a fallback
+                        // the first time this key is seen with no timestamp
+                        // at all. This under-estimates age for rows that
+                        // predate the upgrade, never over-estimates it.
+                        None => {
+                            self.pending_since_millis
+                                .entry(key.clone())
+                                .or_insert_with(now_millis);
+                        }
                     }
                 }
                 FileOutboxRecord::Complete {
@@ -328,6 +367,7 @@ impl FileOutbox {
                             .map(|event| payload_fingerprint(&event.envelope)),
                     };
                     self.pending.remove(&key);
+                    self.pending_since_millis.remove(&key);
                     self.complete.insert(key.clone(), fingerprint);
                     if let Some(event) = reconstructed.or(pending_event) {
                         self.complete_events.insert(key.clone(), event);
@@ -360,6 +400,7 @@ impl FileOutbox {
                         return Err(GatewayError::invalid_outbox_configuration());
                     }
                     self.pending.remove(&key);
+                    self.pending_since_millis.remove(&key);
                     self.quarantined.insert(key, event);
                 }
             }

@@ -104,4 +104,8 @@ impl EventOutbox for SharedOutbox {
             .map(|mut guard| guard.pending())
             .unwrap_or_default()
     }
+
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        self.lock()?.oldest_pending_millis()
+    }
 }

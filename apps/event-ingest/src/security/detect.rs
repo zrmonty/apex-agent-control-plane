@@ -104,6 +104,12 @@ pub(crate) fn detection_finding(input: DetectionInput) -> Result<SecurityFinding
             PolicyDecision::Deny,
             "ingest.admission-abuse.v1",
         ),
+        SecuritySignal::BacklogDegraded => (
+            FindingType::BacklogDegraded,
+            FindingSeverity::High,
+            PolicyDecision::Contain,
+            "ingest.backlog-degraded.v1",
+        ),
     };
     let evidence = EvidenceRef::new(&input.event_id, &input.field_path, &input.value_hash)?;
     new_finding(FindingInput {

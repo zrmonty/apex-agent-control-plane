@@ -72,6 +72,16 @@ pub trait OutboxMaintainer {
     -> Result<(), GatewayError>;
 }
 
+/// Lets a generic `IngestGateway<P>` conditionally expose backlog depth/age
+/// (Phase 0.6 item 6) only when its concrete publisher wraps a durable
+/// outbox, mirroring `OutboxMaintainer` and `PendingEventReplayer` above.
+/// Returns `(pending_count, oldest_pending_millis)` in one call so the
+/// backlog monitor samples both signals from a single adapter lock instead
+/// of two.
+pub trait BacklogObserver {
+    fn backlog_stats(&mut self) -> Result<(u64, Option<u64>), GatewayError>;
+}
+
 impl<P, O> OutboxedPublisher<P, O> {
     pub fn new(publisher: P, outbox: O) -> Self {
         Self {
@@ -244,6 +254,18 @@ where
         retention_millis: u64,
     ) -> Result<(), GatewayError> {
         self.outbox.maintain(now_millis, retention_millis)
+    }
+}
+
+impl<P, O> BacklogObserver for OutboxedPublisher<P, O>
+where
+    P: EventPublisher,
+    O: EventOutbox,
+{
+    fn backlog_stats(&mut self) -> Result<(u64, Option<u64>), GatewayError> {
+        let depth = self.outbox.pending_count()?;
+        let oldest_pending_millis = self.outbox.oldest_pending_millis()?;
+        Ok((depth, oldest_pending_millis))
     }
 }
 

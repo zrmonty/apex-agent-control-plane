@@ -468,8 +468,9 @@ fn deterministic_detector_maps_each_signal_to_redacted_findings() {
         SecuritySignal::AgentTemplateNoncompliant,
         SecuritySignal::AuthAbuse,
         SecuritySignal::AdmissionAbuse,
+        SecuritySignal::BacklogDegraded,
     ];
-    let mut store = FindingStore::new(8).unwrap();
+    let mut store = FindingStore::new(signals.len()).unwrap();
     for (index, signal) in signals.into_iter().enumerate() {
         assert!(
             detect_and_record(

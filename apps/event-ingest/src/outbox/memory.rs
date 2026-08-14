@@ -23,6 +23,13 @@ pub struct InMemoryOutbox {
     completed_at_millis: HashMap<OutboxKey, u64>,
     next_attempt_at_millis: HashMap<OutboxKey, u64>,
     quarantined: HashMap<OutboxKey, IngestRequest>,
+    /// When each currently-pending row entered the pending state. Backs
+    /// `oldest_pending_millis` (Phase 0.6 item 6). Cleared whenever a row
+    /// leaves `pending` (completed or quarantined) and re-seeded to "now" on
+    /// `requeue_quarantined`, matching that call's existing choice to reset
+    /// `attempts`/`next_attempt_at_millis` -- a requeue starts a fresh replay
+    /// window, not a continuation of the original one.
+    pending_since_millis: HashMap<OutboxKey, u64>,
 }
 
 impl InMemoryOutbox {
@@ -40,6 +47,7 @@ impl InMemoryOutbox {
             completed_at_millis: HashMap::new(),
             next_attempt_at_millis: HashMap::new(),
             quarantined: HashMap::new(),
+            pending_since_millis: HashMap::new(),
         })
     }
 }
@@ -71,6 +79,7 @@ impl EventOutbox for InMemoryOutbox {
                 crate::GatewayErrorCode::IdempotencyCapacity,
             ));
         }
+        self.pending_since_millis.insert(key.clone(), now_millis());
         self.pending.insert(key, event.clone());
         Ok(EnqueueResult::Enqueued)
     }
@@ -84,6 +93,7 @@ impl EventOutbox for InMemoryOutbox {
                 self.complete_events.insert(key.clone(), event);
                 self.completed_at_millis.insert(key.clone(), completed_at);
                 self.next_attempt_at_millis.remove(key);
+                self.pending_since_millis.remove(key);
                 Ok(())
             }
             // Already complete is idempotent; unknown keys are a caller bug.
@@ -152,6 +162,7 @@ impl EventOutbox for InMemoryOutbox {
     ) -> Result<(), GatewayError> {
         for key in keys {
             self.next_attempt_at_millis.remove(key);
+            self.pending_since_millis.remove(key);
             if let Some(event) = self.pending.remove(key) {
                 self.quarantined.insert(key.clone(), event);
             }
@@ -170,10 +181,20 @@ impl EventOutbox for InMemoryOutbox {
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
         for key in keys {
             if let Some(event) = self.quarantined.remove(key) {
+                self.pending_since_millis.insert(key.clone(), now_millis());
                 self.pending.insert(key.clone(), event);
             }
         }
         Ok(())
+    }
+
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        let now = now_millis();
+        Ok(self
+            .pending_since_millis
+            .values()
+            .min()
+            .map(|oldest| now.saturating_sub(*oldest)))
     }
 }
 

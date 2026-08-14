@@ -96,6 +96,19 @@ pub trait EventOutbox: Send {
         Ok(0)
     }
 
+    /// Age, in milliseconds, of the oldest non-quarantined pending row --
+    /// `None` when the outbox currently holds no pending work. This is the
+    /// second half of Phase 0.6 item 6's early-warning signal alongside
+    /// `pending_count`: a shallow-but-stuck backlog (a handful of rows that
+    /// never drain) looks fine on depth alone but is exactly what this
+    /// answers. The default returns `Ok(None)` unconditionally -- "age not
+    /// tracked" -- so a hypothetical future backend that does not implement
+    /// this still compiles; every backend actually wired into the gateway
+    /// (`InMemoryOutbox`, `FileOutbox`, `PostgresOutbox`) overrides it.
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        Ok(None)
+    }
+
     /// Requeues selected quarantined rows for another bounded replay attempt.
     /// This is intentionally a separate operation from normal submission so
     /// remediation is explicit and can be audited by the caller.
@@ -162,6 +175,10 @@ impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
 
     fn quarantined_count(&mut self) -> Result<u64, GatewayError> {
         (**self).quarantined_count()
+    }
+
+    fn oldest_pending_millis(&mut self) -> Result<Option<u64>, GatewayError> {
+        (**self).oldest_pending_millis()
     }
 
     fn requeue_quarantined(&mut self, keys: &[OutboxKey]) -> Result<(), GatewayError> {
