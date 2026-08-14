@@ -312,14 +312,24 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
         // for a full poll batch, and sequential is simpler to reason about
         // than parallel admission racing itself over the same operator
         // bucket.
-        let mut slots: Vec<Option<proto::BulkCommandResult>> = Vec::with_capacity(input.targets.len());
-        let mut pending = Vec::with_capacity(input.targets.len());
-        for target in &input.targets {
+        let target_count = input.targets.len();
+        let mut slots: Vec<Option<proto::BulkCommandResult>> = Vec::with_capacity(target_count);
+        let mut pending = Vec::with_capacity(target_count);
+        // Targets are moved out of `input.targets` (rather than borrowed and
+        // cloned) since each target is used at most twice -- once to build
+        // its `ControlCommandInput` (which still needs its own owned copies
+        // of the target's fields, because the target itself is kept alive
+        // for the result below) and once, by value, to build the
+        // `BulkCommandResult` that reports on it. Nothing here reuses
+        // `input.targets` afterward, so moving is behavior-identical to the
+        // old borrow-and-clone and removes one full `BulkCommandTarget`
+        // clone (five `String` allocations) per accepted target.
+        for target in input.targets {
             if let Err(error) = self.admit(operator.subject()).await {
                 slots.push(Some(rejected_bulk_result(target, error)));
                 continue;
             }
-            let command_id = derive_target_command_id(&bulk_id, bulk_millis, target);
+            let command_id = derive_target_command_id(&bulk_id, bulk_millis, &target);
             let command_input = ControlCommandInput {
                 command_id: Some(command_id),
                 workspace_id: target.workspace_id.clone(),
@@ -335,7 +345,7 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
             match build_control_request(command_input, &operator) {
                 Ok(accepted) => {
                     slots.push(None);
-                    pending.push((slots.len() - 1, target.clone(), accepted));
+                    pending.push((slots.len() - 1, target, accepted));
                 }
                 Err(error) => slots.push(Some(rejected_bulk_result(target, error))),
             }
@@ -397,11 +407,11 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
                                 .duplicate_submissions
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        accepted_bulk_result(&target, command_id, outcome, record)
+                        accepted_bulk_result(target, command_id, outcome, record)
                     }
                     Err(error) => {
                         any_storage_failure = true;
-                        rejected_bulk_result(&target, error)
+                        rejected_bulk_result(target, error)
                     }
                 };
                 slots[slot] = Some(filled);
