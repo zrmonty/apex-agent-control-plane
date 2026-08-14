@@ -153,9 +153,19 @@ fn open_durability_stores(
         FileOutbox::open(&outbox_file, &outbox_base, capacity).map_err(startup_gateway_error)?;
     let shared: Box<dyn EventOutbox> = Box::new(outbox);
     let shared = SharedOutbox::new(shared);
-    let worker_outboxes: Vec<Box<dyn EventOutbox>> = (0..worker_count)
-        .map(|_| -> Box<dyn EventOutbox> { Box::new(shared.clone()) })
-        .collect();
+    // File/memory backends run exactly ONE fanout worker regardless of
+    // `worker_count`. Unlike Postgres -- whose `pending_batch` claims rows
+    // with `FOR UPDATE SKIP LOCKED`, so N connections claim disjoint rows --
+    // these backends' `pending()` does not lease/claim, and `SharedOutbox`'s
+    // mutex is released during the slow fanout, so two workers would both see
+    // and both fan out the same pending rows. The idempotent sinks would dedup
+    // the eventual landing, but the double-fanout is pure waste (and a
+    // projection query could briefly observe a duplicate ClickHouse row before
+    // its ReplacingMergeTree merges) on a single-instance lab backend that
+    // gains nothing from concurrency. Horizontal fanout concurrency is a
+    // Postgres-only (scale-target) capability.
+    let _ = worker_count;
+    let worker_outboxes: Vec<Box<dyn EventOutbox>> = vec![Box::new(shared.clone())];
     let idempotency_file = path("APEX_IDEMPOTENCY_FILE")?;
     let idempotency_base = path("APEX_IDEMPOTENCY_BASE")?;
     let idempotency = FileIdempotencyStore::open(&idempotency_file, &idempotency_base, capacity)
