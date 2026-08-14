@@ -1,0 +1,125 @@
+# Copy this file into deploy/compose/secrets/vector-coldstore.toml and adjust
+# only the values marked REPLACE_WITH (bucket name, if you deviate from the
+# default) -- everything else is wired to the paths the coldstore Compose
+# overlay mounts.
+#
+# Topology: NATS/JetStream (apex.events.>) -> remap (partition columns) ->
+# aws_s3 sink (gzip NDJSON) -> MinIO bucket apex-coldstore.
+#
+# This is a SEPARATE, ADDITIVE, mutable analytical tier. It is not the
+# compliance archive (archive-provider / archive-store), it does not use
+# Object-Lock, and losing or re-writing an object here has no bearing on the
+# per-event Object-Lock-retained archive. See ../coldstore/README.md.
+#
+# Parquet-vs-NDJSON: as of the Vector release this template was written
+# against, native Parquet output is not a stable, verified `encoding.codec`
+# for the aws_s3 sink family (upstream discussion has floated a
+# `batch_encoding`-style Parquet path, but it was not something this change
+# could confirm shipped in the specific digest-pinned image an operator picks
+# -- Docker was not available to test it live). Gzip-compressed
+# newline-delimited JSON is used instead: it is unambiguously supported, and
+# DuckDB / ClickHouse / Athena-style engines can all query gzipped NDJSON
+# directly. Re-evaluate Parquet once VECTOR_IMAGE is pinned to a specific
+# digest an operator has verified against upstream release notes -- see
+# coldstore/README.md "What needs a live stack to validate".
+
+[api]
+enabled = false
+
+# ---------------------------------------------------------------------------
+# Source: the same apex.events.> subjects the ingest gateway publishes onto,
+# read by a distinct, least-privilege NATS credential (subscribe-only, no
+# publish, no $JS.API.> stream-admin rights). Never reuse the ingest
+# publisher credential from templates/nats.conf.template for this.
+# ---------------------------------------------------------------------------
+[sources.apex_events]
+type = "nats"
+url = "tls://jetstream:4222"
+subject = "apex.events.>"
+subject_key_field = "nats_subject"
+decoding.codec = "bytes"
+
+tls.enabled = true
+tls.ca_file = "/run/secrets/nats_client_ca"
+tls.crt_file = "/run/secrets/coldstore_nats_client_cert"
+tls.key_file = "/run/secrets/coldstore_nats_client_key"
+
+auth.strategy = "user_password"
+auth.user_password.user_file = "/run/secrets/coldstore_nats_username"
+auth.user_password.password_file = "/run/secrets/coldstore_nats_password"
+
+# Durable JetStream pull consumption, so a Vector restart resumes from its
+# last acked sequence instead of silently missing events published while it
+# was down. VALIDATE this table against the pinned VECTOR_IMAGE's actual
+# supported source schema before relying on it in production -- config
+# surface for the NATS source's JetStream support has moved between Vector
+# releases. If the pinned image rejects this table, delete it: the source
+# above still runs as a plain NATS subscription, but then it is at-most-once
+# and WILL miss events published while this container is stopped. That
+# degradation is acceptable for a cheap analytical tier and is exactly why
+# this is not the compliance archive -- but it should be a deliberate,
+# documented choice, not a silent one.
+[sources.apex_events.jetstream]
+stream = "APEX_EVENTS"
+consumer = "apex-coldstore-vector"
+
+# ---------------------------------------------------------------------------
+# Transform: derive partition columns from the subject
+# (apex.events.<workspace-hex>.<namespace-hex>) rather than parsing the
+# protobuf envelope, and carry the envelope as base64 since it is not UTF-8
+# JSON. A downstream consumer that needs the decoded envelope re-parses
+# envelope_protobuf_base64 with the same protobuf schema
+# apps/event-ingest/src/publisher uses.
+# ---------------------------------------------------------------------------
+[transforms.apex_events_partition]
+type = "remap"
+inputs = ["apex_events"]
+source = '''
+parts = split(.nats_subject, ".")
+if length(parts) >= 4 {
+    .apex_workspace_id = parts[2]
+    .apex_namespace_id = parts[3]
+} else {
+    .apex_workspace_id = "unpartitioned"
+    .apex_namespace_id = "unpartitioned"
+}
+.apex_received_at = format_timestamp!(now(), format: "%Y-%m-%dT%H:%M:%S%.fZ")
+.envelope_protobuf_base64 = encode_base64(.message)
+del(.message)
+del(.nats_subject)
+'''
+
+# ---------------------------------------------------------------------------
+# Sink: gzip NDJSON to the coldstore bucket on the shared MinIO instance
+# (archive-store), partitioned workspace/namespace/date for range scans.
+# Credentials come from a file-based AWS shared-credentials ini (never a
+# plaintext env value) -- see coldstore/README.md and .env.example for
+# COLDSTORE_AWS_CREDENTIALS_FILE.
+# ---------------------------------------------------------------------------
+[sinks.coldstore_s3]
+type = "aws_s3"
+inputs = ["apex_events_partition"]
+bucket = "REPLACE_WITH_APEX_COLDSTORE_BUCKET"
+endpoint = "https://archive-store:9000"
+region = "us-east-1"
+force_path_style = true
+
+tls.ca_file = "/run/secrets/minio_server_ca"
+
+key_prefix = "workspace={{ apex_workspace_id }}/namespace={{ apex_namespace_id }}/date=%Y-%m-%d/"
+filename_time_format = "%s%f"
+filename_append_uuid = true
+filename_extension = "json.gz"
+
+compression = "gzip"
+encoding.codec = "json"
+framing.method = "newline_delimited"
+
+batch.max_bytes = 10485760
+batch.timeout_secs = 60
+
+# Local disk buffer so a MinIO or network hiccup does not backpressure into
+# JetStream redelivery storms. Backed by the coldstore-vector-buffer volume.
+buffer.type = "disk"
+buffer.max_size = 268435456
+buffer.when_full = "block"

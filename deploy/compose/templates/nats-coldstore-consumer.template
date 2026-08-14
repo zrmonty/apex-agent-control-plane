@@ -1,0 +1,34 @@
+# This is NOT a standalone nats.conf. It is the extra `users[]` entry the
+# coldstore overlay needs, for you to merge by hand into the same rendered
+# nats.conf that templates/nats.conf.template produced (the file referenced
+# by NATS_CONFIG_FILE / the `nats_config` secret in compose.yaml).
+#
+# deploy/compose/README.md already says it plainly: "NATS template is an
+# ingest-publisher credential restricted to apex.events.>. Create separate
+# least-privilege credentials for consumers and control services." This is
+# that separate credential for the cold-storage Vector consumer. Do not give
+# it the ingest publisher's password, and do not grant it `publish` -- Vector
+# only ever needs to read the event stream, never write to it or administer
+# JetStream ($JS.API.> stays off-limits, same as every non-provisioning
+# credential).
+#
+# Merge this object into the `authorization.users` array of your rendered
+# nats.conf, alongside the existing ingest-publisher user block, so the file
+# ends up with two entries in `users: [ {...ingest...}, {...this...} ]`.
+{
+  user: "REPLACE_WITH_COLDSTORE_CONSUMER_USER"
+  password: "REPLACE_WITH_LONG_RANDOM_SECRET"
+  permissions: {
+    publish: []
+    subscribe: ["apex.events.>", "_INBOX.apex-coldstore.>"]
+  }
+}
+
+# _INBOX.apex-coldstore.> is scoped narrowly (not the bare _INBOX.> the
+# ingest publisher implicitly needs none of) because a JetStream pull
+# consumer's request/response traffic rides an inbox subject; give this
+# credential its own inbox prefix rather than widening it to every inbox on
+# the account. If your Vector build's NATS source lets you set a custom inbox
+# prefix, set it to apex-coldstore; if it does not expose that option, widen
+# this one line to `_INBOX.>` and note that as an accepted, narrow exception
+# for this consumer only -- never do the same for a publisher credential.

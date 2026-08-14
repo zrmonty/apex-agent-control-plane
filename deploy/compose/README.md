@@ -53,6 +53,19 @@ Use `compose.gateway-ref.yaml`. This local/CI stack builds ingest-gateway. It ru
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy/compose/gateway-ref/run.ps1
 ```
 
+### Cold-storage analytical tier
+
+Additive. Vector consumes the same `apex.events.>` JetStream subjects with a
+separate, subscribe-only credential and writes gzip-NDJSON to a mutable MinIO
+bucket for cheap long-range analytical query (DuckDB / ClickHouse `s3()` /
+Athena-style engines). It is **not** the compliance archive -- see
+[`coldstore/README.md`](coldstore/README.md) for the full topology, partition
+layout, and setup walkthrough.
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f compose.coldstore.yaml up -d
+```
+
 ### Live mTLS and E2E
 
 ```powershell
