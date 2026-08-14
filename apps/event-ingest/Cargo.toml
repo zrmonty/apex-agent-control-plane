@@ -21,7 +21,7 @@ fs2 = "0.4"
 # `http_sinks/publishers.rs`) rather than folding them into the configured
 # endpoint string, which `AuthenticatedHttpConfig::build_client` deliberately
 # rejects if it carries a query string at all.
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider", "query"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"

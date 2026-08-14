@@ -71,33 +71,20 @@ impl ClickHouseHttpPublisher {
 }
 
 impl DurableEventSink for ClickHouseHttpPublisher {
-    /// Phase 0.6 item 4: ClickHouse is a projection, not the durability
-    /// boundary (the outbox is), so its writes may batch server-side without
-    /// weakening per-event durability. `async_insert=1` tells ClickHouse to
-    /// buffer this insert with concurrent ones and flush the batch on its own
-    /// schedule instead of committing one tiny insert per HTTP request;
-    /// `wait_for_async_insert=1` (the server default, set explicitly so a
-    /// server-side config change can never silently flip it) keeps this call
-    /// synchronous with that flush -- the response is not sent until the
-    /// buffered data actually lands (or fails), so a rejected/failed insert
-    /// still comes back as a non-success HTTP status here, not a false
-    /// "accepted." That failure still flows through `http_failure` below and
-    /// out through `RetryingDurableSink`/`DurableFanoutPublisher` exactly as
-    /// before, so a ClickHouse failure still reschedules this event's outbox
-    /// row rather than silently dropping it -- only the server-side write
-    /// path changed, not this sink's per-event call shape or its failure
-    /// semantics. These are request-level settings (hardcoded literals, not
-    /// derived from `self.endpoint` or any other untrusted input), added via
-    /// `RequestBuilder::query` at dispatch time -- deliberately not folded
-    /// into the configured endpoint string, since `AuthenticatedHttpConfig::
-    /// build_client` (`http_sinks/config.rs`) rejects any endpoint carrying a
-    /// query string as part of its SSRF/config-injection hardening.
+    // NOTE (Phase 0.6 item 4): server-side ClickHouse batching via
+    // `async_insert=1`/`wait_for_async_insert=1` was deferred. Those are
+    // real-ClickHouse-only query settings; the reference/mock ClickHouse
+    // endpoint used by the e2e + live-mTLS suites rejects the extra query
+    // parameters, so the setting can't be exercised against the mock and
+    // broke those tests. It belongs behind an env-gated flag and needs a
+    // real-ClickHouse validation path. Item 4's throughput win comes from
+    // the concurrent, continuously-draining fanout workers, which are
+    // validated; ClickHouse batching is a follow-up.
     fn write_event(&mut self, event: &IngestRequest) -> Result<(), GatewayError> {
         let event_hash = validate_sink_event(event)?;
         let mut request = self
             .client
             .post(&self.endpoint)
-            .query(&[("async_insert", "1"), ("wait_for_async_insert", "1")])
             .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
             .body(event.envelope.clone())
             .header("X-Apex-Event-Id", &event.event_id)
