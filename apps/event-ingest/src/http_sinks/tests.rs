@@ -369,6 +369,19 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
     let request_lower = request.to_ascii_lowercase();
     assert!(request_lower.contains("x-apex-event-id:"));
     assert!(request_lower.contains("authorization: bearer test-token"));
+    // Phase 0.6 item 4: the ClickHouse sink must ask for server-side async
+    // batching on every insert, and must keep waiting for that insert to
+    // actually land (so a failure is still reported to this caller, which is
+    // what lets a failed insert reschedule instead of silently dropping).
+    let request_line = request.lines().next().unwrap();
+    assert!(
+        request_line.contains("async_insert=1"),
+        "request line must carry async_insert=1: {request_line}"
+    );
+    assert!(
+        request_line.contains("wait_for_async_insert=1"),
+        "request line must carry wait_for_async_insert=1: {request_line}"
+    );
 
     let (endpoint, handle) = local_http_server(503, "");
     let mut clickhouse = ClickHouseHttpPublisher {

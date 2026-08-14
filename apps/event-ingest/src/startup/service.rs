@@ -18,7 +18,7 @@ use super::auth::{
     require_single_agent_file_bearer_ack,
 };
 use super::env::{
-    allowed_scopes, attempts, optional_path, outbox_retention_interval_secs,
+    allowed_scopes, attempts, fanout_workers, optional_path, outbox_retention_interval_secs,
     outbox_retention_secs, path, required,
 };
 use super::error::startup_gateway_error;
@@ -26,11 +26,11 @@ use super::secrets::{read_bounded, read_token, trusted_secret_path};
 
 const MAX_IDEMPOTENCY_CAPACITY: usize = 1_000_000;
 
-/// Admission's outbox handle, the fanout worker's outbox handle (see
+/// Admission's outbox handle, one outbox handle per fanout worker (see
 /// `open_durability_stores`), and the idempotency store.
 type DurabilityStores = (
     Box<dyn EventOutbox>,
-    Box<dyn EventOutbox>,
+    Vec<Box<dyn EventOutbox>>,
     Box<dyn IdempotencyStore + Send>,
 );
 
@@ -92,23 +92,28 @@ fn build_fanout_publisher(
     Ok(DurableFanoutPublisher::new(nats, clickhouse, archive))
 }
 
-/// Opens the durable outbox for both admission and the dedicated fanout
-/// worker (Phase 0.6 item 2/3).
+/// Opens the durable outbox for admission and for each of the `worker_count`
+/// dedicated fanout workers (Phase 0.6 item 2/3/4).
 ///
-/// Postgres is the scale target: admission and the worker each get their own
-/// connection, and `PostgresOutbox`'s atomic claim (`pending_batch`'s
+/// Postgres is the scale target: admission and every worker each get their
+/// own connection, and `PostgresOutbox`'s atomic claim (`pending_batch`'s
 /// `SELECT ... FOR UPDATE SKIP LOCKED`, see `outbox/postgres_replay.rs`)
-/// makes two independent connections safe without any in-process
-/// coordination between them.
+/// makes any number of independent connections safe without any in-process
+/// coordination between them -- raising `worker_count` only adds more
+/// independent claimers, never a second claimer of the same row.
 ///
 /// File/memory are single-writer lab/embedded backends, not the scale
-/// target: a single instance is opened once and wrapped in `SharedOutbox` so
-/// admission and the worker share the exact same in-process state instead of
-/// each keeping a diverging view of the same file. They contend on
-/// `SharedOutbox`'s mutex; that contention is an accepted trade-off for
-/// these backends, not something worth engineering around.
+/// target: a single instance is opened once and wrapped in `SharedOutbox`,
+/// then cloned once per worker (plus once for admission) so every actor
+/// shares the exact same in-process state instead of each keeping a
+/// diverging view of the same file. They all contend on `SharedOutbox`'s
+/// mutex; that contention -- worse as `worker_count` rises -- is an accepted
+/// trade-off for these backends, not something worth engineering around,
+/// which is exactly why `APEX_FANOUT_WORKERS`' default is conservative and
+/// Postgres is the deployment this setting is meant to be raised for.
 fn open_durability_stores(
     capacity: usize,
+    worker_count: usize,
 ) -> Result<DurabilityStores, Box<dyn std::error::Error>> {
     #[cfg(feature = "postgres")]
     {
@@ -117,15 +122,15 @@ fn open_durability_stores(
         {
             let admission_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
                 .map_err(startup_gateway_error)?;
-            let worker_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
-                .map_err(startup_gateway_error)?;
+            let mut worker_outboxes: Vec<Box<dyn EventOutbox>> = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let worker_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
+                    .map_err(startup_gateway_error)?;
+                worker_outboxes.push(Box::new(worker_outbox));
+            }
             let idempotency = apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
                 .map_err(startup_gateway_error)?;
-            return Ok((
-                Box::new(admission_outbox),
-                Box::new(worker_outbox),
-                Box::new(idempotency),
-            ));
+            return Ok((Box::new(admission_outbox), worker_outboxes, Box::new(idempotency)));
         }
     }
     #[cfg(not(feature = "postgres"))]
@@ -148,20 +153,26 @@ fn open_durability_stores(
         FileOutbox::open(&outbox_file, &outbox_base, capacity).map_err(startup_gateway_error)?;
     let shared: Box<dyn EventOutbox> = Box::new(outbox);
     let shared = SharedOutbox::new(shared);
+    let worker_outboxes: Vec<Box<dyn EventOutbox>> = (0..worker_count)
+        .map(|_| -> Box<dyn EventOutbox> { Box::new(shared.clone()) })
+        .collect();
     let idempotency_file = path("APEX_IDEMPOTENCY_FILE")?;
     let idempotency_base = path("APEX_IDEMPOTENCY_BASE")?;
     let idempotency = FileIdempotencyStore::open(&idempotency_file, &idempotency_base, capacity)
         .map_err(startup_gateway_error)?;
-    Ok((
-        Box::new(shared.clone()),
-        Box::new(shared),
-        Box::new(idempotency),
-    ))
+    Ok((Box::new(shared), worker_outboxes, Box::new(idempotency)))
 }
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let trusted_base = path("APEX_TRUSTED_SECRET_BASE")?;
     let retry_attempts = attempts()?;
+    // Validated alongside `retry_attempts`, before any network-touching
+    // construction begins, like every other bounded startup setting here
+    // (see `startup_rejects_invalid_retry_budget_before_network_access` in
+    // `tests/startup_paths.rs`, which pins that ordering for
+    // `APEX_RETRY_ATTEMPTS` -- `APEX_FANOUT_WORKERS` must fail exactly as
+    // early for the same reason).
+    let fanout_workers = fanout_workers()?;
     let fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
     let capacity = std::env::var("APEX_IDEMPOTENCY_CAPACITY")
         .unwrap_or_else(|_| "50000".to_owned())
@@ -179,7 +190,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let (admission_outbox, worker_outbox, idempotency) = open_durability_stores(capacity)?;
+    let (admission_outbox, worker_outboxes, idempotency) =
+        open_durability_stores(capacity, fanout_workers)?;
     let mut publisher = OutboxedPublisher::new(fanout, admission_outbox);
     // One-shot pre-serve catch-up: replays whatever was left `pending` by a
     // previous process before this one accepts any traffic, using the same
@@ -198,15 +210,24 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             error.summary
         );
     }
-    // The dedicated background fanout worker (Phase 0.6): its own fanout
-    // publisher (a second, independent JetStream/ClickHouse/archive stack)
-    // and its own outbox handle (`worker_outbox` -- a second Postgres
-    // connection, or the other `SharedOutbox` clone for file/memory), so its
-    // slow archive PUT+verify never runs under the admission adapter's
-    // mutex. Built here, before the runtime exists, for the same reason
-    // `fanout` above is: construction blocks on an internal runtime.
-    let worker_fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
-    let fanout_worker = OutboxedPublisher::new(worker_fanout, worker_outbox);
+    // The dedicated background fanout workers (Phase 0.6 item 4: now
+    // `fanout_workers`-many of them, `APEX_FANOUT_WORKERS`-controlled).
+    // Each gets its own fanout publisher (an independent
+    // JetStream/ClickHouse/archive stack) and its own outbox handle
+    // (`worker_outboxes[i]` -- an independent Postgres connection, or a
+    // distinct `SharedOutbox` clone for file/memory), so a slow archive
+    // PUT+verify on one worker never blocks another worker or the admission
+    // adapter's mutex. Built here, before the runtime exists, for the same
+    // reason `fanout` above is: construction blocks on an internal runtime.
+    // `pending_batch`'s `SELECT ... FOR UPDATE SKIP LOCKED` claim
+    // (`outbox/postgres_replay.rs`) is what makes these workers safe to run
+    // concurrently against the same outbox: each claims a disjoint batch, so
+    // no two workers ever fan out the same row.
+    let mut fanout_workers_built = Vec::with_capacity(fanout_workers);
+    for worker_outbox in worker_outboxes {
+        let worker_fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
+        fanout_workers_built.push(OutboxedPublisher::new(worker_fanout, worker_outbox));
+    }
     let alert_capacity = std::env::var("APEX_SECURITY_ALERT_CAPACITY")
         .unwrap_or_else(|_| "100000".to_owned())
         .parse::<usize>()
@@ -312,8 +333,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     runtime.block_on(async move {
         let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
-        // Phase 0.6: the dedicated fanout worker is now the PRIMARY fanout
-        // path, and it deliberately does not go through `service`/the
+        // Phase 0.6: the dedicated fanout workers are now the PRIMARY fanout
+        // path, and they deliberately do not go through `service`/the
         // admission adapter mutex at all -- see `spawn_fanout_worker`'s doc
         // comment in `outbox/publisher.rs`. `AuthenticatedGrpcService::
         // spawn_replay_worker` still exists (and is still exercised by
@@ -321,7 +342,19 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         // admission adapter, but wiring it here as well would reintroduce
         // exactly the contention this refactor removes, so it is not
         // spawned in production.
-        let _fanout_worker = spawn_fanout_worker(fanout_worker, Duration::from_secs(5));
+        //
+        // Item 4: `fanout_workers_built.len()` (== `APEX_FANOUT_WORKERS`)
+        // independent workers, each on its own `spawn_blocking` thread with
+        // its own outbox handle and its own fanout stack -- see
+        // `open_durability_stores`/`build_fanout_publisher` above. Handles
+        // are kept alive for the life of the server (dropping a
+        // `JoinHandle` would detach, not cancel, but holding them is what
+        // documents these tasks as intentionally long-lived rather than
+        // fire-and-forget).
+        let _fanout_workers: Vec<_> = fanout_workers_built
+            .into_iter()
+            .map(|worker| spawn_fanout_worker(worker, Duration::from_secs(5)))
+            .collect();
         // See FINDING #5: `EventOutbox::maintain` was fully implemented and
         // unit-tested but had no production call site, so the outbox
         // capacity check (which counts `complete` rows identically to

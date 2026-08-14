@@ -51,7 +51,17 @@ pub struct OutboxedPublisher<P, O> {
 }
 
 pub trait PendingEventReplayer {
-    fn replay_pending(&mut self) -> Result<(), GatewayError>;
+    /// Runs one replay cycle. Returns `Ok(true)` when the cycle durably
+    /// settled (`mark_complete_many`) at least one previously pending event,
+    /// `Ok(false)` when there was nothing pending or nothing this cycle
+    /// actually settled (every claimed row failed to publish or failed to
+    /// settle). `spawn_fanout_worker` uses this signal to decide whether to
+    /// loop again immediately -- there may be more real backlog waiting right
+    /// now -- or fall back to its polling interval, which is also this
+    /// worker's only throttle against spinning on a stuck sink or a stuck
+    /// outbox. See `replay_pending_inner` for why "settled" (not merely
+    /// "claimed") is the right signal.
+    fn replay_pending(&mut self) -> Result<bool, GatewayError>;
 }
 
 /// Lets a generic `IngestGateway<P>` conditionally expose the durable
@@ -101,7 +111,25 @@ where
     /// starves every other tenant's replay on every single cycle. Each
     /// event's outcome is therefore isolated instead of `?`-propagated out of
     /// the loop, mirroring `control-plane-api/src/replay.rs`'s fanout worker.
-    fn replay_pending_inner(&mut self) -> Result<(), GatewayError> {
+    ///
+    /// Returns whether this cycle durably settled at least one event
+    /// (`Ok(true)`), used by `spawn_fanout_worker` to decide whether to keep
+    /// draining without sleeping. Deliberately keyed off *settlement*, not
+    /// merely off `pending` being non-empty: a claimed batch where every row
+    /// failed to publish (a sink outage) or failed to settle (the outbox
+    /// itself misbehaving) means the very next cycle would almost certainly
+    /// see the same rows again with no new information. Signalling "did
+    /// work" for that case would spin this worker in a tight loop against a
+    /// stuck sink -- burning CPU and, for the file/memory backends whose bare
+    /// `pending()` does not gate on `next_attempt_at` (see
+    /// `a_permanently_failing_event_is_quarantined_after_the_replay_ceiling_instead_of_retried_forever`
+    /// in `outbox/tests_cases.rs`), racing an event through the entire
+    /// `MAX_REPLAY_ATTEMPTS` ceiling in milliseconds and quarantining it for
+    /// what may have been a sub-second blip. Gating on real settlement keeps
+    /// this worker's only throttle (`interval`) intact for exactly the cases
+    /// that need it, while still draining immediately whenever there is
+    /// genuine forward progress to make.
+    fn replay_pending_inner(&mut self) -> Result<bool, GatewayError> {
         let pending = self.outbox.pending();
         let mut completed = Vec::with_capacity(pending.len());
         let mut failed = Vec::new();
@@ -127,9 +155,11 @@ where
         }
 
         let mut first_durable_error = None;
+        let mut settled_any = false;
         if !completed.is_empty() {
             match self.outbox.mark_complete_many(&completed) {
                 Ok(()) => {
+                    settled_any = true;
                     for key in &completed {
                         self.retry_attempts.remove(key);
                     }
@@ -188,7 +218,7 @@ where
 
         match first_durable_error {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(settled_any),
         }
     }
 }
@@ -198,7 +228,7 @@ where
     P: EventPublisher,
     O: EventOutbox,
 {
-    fn replay_pending(&mut self) -> Result<(), GatewayError> {
+    fn replay_pending(&mut self) -> Result<bool, GatewayError> {
         self.replay_pending_inner()
     }
 }
@@ -293,6 +323,18 @@ where
 /// backoff (`replay_pending_inner` above) unchanged: one permanently-failing
 /// event is rescheduled and, past the backend's own durable attempt
 /// ceiling, quarantined -- and never blocks any other row in the batch.
+///
+/// Phase 0.6 item 4 (continuous drain): a cycle that actually settled work
+/// loops again immediately instead of waiting out `interval`, so a growing
+/// backlog is drained at the outbox's/sinks' own speed rather than being
+/// capped at one batch per `interval`. `interval` remains this worker's
+/// sleep whenever a cycle found nothing pending, and -- just as importantly
+/// -- whenever a cycle claimed rows but settled none of them (see
+/// `replay_pending_inner`'s doc comment for why that case must not spin).
+/// `startup::service::run` may spawn several of these concurrently, each
+/// with its own `OutboxedPublisher` (own outbox handle, own fanout stack);
+/// `pending_batch`'s `SELECT ... FOR UPDATE SKIP LOCKED` claim is what makes
+/// that safe without any coordination between them.
 pub fn spawn_fanout_worker<P, O>(
     mut worker: OutboxedPublisher<P, O>,
     interval: Duration,
@@ -303,15 +345,21 @@ where
 {
     tokio::task::spawn_blocking(move || {
         loop {
-            std::thread::sleep(interval);
             let result = catch_unwind(AssertUnwindSafe(|| worker.replay_pending()))
                 .unwrap_or_else(|_| Err(GatewayError::internal()));
-            if let Err(error) = result {
-                eprintln!(
-                    "event-ingest fanout worker deferred: {}: {}",
-                    error.code.public_code(),
-                    error.summary
-                );
+            let did_settle_work = match result {
+                Ok(did_settle_work) => did_settle_work,
+                Err(error) => {
+                    eprintln!(
+                        "event-ingest fanout worker deferred: {}: {}",
+                        error.code.public_code(),
+                        error.summary
+                    );
+                    false
+                }
+            };
+            if !did_settle_work {
+                std::thread::sleep(interval);
             }
         }
     })
