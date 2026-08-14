@@ -76,15 +76,15 @@ pub(super) fn command_summary_to_proto(
 /// the old trace fanout covers this attempt when the inbox write itself also
 /// reports `AlreadyRecorded`.
 pub(super) fn accepted_bulk_result(
-    target: &proto::BulkCommandTarget,
+    target: proto::BulkCommandTarget,
     command_id: String,
     outcome: crate::outbox::SubmitOutcome,
     record: RecordResult,
 ) -> proto::BulkCommandResult {
     proto::BulkCommandResult {
-        workspace_id: target.workspace_id.clone(),
-        namespace_id: target.namespace_id.clone(),
-        agent_id: target.agent_id.clone(),
+        workspace_id: target.workspace_id,
+        namespace_id: target.namespace_id,
+        agent_id: target.agent_id,
         accepted: true,
         command_id: Some(command_id),
         duplicate: Some(outcome.duplicate),
@@ -101,13 +101,13 @@ pub(super) fn accepted_bulk_result(
 /// taxonomy -- so a caller that already handles `SubmitCommand` errors
 /// handles a rejected bulk target without a new case to learn.
 pub(super) fn rejected_bulk_result(
-    target: &proto::BulkCommandTarget,
+    target: proto::BulkCommandTarget,
     error: CommandError,
 ) -> proto::BulkCommandResult {
     proto::BulkCommandResult {
-        workspace_id: target.workspace_id.clone(),
-        namespace_id: target.namespace_id.clone(),
-        agent_id: target.agent_id.clone(),
+        workspace_id: target.workspace_id,
+        namespace_id: target.namespace_id,
+        agent_id: target.agent_id,
         accepted: false,
         command_id: None,
         duplicate: None,
