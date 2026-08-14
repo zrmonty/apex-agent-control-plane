@@ -201,10 +201,9 @@ fn unauthorized_scope_denial_emits_redacted_security_finding() {
         .expect_err("unauthorized scope must remain denied");
     assert_eq!(error.code, GatewayErrorCode::ScopeDenied);
     let findings = gateway
-        .security_store()
-        .expect("alerts enabled")
-        .findings_for_scope(&caller(), "acme", "prod")
-        .unwrap();
+        .security_findings_for_scope(&caller(), "acme", "prod")
+        .unwrap()
+        .expect("alerts enabled");
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].finding_type, FindingType::ScopeIdentityDenied);
     assert_eq!(findings[0].evidence_refs[0].field_path, "event.envelope");
@@ -312,10 +311,9 @@ fn idempotency_conflict_emits_telemetry_integrity_finding_without_accepting_repl
         .expect_err("changed replay must be rejected");
     assert_eq!(error.code, GatewayErrorCode::IdempotencyConflict);
     let findings = gateway
-        .security_store()
-        .expect("alerts enabled")
-        .findings_for_scope(&caller(), "acme", "prod")
-        .unwrap();
+        .security_findings_for_scope(&caller(), "acme", "prod")
+        .unwrap()
+        .expect("alerts enabled");
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].finding_type, FindingType::TelemetryIntegrity);
     assert_eq!(gateway.publisher().published_event_ids().len(), 1);
@@ -443,9 +441,8 @@ fn bounded_idempotency_rejects_new_events_when_its_capacity_is_exhausted() {
     assert!(error.retryable);
     assert_eq!(
         gateway
-            .security_store()
+            .security_findings_for_scope(&caller(), "acme", "prod")
             .unwrap()
-            .findings_for_scope(&caller(), "acme", "prod")
             .unwrap()[0]
             .finding_type,
         FindingType::AdmissionAbuse

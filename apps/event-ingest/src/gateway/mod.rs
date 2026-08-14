@@ -8,7 +8,7 @@ mod publisher;
 mod tests;
 
 pub use adapter::AuthenticatedIngestAdapter;
-pub use core::IngestGateway;
+pub use core::{IngestGateway, SharedSecurityStore};
 pub use publisher::{EventPublisher, PublishOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

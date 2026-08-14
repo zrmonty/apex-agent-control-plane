@@ -18,7 +18,7 @@ use super::auth::{
     require_single_agent_file_bearer_ack,
 };
 use super::env::{
-    allowed_scopes, attempts, backlog_alert_age_secs, backlog_alert_depth,
+    admission_concurrency, allowed_scopes, attempts, backlog_alert_age_secs, backlog_alert_depth,
     backlog_monitor_interval_secs, fanout_workers, optional_path, outbox_retention_interval_secs,
     outbox_retention_secs, path, required,
 };
@@ -27,12 +27,14 @@ use super::secrets::{read_bounded, read_token, trusted_secret_path};
 
 const MAX_IDEMPOTENCY_CAPACITY: usize = 1_000_000;
 
-/// Admission's outbox handle, one outbox handle per fanout worker (see
-/// `open_durability_stores`), and the idempotency store.
+/// Admission's outbox+idempotency pairs -- one pair per
+/// `AuthenticatedGrpcService` pool slot (Phase 0.6 item 2b; see
+/// `open_durability_stores`'s doc comment for why Postgres gets
+/// `admission_pool_size`-many independent pairs while file/memory always
+/// get exactly one) -- and one outbox handle per fanout worker.
 type DurabilityStores = (
-    Box<dyn EventOutbox>,
+    Vec<(Box<dyn EventOutbox>, Box<dyn IdempotencyStore + Send>)>,
     Vec<Box<dyn EventOutbox>>,
-    Box<dyn IdempotencyStore + Send>,
 );
 
 /// Builds one complete, independently-connected JetStream/ClickHouse/archive
@@ -93,45 +95,86 @@ fn build_fanout_publisher(
     Ok(DurableFanoutPublisher::new(nats, clickhouse, archive))
 }
 
-/// Opens the durable outbox for admission and for each of the `worker_count`
-/// dedicated fanout workers (Phase 0.6 item 2/3/4).
+/// Opens the durable outbox+idempotency pairs for the admission pool
+/// (Phase 0.6 item 2b, `admission_pool_size`-many pairs) and the outbox for
+/// each of the `worker_count` dedicated fanout workers (Phase 0.6 item
+/// 2/3/4).
 ///
-/// Postgres is the scale target: admission and every worker each get their
-/// own connection, and `PostgresOutbox`'s atomic claim (`pending_batch`'s
-/// `SELECT ... FOR UPDATE SKIP LOCKED`, see `outbox/postgres_replay.rs`)
-/// makes any number of independent connections safe without any in-process
-/// coordination between them -- raising `worker_count` only adds more
-/// independent claimers, never a second claimer of the same row.
+/// Postgres is the scale target: admission's pool members and every fanout
+/// worker each get their own connection(s), and `PostgresOutbox`'s atomic
+/// claim (`pending_batch`'s `SELECT ... FOR UPDATE SKIP LOCKED`, see
+/// `outbox/postgres_replay.rs`) plus `PostgresIdempotencyStore`'s
+/// `ON CONFLICT`-enforced uniqueness make any number of independent
+/// connections safe without any in-process coordination between them --
+/// raising `worker_count` or `admission_pool_size` only adds more
+/// independent claimers/reservers, never a second claimer of the same row
+/// or a double-accept of the same event: the database is the shared
+/// consistency point, not an in-process lock.
 ///
 /// File/memory are single-writer lab/embedded backends, not the scale
-/// target: a single instance is opened once and wrapped in `SharedOutbox`,
-/// then cloned once per worker (plus once for admission) so every actor
-/// shares the exact same in-process state instead of each keeping a
-/// diverging view of the same file. They all contend on `SharedOutbox`'s
-/// mutex; that contention -- worse as `worker_count` rises -- is an accepted
-/// trade-off for these backends, not something worth engineering around,
-/// which is exactly why `APEX_FANOUT_WORKERS`' default is conservative and
-/// Postgres is the deployment this setting is meant to be raised for.
+/// target: a single outbox instance is opened once and wrapped in
+/// `SharedOutbox`, then cloned once per worker (plus once for admission) so
+/// every actor shares the exact same in-process state instead of each
+/// keeping a diverging view of the same file. `admission_pool_size` is
+/// therefore IGNORED for these backends -- the returned admission pool
+/// always has exactly one member, for the same reason `worker_count` is
+/// ignored in favor of exactly one fanout worker below: these backends'
+/// idempotency state is a local, in-process structure (a `HashMap` or a
+/// file), not a shared database. N independent instances of it would not
+/// coordinate at all -- each would accept and dedup against only the
+/// requests it personally happened to see, silently diverging from every
+/// other pool member's view and defeating idempotency entirely, which is
+/// categorically worse than the contention a single shared instance
+/// accepts. `APEX_ADMISSION_CONCURRENCY`'s default is conservative and
+/// Postgres is the deployment this setting is meant to be raised for,
+/// mirroring `APEX_FANOUT_WORKERS`.
+/// The pure "how many admission pool members does this backend actually
+/// get" decision `open_durability_stores` implements -- pulled out as its
+/// own function so it is unit-testable without touching the filesystem,
+/// Postgres, or process environment (mirrors this module's `*_value`
+/// bounded-env-parse functions in spirit: the side-effect-free decision is
+/// what tests exercise directly).
+///
+/// Postgres passes `requested` through unchanged -- it is the scale target,
+/// and N independent connections are safe (see `open_durability_stores`'s
+/// doc comment). File/memory always collapse to exactly 1 regardless of
+/// `requested`: their idempotency/outbox state is in-process, so N
+/// independent instances would each accept and dedup only the requests they
+/// personally saw, diverging from one another and defeating idempotency.
+fn effective_admission_pool_size(requested: usize, is_postgres: bool) -> usize {
+    if is_postgres { requested } else { 1 }
+}
+
 fn open_durability_stores(
     capacity: usize,
     worker_count: usize,
+    admission_pool_size: usize,
 ) -> Result<DurabilityStores, Box<dyn std::error::Error>> {
     #[cfg(feature = "postgres")]
     {
         if let Ok(url) = std::env::var("APEX_POSTGRES_URL")
             && !url.trim().is_empty()
         {
-            let admission_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
-                .map_err(startup_gateway_error)?;
+            let pool_size = effective_admission_pool_size(admission_pool_size, true);
+            let mut admission_stores = Vec::with_capacity(pool_size);
+            for _ in 0..pool_size {
+                let admission_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
+                    .map_err(startup_gateway_error)?;
+                let admission_idempotency =
+                    apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
+                        .map_err(startup_gateway_error)?;
+                admission_stores.push((
+                    Box::new(admission_outbox) as Box<dyn EventOutbox>,
+                    Box::new(admission_idempotency) as Box<dyn IdempotencyStore + Send>,
+                ));
+            }
             let mut worker_outboxes: Vec<Box<dyn EventOutbox>> = Vec::with_capacity(worker_count);
             for _ in 0..worker_count {
                 let worker_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
                     .map_err(startup_gateway_error)?;
                 worker_outboxes.push(Box::new(worker_outbox));
             }
-            let idempotency = apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
-                .map_err(startup_gateway_error)?;
-            return Ok((Box::new(admission_outbox), worker_outboxes, Box::new(idempotency)));
+            return Ok((admission_stores, worker_outboxes));
         }
     }
     #[cfg(not(feature = "postgres"))]
@@ -167,11 +210,19 @@ fn open_durability_stores(
     // Postgres-only (scale-target) capability.
     let _ = worker_count;
     let worker_outboxes: Vec<Box<dyn EventOutbox>> = vec![Box::new(shared.clone())];
+    // Exactly ONE admission pool member -- see this function's doc comment
+    // and `effective_admission_pool_size` below for the pure decision this
+    // implements (`admission_pool_size` itself is deliberately unused past
+    // this point, the same way `worker_count` is above).
+    let pool_size = effective_admission_pool_size(admission_pool_size, false);
+    debug_assert_eq!(pool_size, 1);
     let idempotency_file = path("APEX_IDEMPOTENCY_FILE")?;
     let idempotency_base = path("APEX_IDEMPOTENCY_BASE")?;
     let idempotency = FileIdempotencyStore::open(&idempotency_file, &idempotency_base, capacity)
         .map_err(startup_gateway_error)?;
-    Ok((Box::new(shared), worker_outboxes, Box::new(idempotency)))
+    let admission_stores: Vec<(Box<dyn EventOutbox>, Box<dyn IdempotencyStore + Send>)> =
+        vec![(Box::new(shared), Box::new(idempotency))];
+    Ok((admission_stores, worker_outboxes))
 }
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -184,7 +235,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // `APEX_RETRY_ATTEMPTS` -- `APEX_FANOUT_WORKERS` must fail exactly as
     // early for the same reason).
     let fanout_workers = fanout_workers()?;
-    let fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
+    // Phase 0.6 item 2b: validated up front like every other bounded
+    // startup setting here, before any network-touching construction, for
+    // the same reason `fanout_workers` is.
+    let admission_concurrency = admission_concurrency()?;
     let capacity = std::env::var("APEX_IDEMPOTENCY_CAPACITY")
         .unwrap_or_else(|_| "50000".to_owned())
         .parse::<usize>()
@@ -201,17 +255,51 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let (admission_outbox, worker_outboxes, idempotency) =
-        open_durability_stores(capacity, fanout_workers)?;
-    let mut publisher = OutboxedPublisher::new(fanout, admission_outbox);
+    // Built BEFORE `open_durability_stores` -- same ordering the pre-pool
+    // code used (`fanout` used to be built immediately after
+    // `fanout_workers`, ahead of the file-backend outbox/idempotency paths
+    // opened below) -- so a missing/invalid NATS setting is still reported
+    // ahead of a missing `APEX_OUTBOX_FILE`/`APEX_IDEMPOTENCY_FILE`
+    // (`tests/startup_paths.rs` pins this ordering). Reused below as pool
+    // member 0's admission fanout stack rather than opening a redundant
+    // extra one.
+    let fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
+    let (admission_stores, worker_outboxes) =
+        open_durability_stores(capacity, fanout_workers, admission_concurrency)?;
+    // Phase 0.6 item 2b: one admission-side fanout stack per pool member,
+    // matching this module's existing "every actor gets its own
+    // independently-connected stack" pattern (see `build_fanout_publisher`'s
+    // doc comment) rather than sharing one fanout value across pool
+    // members. In practice only the FIRST is ever exercised: after the
+    // one-shot pre-serve replay just below, `OutboxedPublisher::publish` is
+    // durable-enqueue-only for every pool member (see
+    // `EventPublisher::publish` in `outbox/publisher.rs`), so members
+    // 1..N's fanout stacks are provisioned but never invoked on the live
+    // admission path -- their outbox/idempotency connections are what
+    // actually matter for concurrent admission.
+    let mut admission_stores = admission_stores.into_iter();
+    let (first_admission_outbox, first_admission_idempotency) = admission_stores
+        .next()
+        .expect("admission pool has at least one member");
+    let mut admission_publishers = vec![OutboxedPublisher::new(fanout, first_admission_outbox)];
+    let mut admission_idempotency = vec![first_admission_idempotency];
+    for (admission_outbox, admission_idem) in admission_stores {
+        let admission_fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
+        admission_publishers.push(OutboxedPublisher::new(admission_fanout, admission_outbox));
+        admission_idempotency.push(admission_idem);
+    }
     // One-shot pre-serve catch-up: replays whatever was left `pending` by a
-    // previous process before this one accepts any traffic, using the same
-    // admission-side fanout built above. Safe to run synchronously here
-    // because nothing is serving yet, so there is no concurrent admission
-    // call to contend with. After this point `publisher` is enqueue-only
-    // (see `OutboxedPublisher::publish` in `outbox/publisher.rs`); the
-    // dedicated fanout worker below is what performs fanout from here on.
-    if let Err(error) = publisher.replay_pending() {
+    // previous process before this one accepts any traffic, using pool
+    // member 0's admission-side fanout built above. Safe to run
+    // synchronously here because nothing is serving yet, so there is no
+    // concurrent admission call to contend with. This needs to run only
+    // once, not once per pool member: for Postgres every member's outbox
+    // connection points at the same underlying table, and for file/memory
+    // there is only one member. After this point every pool member's
+    // publisher is enqueue-only (see `OutboxedPublisher::publish` in
+    // `outbox/publisher.rs`); the dedicated fanout workers below are what
+    // perform fanout from here on.
+    if let Err(error) = admission_publishers[0].replay_pending() {
         if !error.retryable {
             return Err(startup_gateway_error(error).into());
         }
@@ -227,13 +315,13 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // JetStream/ClickHouse/archive stack) and its own outbox handle
     // (`worker_outboxes[i]` -- an independent Postgres connection, or a
     // distinct `SharedOutbox` clone for file/memory), so a slow archive
-    // PUT+verify on one worker never blocks another worker or the admission
-    // adapter's mutex. Built here, before the runtime exists, for the same
-    // reason `fanout` above is: construction blocks on an internal runtime.
-    // `pending_batch`'s `SELECT ... FOR UPDATE SKIP LOCKED` claim
-    // (`outbox/postgres_replay.rs`) is what makes these workers safe to run
-    // concurrently against the same outbox: each claims a disjoint batch, so
-    // no two workers ever fan out the same row.
+    // PUT+verify on one worker never blocks another worker or any admission
+    // pool member. Built here, before the runtime exists, for the same
+    // reason the admission fanout stacks above are: construction blocks on
+    // an internal runtime. `pending_batch`'s `SELECT ... FOR UPDATE SKIP
+    // LOCKED` claim (`outbox/postgres_replay.rs`) is what makes these
+    // workers safe to run concurrently against the same outbox: each claims
+    // a disjoint batch, so no two workers ever fan out the same row.
     let mut fanout_workers_built = Vec::with_capacity(fanout_workers);
     for worker_outbox in worker_outboxes {
         let worker_fanout = build_fanout_publisher(&trusted_base, retry_attempts)?;
@@ -260,7 +348,22 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backlog_monitor_interval_secs = backlog_monitor_interval_secs()?;
     let backlog_alert_depth = backlog_alert_depth()?;
     let backlog_alert_age_millis = backlog_alert_age_secs()?.saturating_mul(1000);
-    let gateway = if let Some(journal_path) = optional_path("APEX_SECURITY_FINDINGS_FILE")? {
+    // Phase 0.6 item 2b: build one `IngestGateway` per admission pool
+    // member. The first one creates the (memory or journal) Security Alert
+    // backend; every other member attaches the SAME backend via
+    // `with_shared_security_store` (`SharedSecurityStore` is an `Arc`
+    // handle -- see `gateway/core.rs`) so all N members record into and
+    // read from one combined finding store instead of each maintaining its
+    // own disjoint set.
+    let mut admission_publishers = admission_publishers.into_iter();
+    let mut admission_idempotency = admission_idempotency.into_iter();
+    let first_publisher = admission_publishers
+        .next()
+        .expect("admission pool has at least one member");
+    let first_idempotency = admission_idempotency
+        .next()
+        .expect("admission pool has at least one member");
+    let first_gateway = if let Some(journal_path) = optional_path("APEX_SECURITY_FINDINGS_FILE")? {
         let journal_base = optional_path("APEX_SECURITY_FINDINGS_BASE")?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -269,12 +372,23 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         let journal = FindingJournal::open(&journal_path, &journal_base, alert_capacity)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-        IngestGateway::with_idempotency_store(publisher, idempotency).with_security_journal(journal)
+        IngestGateway::with_idempotency_store(first_publisher, first_idempotency)
+            .with_security_journal(journal)
     } else {
-        IngestGateway::with_idempotency_store(publisher, idempotency)
+        IngestGateway::with_idempotency_store(first_publisher, first_idempotency)
             .with_security_store(alert_capacity)
             .map_err(startup_gateway_error)?
     };
+    let shared_security_store = first_gateway.shared_security_store();
+    let mut admission_adapters = vec![AuthenticatedIngestAdapter::new(first_gateway)];
+    for (publisher, idempotency) in admission_publishers.zip(admission_idempotency) {
+        let gateway = IngestGateway::with_idempotency_store(publisher, idempotency);
+        let gateway = match shared_security_store.clone() {
+            Some(shared) => gateway.with_shared_security_store(shared),
+            None => gateway,
+        };
+        admission_adapters.push(AuthenticatedIngestAdapter::new(gateway));
+    }
     let token_path = trusted_secret_path(
         &path("APEX_BEARER_TOKEN_FILE")?,
         &trusted_base,
@@ -299,8 +413,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         bearer_peer_certificate,
     ))
     .with_ephemeral_store(ephemeral_store.clone());
-    let mut service =
-        AuthenticatedGrpcService::new(AuthenticatedIngestAdapter::new(gateway), verifier);
+    let mut service = AuthenticatedGrpcService::with_pool(admission_adapters, verifier);
     service = service.with_ephemeral_store(ephemeral_store);
     let server_cert_path = trusted_secret_path(
         &path("APEX_GATEWAY_SERVER_CERT_FILE")?,
@@ -562,4 +675,32 @@ fn build_ephemeral_store(
 
     let store: Box<dyn EphemeralStore> = Box::new(memory);
     Ok(Arc::new(Mutex::new(store)))
+}
+
+#[cfg(test)]
+mod effective_admission_pool_size_tests {
+    use super::effective_admission_pool_size;
+
+    /// Postgres is the scale target: `open_durability_stores` passes
+    /// `APEX_ADMISSION_CONCURRENCY`'s validated value straight through, so
+    /// every requested pool size in the bounded 1..=32 range must survive
+    /// unchanged.
+    #[test]
+    fn postgres_passes_the_requested_size_through_unchanged() {
+        assert_eq!(effective_admission_pool_size(1, true), 1);
+        assert_eq!(effective_admission_pool_size(4, true), 4);
+        assert_eq!(effective_admission_pool_size(32, true), 32);
+    }
+
+    /// File/memory backends collapse to exactly one admission pool member
+    /// regardless of what was requested -- N independent in-process
+    /// idempotency stores would each dedup only what they personally saw,
+    /// diverging from one another and defeating idempotency (see the
+    /// function's doc comment and `open_durability_stores`'s).
+    #[test]
+    fn file_and_memory_backends_always_collapse_to_one() {
+        assert_eq!(effective_admission_pool_size(1, false), 1);
+        assert_eq!(effective_admission_pool_size(4, false), 1);
+        assert_eq!(effective_admission_pool_size(32, false), 1);
+    }
 }

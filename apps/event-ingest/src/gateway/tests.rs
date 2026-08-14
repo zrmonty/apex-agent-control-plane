@@ -115,7 +115,7 @@ fn with_idempotency_store_and_publish_failure_aborts_reservation() {
             .unwrap()
             .is_empty()
     );
-    assert!(gateway.security_store().is_some());
+    assert!(gateway.has_memory_security_store());
 }
 
 #[test]
@@ -166,13 +166,15 @@ fn adapter_replays_pending_and_records_rejected_envelope_signals() {
         &[EVENT]
     );
 
-    let mut secured = AuthenticatedIngestAdapter::new(
+    let secured = AuthenticatedIngestAdapter::new(
         IngestGateway::new(InMemoryPublisher::default())
             .with_security_store(8)
             .unwrap(),
     );
     let envelope = sample_envelope(EVENT);
-    secured.record_security_signal(SecuritySignal::AuthAbuse, &envelope);
+    secured
+        .gateway()
+        .record_rejected_envelope_signal(SecuritySignal::AuthAbuse, &envelope);
     assert!(
         !secured
             .gateway()
@@ -268,7 +270,7 @@ fn security_journal_backend_exposes_findings() {
     let journal = crate::FindingJournal::open(&path, &root, 8).unwrap();
     let mut gateway =
         IngestGateway::new(InMemoryPublisher::default()).with_security_journal(journal);
-    assert!(gateway.security_store().is_none());
+    assert!(!gateway.has_memory_security_store());
     assert!(
         gateway
             .security_findings_for_scope(&scope_caller(), "acme", "prod")
@@ -292,7 +294,7 @@ fn security_journal_backend_exposes_findings() {
 
 #[test]
 fn rejected_envelope_signal_ignores_invalid_scope_or_event_id() {
-    let mut gateway = IngestGateway::new(InMemoryPublisher::default())
+    let gateway = IngestGateway::new(InMemoryPublisher::default())
         .with_security_store(4)
         .unwrap();
     let mut envelope = sample_envelope(EVENT);

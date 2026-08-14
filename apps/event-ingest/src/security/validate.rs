@@ -75,7 +75,7 @@ pub(crate) fn expected_classification(
         // An operational early-warning, not an admission decision on any one
         // event -- `Contain` reads as "operator should consider throttling
         // upstream / scaling the sink", never as "deny this request". See
-        // `gateway::core::IngestGateway::record_backlog_alert`.
+        // `gateway::core::SharedSecurityStore::record_backlog_alert`.
         FindingType::BacklogDegraded => (FindingSeverity::High, PolicyDecision::Contain),
     }
 }

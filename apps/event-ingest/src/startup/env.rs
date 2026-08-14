@@ -156,6 +156,48 @@ pub(crate) fn fanout_workers_value(value: Option<&str>) -> Result<usize, io::Err
         })
 }
 
+/// How many admission adapters `startup::service::run` pools behind
+/// `AuthenticatedGrpcService` (Phase 0.6 item 2b). Independent of
+/// `APEX_FANOUT_WORKERS`: fanout concurrency is about draining the durable
+/// outbox in the background, admission concurrency is about how many
+/// concurrent `ingest` calls can be in flight at once. Only meaningful for
+/// the Postgres backend -- `startup::service::open_durability_stores`
+/// forces this down to a single pool member for file/memory regardless of
+/// what this returns, for the same reason `APEX_FANOUT_WORKERS` is forced
+/// to one worker there: those backends' idempotency/outbox state is
+/// in-process, and N independent in-memory stores would diverge rather than
+/// share one dedup view.
+///
+/// Bounded like every other startup setting here. The upper bound (32)
+/// matches `APEX_FANOUT_WORKERS`' ceiling for the same reason: a sanity
+/// limit on Postgres connection fan-out, not a target. The default of 4 is
+/// deliberately conservative, matching `APEX_FANOUT_WORKERS`' default.
+pub(crate) fn admission_concurrency() -> Result<usize, io::Error> {
+    admission_concurrency_value(env::var("APEX_ADMISSION_CONCURRENCY").ok().as_deref())
+}
+
+pub(crate) fn admission_concurrency_value(value: Option<&str>) -> Result<usize, io::Error> {
+    value
+        .unwrap_or("4")
+        .parse::<usize>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_ADMISSION_CONCURRENCY must be an integer from 1 through 32",
+            )
+        })
+        .and_then(|value| {
+            if (1..=32).contains(&value) {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "APEX_ADMISSION_CONCURRENCY must be an integer from 1 through 32",
+                ))
+            }
+        })
+}
+
 /// How often `AuthenticatedGrpcService::spawn_backlog_monitor` (Phase 0.6
 /// item 6) samples outbox depth and oldest-pending age. Same bounds/rationale
 /// shape as `outbox_retention_interval_secs_value`: bounded from below so a
@@ -348,6 +390,38 @@ mod fanout_workers_tests {
         assert!(fanout_workers_value(Some("-1")).is_err());
         assert!(fanout_workers_value(Some("")).is_err());
         assert!(fanout_workers_value(Some("4.5")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod admission_concurrency_tests {
+    use super::admission_concurrency_value;
+
+    #[test]
+    fn defaults_to_four_when_unset() {
+        assert_eq!(admission_concurrency_value(None).unwrap(), 4);
+    }
+
+    #[test]
+    fn accepts_the_full_bounded_range() {
+        assert_eq!(admission_concurrency_value(Some("1")).unwrap(), 1);
+        assert_eq!(admission_concurrency_value(Some("32")).unwrap(), 32);
+        assert_eq!(admission_concurrency_value(Some("16")).unwrap(), 16);
+    }
+
+    #[test]
+    fn rejects_zero_and_values_past_the_ceiling() {
+        assert!(admission_concurrency_value(Some("0")).is_err());
+        assert!(admission_concurrency_value(Some("33")).is_err());
+        assert!(admission_concurrency_value(Some("1000")).is_err());
+    }
+
+    #[test]
+    fn fails_closed_on_non_numeric_or_negative_input() {
+        assert!(admission_concurrency_value(Some("not-a-number")).is_err());
+        assert!(admission_concurrency_value(Some("-1")).is_err());
+        assert!(admission_concurrency_value(Some("")).is_err());
+        assert!(admission_concurrency_value(Some("4.5")).is_err());
     }
 }
 

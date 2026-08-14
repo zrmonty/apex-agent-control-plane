@@ -43,6 +43,7 @@ pub use errors::{
 };
 pub use gateway::{
     AuthenticatedIngestAdapter, EventPublisher, IngestGateway, IngestOutcome, PublishOutcome,
+    SharedSecurityStore,
 };
 pub use http_sinks::{ArchiveHttpPublisher, AuthenticatedHttpConfig, ClickHouseHttpPublisher};
 #[cfg(feature = "postgres")]

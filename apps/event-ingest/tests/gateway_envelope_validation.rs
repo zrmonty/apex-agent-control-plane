@@ -166,9 +166,8 @@ fn secret_exposure_is_detected_in_control_inject_and_recorded_as_a_finding() {
     assert_eq!(error.code, GatewayErrorCode::SecretExposure);
     let findings = adapter
         .gateway()
-        .security_store()
+        .security_findings_for_scope(&caller(), "acme", "prod")
         .unwrap()
-        .findings_for_scope(&caller(), "acme", "prod")
         .unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].finding_type, FindingType::SecretExposure);

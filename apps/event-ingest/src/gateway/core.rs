@@ -1,4 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex};
 
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -40,12 +41,173 @@ pub(crate) const OPERATIONAL_NAMESPACE_ID: &str = "ingest-backlog";
 pub struct IngestGateway<P: EventPublisher> {
     publisher: P,
     idempotency: Box<dyn IdempotencyStore + Send>,
-    security_store: Option<SecurityAlertBackend>,
+    security_store: Option<SharedSecurityStore>,
 }
 
 enum SecurityAlertBackend {
     Memory(FindingStore),
     Journal(FindingJournal),
+}
+
+/// A cloneable handle to a Security Alert backend (in-memory or journal).
+///
+/// Phase 0.6 item 2b replaces the single admission `Mutex<adapter>` with a
+/// POOL of N `AuthenticatedIngestAdapter`s (see
+/// `auth::service::AuthenticatedGrpcService`), each wrapping its own
+/// `IngestGateway<P>`. If each pool member kept its own independent
+/// `FindingStore`, findings would scatter across pool members -- a caller
+/// reading `security_findings_for_scope` through whichever pool member
+/// happens to answer its request would see only a fraction of what was
+/// actually recorded, depending on which slot handled which prior request.
+/// `SharedSecurityStore` lets every pool member (and
+/// `AuthenticatedGrpcService` itself, for signal recording that must not
+/// wait on a busy admission adapter) record into and read from exactly one
+/// combined backend, via `IngestGateway::shared_security_store` /
+/// `with_shared_security_store`.
+///
+/// Interior mutability (`Mutex`) rather than requiring `&mut self` on every
+/// gateway that holds a clone is what makes sharing possible: the store is a
+/// side channel from the admission decision (a failed or skipped write here
+/// never changes it), so a brief, uncontended lock here is a very different
+/// hazard than the admission mutex this whole change removes.
+#[derive(Clone)]
+pub struct SharedSecurityStore(Arc<Mutex<SecurityAlertBackend>>);
+
+impl SharedSecurityStore {
+    fn new(backend: SecurityAlertBackend) -> Self {
+        Self(Arc::new(Mutex::new(backend)))
+    }
+
+    /// Recovers a poisoned lock rather than propagating the poison. The
+    /// backend's own operations (`FindingStore::append`,
+    /// `FindingJournal::record_detection`) do not hold multi-step invariants
+    /// across an await/panic boundary here, and every caller of a
+    /// `SharedSecurityStore` method already treats a failed write as a
+    /// silent no-op (see `record_signal_parts`'s doc comment) -- so refusing
+    /// every future finding for the rest of the process over one unrelated
+    /// panic would be a strictly worse outcome than continuing with
+    /// whatever the backend held at the moment of the panic.
+    fn guard(&self) -> std::sync::MutexGuard<'_, SecurityAlertBackend> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// True only for the in-memory backend. Mirrors the pre-pool
+    /// `IngestGateway::security_store()` accessor, which likewise reported
+    /// absence for a journal-backed store -- callers that need this
+    /// distinction (tests only; no production caller) never needed access
+    /// to the store's contents, just which backend is configured.
+    fn is_memory_backed(&self) -> bool {
+        matches!(&*self.guard(), SecurityAlertBackend::Memory(_))
+    }
+
+    /// Returns findings for exactly one caller-selected scope. No API here
+    /// exposes the backing store's global finding collection.
+    pub fn findings_for_scope(
+        &self,
+        caller: &Caller,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<Vec<SecurityFinding>, FindingError> {
+        match &*self.guard() {
+            SecurityAlertBackend::Memory(store) => Ok(store
+                .findings_for_scope(caller, workspace_id, namespace_id)?
+                .into_iter()
+                .cloned()
+                .collect()),
+            SecurityAlertBackend::Journal(journal) => Ok(journal
+                .store()
+                .findings_for_scope(caller, workspace_id, namespace_id)?
+                .into_iter()
+                .cloned()
+                .collect()),
+        }
+    }
+
+    /// Records a redacted, best-effort finding. Alert persistence is
+    /// secondary to whatever decision the caller already made: a failed or
+    /// skipped write here never changes that decision, so every failure
+    /// mode (detector rejection, poisoned lock) is silently swallowed,
+    /// exactly like the pre-pool `IngestGateway::record_security_signal_parts`.
+    fn record_signal_parts(
+        &self,
+        signal: SecuritySignal,
+        workspace_id: &str,
+        namespace_id: &str,
+        event_id: &str,
+        field_path: &str,
+        envelope: &[u8],
+    ) {
+        let value_hash = format!("{:x}", Sha256::digest(envelope));
+        let input = DetectionInput {
+            signal,
+            workspace_id: workspace_id.to_owned(),
+            namespace_id: namespace_id.to_owned(),
+            event_id: event_id.to_owned(),
+            field_path: field_path.to_owned(),
+            value_hash,
+        };
+        match &mut *self.guard() {
+            SecurityAlertBackend::Memory(store) => {
+                let _ = detect_and_record(store, input);
+            }
+            SecurityAlertBackend::Journal(journal) => {
+                let _ = journal.record_detection(input);
+            }
+        }
+    }
+
+    /// See `IngestGateway::record_rejected_envelope_signal`.
+    pub(crate) fn record_rejected_envelope_signal(
+        &self,
+        signal: SecuritySignal,
+        envelope: &proto::EventEnvelope,
+    ) {
+        let Some(scope) = envelope.scope.as_ref() else {
+            return;
+        };
+        if !is_lowercase_uuidv7(&envelope.event_id)
+            || !is_scope_identifier(&scope.workspace_id)
+            || !is_scope_identifier(&scope.namespace_id)
+        {
+            return;
+        }
+        let bytes = envelope.encode_to_vec();
+        self.record_signal_parts(
+            signal,
+            &scope.workspace_id,
+            &scope.namespace_id,
+            &envelope.event_id,
+            "event.envelope",
+            &bytes,
+        );
+    }
+
+    /// See `IngestGateway::record_backlog_alert`.
+    pub(crate) fn record_backlog_alert(
+        &self,
+        depth: u64,
+        oldest_pending_millis: Option<u64>,
+        alert_depth: u64,
+        alert_age_millis: u64,
+    ) {
+        let Ok(event_id) = synthetic_operational_event_id() else {
+            return;
+        };
+        let detail = format!(
+            "depth={depth} oldest_pending_ms={} alert_depth={alert_depth} alert_age_ms={alert_age_millis}",
+            oldest_pending_millis
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+        self.record_signal_parts(
+            SecuritySignal::BacklogDegraded,
+            OPERATIONAL_WORKSPACE_ID,
+            OPERATIONAL_NAMESPACE_ID,
+            &event_id,
+            "outbox.backlog",
+            detail.as_bytes(),
+        );
+    }
 }
 
 impl<P: EventPublisher> IngestGateway<P> {
@@ -78,18 +240,46 @@ impl<P: EventPublisher> IngestGateway<P> {
     /// Alert persistence is secondary to the admission decision: a failed
     /// alert write never turns a denied request into an accepted request.
     pub fn with_security_store(mut self, capacity: usize) -> Result<Self, GatewayError> {
-        self.security_store = Some(SecurityAlertBackend::Memory(
+        self.security_store = Some(SharedSecurityStore::new(SecurityAlertBackend::Memory(
             FindingStore::new(capacity)
                 .map_err(|_| GatewayError::new(GatewayErrorCode::Internal))?,
-        ));
+        )));
         Ok(self)
     }
 
-    pub fn security_store(&self) -> Option<&FindingStore> {
-        match self.security_store.as_ref() {
-            Some(SecurityAlertBackend::Memory(store)) => Some(store),
-            _ => None,
-        }
+    pub fn with_security_journal(mut self, journal: FindingJournal) -> Self {
+        self.security_store = Some(SharedSecurityStore::new(SecurityAlertBackend::Journal(
+            journal,
+        )));
+        self
+    }
+
+    /// Attaches an existing shared Security Alert backend instead of
+    /// creating a new, independent one -- see `SharedSecurityStore`'s doc
+    /// comment. Used by `startup::service::run` to give every
+    /// `IngestGateway` in the Phase 0.6 item 2b admission pool the same
+    /// combined finding store.
+    pub fn with_shared_security_store(mut self, shared: SharedSecurityStore) -> Self {
+        self.security_store = Some(shared);
+        self
+    }
+
+    /// Returns a cloneable handle to this gateway's Security Alert backend,
+    /// if one is configured -- for attaching to other pool members via
+    /// `with_shared_security_store`, or for `AuthenticatedGrpcService` to
+    /// record signals directly without waiting on any pool member's
+    /// per-adapter lock.
+    pub fn shared_security_store(&self) -> Option<SharedSecurityStore> {
+        self.security_store.clone()
+    }
+
+    /// True only when a Security Alert backend is configured AND it is the
+    /// in-memory backend. Mirrors the pre-pool `security_store().is_some()`
+    /// accessor exactly: it never exposed the journal-backed case either.
+    pub fn has_memory_security_store(&self) -> bool {
+        self.security_store
+            .as_ref()
+            .is_some_and(SharedSecurityStore::is_memory_backed)
     }
 
     /// Returns findings for exactly one caller-selected scope. No gateway API
@@ -99,27 +289,15 @@ impl<P: EventPublisher> IngestGateway<P> {
         caller: &Caller,
         workspace_id: &str,
         namespace_id: &str,
-    ) -> Result<Option<Vec<&SecurityFinding>>, FindingError> {
+    ) -> Result<Option<Vec<SecurityFinding>>, FindingError> {
         let Some(store) = self.security_store.as_ref() else {
             return Ok(None);
         };
-        match store {
-            SecurityAlertBackend::Memory(store) => Ok(Some(store.findings_for_scope(
-                caller,
-                workspace_id,
-                namespace_id,
-            )?)),
-            SecurityAlertBackend::Journal(journal) => Ok(Some(
-                journal
-                    .store()
-                    .findings_for_scope(caller, workspace_id, namespace_id)?,
-            )),
-        }
-    }
-
-    pub fn with_security_journal(mut self, journal: FindingJournal) -> Self {
-        self.security_store = Some(SecurityAlertBackend::Journal(journal));
-        self
+        Ok(Some(store.findings_for_scope(
+            caller,
+            workspace_id,
+            namespace_id,
+        )?))
     }
 
     pub fn publisher(&self) -> &P {
@@ -272,15 +450,17 @@ impl<P: EventPublisher> IngestGateway<P> {
         })
     }
 
-    fn record_security_signal(&mut self, signal: SecuritySignal, event: &IngestRequest) {
-        self.record_security_signal_parts(
-            signal,
-            &event.workspace_id,
-            &event.namespace_id,
-            &event.event_id,
-            "event.envelope",
-            &event.envelope,
-        );
+    fn record_security_signal(&self, signal: SecuritySignal, event: &IngestRequest) {
+        if let Some(store) = &self.security_store {
+            store.record_signal_parts(
+                signal,
+                &event.workspace_id,
+                &event.namespace_id,
+                &event.event_id,
+                "event.envelope",
+                &event.envelope,
+            );
+        }
     }
 
     /// Reports current backlog depth and oldest-pending age. Forwards to the
@@ -294,106 +474,16 @@ impl<P: EventPublisher> IngestGateway<P> {
         self.publisher.backlog_stats()
     }
 
-    /// Records a redacted, best-effort operational finding for a backlog
-    /// threshold breach (Phase 0.6 item 6). Scoped to the reserved
-    /// `OPERATIONAL_WORKSPACE_ID`/`OPERATIONAL_NAMESPACE_ID` pair (see their
-    /// doc comment) rather than any tenant scope. `depth`/`oldest_pending_
-    /// millis`/the thresholds that triggered this call are folded into the
-    /// evidence's `value_hash` only -- never stored in the clear -- matching
-    /// every other finding this gateway records; the structured `eprintln!`
-    /// the caller (`auth::service::AuthenticatedGrpcService::
-    /// spawn_backlog_monitor`) emits alongside this call is what carries the
-    /// human-readable numbers.
-    ///
-    /// Never fails outward: no security store configured, a bad synthetic
-    /// event id, or a rejected/duplicate finding all silently no-op, exactly
-    /// like `record_security_signal_parts`'s existing failure handling. A
-    /// backlog alert must never be able to affect admission.
-    pub(crate) fn record_backlog_alert(
-        &mut self,
-        depth: u64,
-        oldest_pending_millis: Option<u64>,
-        alert_depth: u64,
-        alert_age_millis: u64,
-    ) {
-        let Ok(event_id) = synthetic_operational_event_id() else {
-            return;
-        };
-        let detail = format!(
-            "depth={depth} oldest_pending_ms={} alert_depth={alert_depth} alert_age_ms={alert_age_millis}",
-            oldest_pending_millis
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_owned())
-        );
-        self.record_security_signal_parts(
-            SecuritySignal::BacklogDegraded,
-            OPERATIONAL_WORKSPACE_ID,
-            OPERATIONAL_NAMESPACE_ID,
-            &event_id,
-            "outbox.backlog",
-            detail.as_bytes(),
-        );
-    }
-
     /// Records a safe, redacted finding for a validation denial that occurs
     /// before an `IngestRequest` exists. Only fields already validated by the
     /// envelope boundary are accepted into the finding evidence.
     pub(crate) fn record_rejected_envelope_signal(
-        &mut self,
+        &self,
         signal: SecuritySignal,
         envelope: &proto::EventEnvelope,
     ) {
-        let Some(scope) = envelope.scope.as_ref() else {
-            return;
-        };
-        if !is_lowercase_uuidv7(&envelope.event_id)
-            || !is_scope_identifier(&scope.workspace_id)
-            || !is_scope_identifier(&scope.namespace_id)
-        {
-            return;
-        }
-        let bytes = envelope.encode_to_vec();
-        self.record_security_signal_parts(
-            signal,
-            &scope.workspace_id,
-            &scope.namespace_id,
-            &envelope.event_id,
-            "event.envelope",
-            &bytes,
-        );
-    }
-
-    fn record_security_signal_parts(
-        &mut self,
-        signal: SecuritySignal,
-        workspace_id: &str,
-        namespace_id: &str,
-        event_id: &str,
-        field_path: &str,
-        envelope: &[u8],
-    ) {
-        let Some(store) = self.security_store.as_mut() else {
-            return;
-        };
-        let value_hash = format!("{:x}", Sha256::digest(envelope));
-        // The event has already passed the scope and UUID checks at each call
-        // site. Detector failures are deliberately ignored so alerting cannot
-        // change the fail-closed admission result or expose persistence detail.
-        let input = DetectionInput {
-            signal,
-            workspace_id: workspace_id.to_owned(),
-            namespace_id: namespace_id.to_owned(),
-            event_id: event_id.to_owned(),
-            field_path: field_path.to_owned(),
-            value_hash,
-        };
-        match store {
-            SecurityAlertBackend::Memory(store) => {
-                let _ = detect_and_record(store, input);
-            }
-            SecurityAlertBackend::Journal(journal) => {
-                let _ = journal.record_detection(input);
-            }
+        if let Some(store) = &self.security_store {
+            store.record_rejected_envelope_signal(signal, envelope);
         }
     }
 }

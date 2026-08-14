@@ -44,27 +44,6 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         self.gateway.backlog_stats()
     }
 
-    /// See `IngestGateway::record_backlog_alert`.
-    pub(crate) fn record_backlog_alert(
-        &mut self,
-        depth: u64,
-        oldest_pending_millis: Option<u64>,
-        alert_depth: u64,
-        alert_age_millis: u64,
-    ) {
-        self.gateway
-            .record_backlog_alert(depth, oldest_pending_millis, alert_depth, alert_age_millis);
-    }
-
-    pub(crate) fn record_security_signal(
-        &mut self,
-        signal: SecuritySignal,
-        envelope: &proto::EventEnvelope,
-    ) {
-        self.gateway
-            .record_rejected_envelope_signal(signal, envelope);
-    }
-
     pub fn ingest_envelope(
         &mut self,
         caller: &Caller,

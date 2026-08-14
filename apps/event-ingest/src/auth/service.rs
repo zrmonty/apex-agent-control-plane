@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,11 +10,35 @@ use tokio::sync::Semaphore;
 use super::verifier::{CallerVerifier, PeerIdentity};
 use crate::{
     BacklogObserver, Caller, EphemeralStore, EventPublisher, GatewayError, GatewayErrorCode,
-    MAX_ENVELOPE_BYTES, OutboxMaintainer, PendingEventReplayer, RateLimitKey, proto,
+    MAX_ENVELOPE_BYTES, OutboxMaintainer, PendingEventReplayer, RateLimitKey,
+    SharedSecurityStore, proto,
 };
 
+/// Phase 0.6 item 2b: admission is served by a POOL of N independent
+/// `AuthenticatedIngestAdapter`s rather than a single one behind one mutex.
+/// Each pool member owns its own idempotency/outbox connection(s) (Postgres:
+/// N genuinely independent connections, so the database -- not an
+/// in-process lock -- is what makes concurrent admission safe; file/memory:
+/// forced to a single-member pool, see `startup::service::open_durability_stores`'s
+/// doc comment on why N>1 would diverge for those backends).
+///
+/// `ingest` picks a starting slot via `next_adapter` (round-robin, so load
+/// spreads evenly rather than always preferring slot 0) and then scans the
+/// whole pool with `try_lock`: a request only reports `AdmissionBusy` when
+/// EVERY slot is currently in use, not merely the one it happened to start
+/// at. This is the direct generalization of the pre-pool single-adapter
+/// `try_lock`-or-`AdmissionBusy` behavior -- `N == 1` reduces to exactly the
+/// old behavior.
 pub struct AuthenticatedGrpcService<P: EventPublisher, V: CallerVerifier> {
-    adapter: Arc<Mutex<crate::AuthenticatedIngestAdapter<P>>>,
+    adapters: Arc<Vec<Mutex<crate::AuthenticatedIngestAdapter<P>>>>,
+    next_adapter: Arc<AtomicUsize>,
+    /// A handle to the pool's combined Security Alert backend (see
+    /// `SharedSecurityStore`), if one is configured -- shared by every pool
+    /// member's `IngestGateway`. Signals recorded on the auth/admission
+    /// error paths below go straight through this handle rather than
+    /// `try_lock`ing a pool member, so a signal is never dropped just
+    /// because every admission adapter happens to be busy at that instant.
+    security_store: Option<SharedSecurityStore>,
     verifier: Arc<V>,
     blocking_limit: Arc<Semaphore>,
     admission_limits: Arc<Mutex<HashMap<String, AdmissionBucket>>>,
@@ -46,14 +71,56 @@ struct AdmissionBucket {
 }
 
 impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
+    /// Single-adapter constructor: a pool of exactly one, which is the
+    /// pre-Phase-0.6-item-2b single-flight behavior. File/memory-backed
+    /// deployments and every existing test still go through this path.
     pub fn new(adapter: crate::AuthenticatedIngestAdapter<P>, verifier: V) -> Self {
+        Self::with_pool(vec![adapter], verifier)
+    }
+
+    /// Phase 0.6 item 2b: builds a service backed by a pool of `adapters.len()`
+    /// independent admission adapters (see the struct-level doc comment).
+    /// The pool's shared Security Alert backend, if any, is taken from
+    /// whichever pool member has one configured -- `startup::service::run`
+    /// gives every member the SAME `SharedSecurityStore` (via
+    /// `IngestGateway::with_shared_security_store`), so any member is an
+    /// equally valid source.
+    ///
+    /// # Panics
+    /// Panics if `adapters` is empty -- a pool with no members can never
+    /// admit anything and would silently degrade to permanent
+    /// `AdmissionBusy`, which is a construction bug, not a runtime
+    /// condition callers should have to handle.
+    pub fn with_pool(adapters: Vec<crate::AuthenticatedIngestAdapter<P>>, verifier: V) -> Self {
+        assert!(
+            !adapters.is_empty(),
+            "AuthenticatedGrpcService requires at least one admission adapter"
+        );
+        let security_store = adapters
+            .iter()
+            .find_map(|adapter| adapter.gateway().shared_security_store());
         Self {
-            adapter: Arc::new(Mutex::new(adapter)),
+            adapters: Arc::new(adapters.into_iter().map(Mutex::new).collect()),
+            next_adapter: Arc::new(AtomicUsize::new(0)),
+            security_store,
             verifier: Arc::new(verifier),
             blocking_limit: Arc::new(Semaphore::new(MAX_BLOCKING_INGEST_TASKS)),
             admission_limits: Arc::new(Mutex::new(HashMap::new())),
             ephemeral: None,
             accelerator_slots: Arc::new(Semaphore::new(MAX_ACCELERATOR_ADMISSION_OPERATIONS)),
+        }
+    }
+
+    /// Records a redacted, best-effort Security Alert directly through the
+    /// pool's shared backend (a no-op if none is configured), bypassing
+    /// every per-adapter lock entirely. Used on the auth/admission error
+    /// paths in `ingest` below, where the pre-pool code used to `try_lock`
+    /// the single adapter and silently skip the write if it was busy --
+    /// with a pool, "busy" no longer has to mean "skipped," since the
+    /// backend is reachable without going through any adapter at all.
+    fn record_security_signal(&self, signal: crate::SecuritySignal, envelope: &proto::EventEnvelope) {
+        if let Some(store) = &self.security_store {
+            store.record_rejected_envelope_signal(signal, envelope);
         }
     }
 
@@ -212,13 +279,19 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
         P: PendingEventReplayer + Send + 'static,
         V: 'static,
     {
-        let adapter = self.adapter.clone();
+        // Pool member 0 only: the manual/fallback replay path, like every
+        // background worker here, targets a single designated adapter
+        // rather than the whole pool -- see the struct-level doc comment on
+        // why index 0 is representative for Postgres (every pool member's
+        // outbox connection sees the same underlying table) and is the
+        // pool's only member for file/memory.
+        let adapters = self.adapters.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                let adapter = adapter.clone();
+                let adapters = adapters.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut adapter = match adapter.try_lock() {
+                    let mut adapter = match adapters[0].try_lock() {
                         Ok(adapter) => adapter,
                         // Never let a backlog replay wait behind a live
                         // admission or make the hot path wait behind replay.
@@ -268,14 +341,15 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
         P: OutboxMaintainer + Send + 'static,
         V: 'static,
     {
-        let adapter = self.adapter.clone();
+        // Pool member 0 only -- see `spawn_replay_worker`'s doc comment.
+        let adapters = self.adapters.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                let adapter = adapter.clone();
+                let adapters = adapters.clone();
                 let now_millis = now_unix_millis();
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut adapter = match adapter.try_lock() {
+                    let mut adapter = match adapters[0].try_lock() {
                         Ok(adapter) => adapter,
                         // Never let a maintenance sweep wait behind a live
                         // admission, replay, or another sweep. The next
@@ -309,7 +383,7 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
     /// Starts the Phase 0.6 item 6 backlog monitor: samples outbox depth and
     /// oldest-pending age every `interval` and, on a threshold breach, logs a
     /// structured operational warning and records a redacted operational
-    /// Security Finding (see `IngestGateway::record_backlog_alert` and the
+    /// Security Finding (see `SharedSecurityStore::record_backlog_alert` and the
     /// reserved `OPERATIONAL_WORKSPACE_ID`/`OPERATIONAL_NAMESPACE_ID` scope in
     /// `gateway/core.rs`).
     ///
@@ -344,15 +418,20 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
         P: BacklogObserver + Send + 'static,
         V: 'static,
     {
-        let adapter = self.adapter.clone();
+        // Sampling targets pool member 0 only -- see `spawn_replay_worker`'s
+        // doc comment. Alert recording below goes straight through the
+        // pool's shared security store instead (`self.security_store`),
+        // bypassing per-adapter locking entirely.
+        let adapters = self.adapters.clone();
+        let security_store = self.security_store.clone();
         tokio::spawn(async move {
             let mut was_breached = false;
             let mut ticks_since_alert: u64 = 0;
             loop {
                 tokio::time::sleep(interval).await;
-                let sample_adapter = adapter.clone();
+                let sample_adapters = adapters.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut adapter = match sample_adapter.try_lock() {
+                    let mut adapter = match sample_adapters[0].try_lock() {
                         Ok(adapter) => adapter,
                         // Never let a backlog sample wait behind a live
                         // admission, replay, or another sweep. The next
@@ -401,27 +480,24 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "unknown".to_owned())
                     );
-                    let alert_adapter = adapter.clone();
                     // Best-effort: a failed or skipped finding write must
-                    // never affect ingestion, and must never stall this loop
-                    // waiting for a busy adapter -- the structured `eprintln!`
-                    // above already carries the operationally-actionable
-                    // signal regardless of whether the finding lands.
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let mut adapter = match alert_adapter.try_lock() {
-                            Ok(adapter) => adapter,
-                            Err(_) => return,
-                        };
+                    // never affect ingestion. Recorded directly through the
+                    // shared security store rather than through any pool
+                    // member's lock, so this can never be skipped just
+                    // because every admission adapter happens to be busy --
+                    // the structured `eprintln!` above already carries the
+                    // operationally-actionable signal regardless of whether
+                    // the finding lands.
+                    if let Some(store) = &security_store {
                         let _ = catch_unwind(AssertUnwindSafe(|| {
-                            adapter.record_backlog_alert(
+                            store.record_backlog_alert(
                                 depth,
                                 oldest_pending_millis,
                                 alert_depth,
                                 alert_age_millis,
                             )
                         }));
-                    })
-                    .await;
+                    }
                     ticks_since_alert = 0;
                 }
                 was_breached = breached;
@@ -465,6 +541,37 @@ fn backlog_should_alert(
     breached && (!was_breached || ticks_since_last_alert >= re_alert_cadence_ticks)
 }
 
+/// Scans the pool starting at a round-robin index, returning the first slot
+/// that is not currently locked. Returns `AdmissionBusy` only when every
+/// slot in the pool is busy -- the direct N-way generalization of the
+/// single-adapter `try_lock`-or-`AdmissionBusy` behavior this replaces
+/// (`adapters.len() == 1` reduces to exactly the old behavior). A free
+/// function, not a method on `AuthenticatedGrpcService`, because the only
+/// call site (`ingest`'s `spawn_blocking` closure) must own `'static`
+/// copies of `adapters`/`next_adapter` rather than borrowing `&self` across
+/// the blocking-thread boundary.
+fn try_lock_pool<'a, P: EventPublisher>(
+    adapters: &'a [Mutex<crate::AuthenticatedIngestAdapter<P>>],
+    next_adapter: &AtomicUsize,
+) -> Result<std::sync::MutexGuard<'a, crate::AuthenticatedIngestAdapter<P>>, GatewayError> {
+    let len = adapters.len();
+    let start = next_adapter.fetch_add(1, Ordering::Relaxed) % len;
+    for offset in 0..len {
+        let index = (start + offset) % len;
+        match adapters[index].try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::WouldBlock) => continue,
+            // A poisoned adapter signals a prior panic that escaped the
+            // `catch_unwind` around every call site that locks a pool
+            // member -- a bug, not ordinary contention. Fail closed
+            // immediately rather than silently skipping to another member,
+            // matching the pre-pool single-adapter behavior.
+            Err(TryLockError::Poisoned(_)) => return Err(GatewayError::internal()),
+        }
+    }
+    Err(GatewayError::new(GatewayErrorCode::AdmissionBusy))
+}
+
 fn now_unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -494,12 +601,7 @@ where
         request: tonic::Request<proto::EventEnvelope>,
     ) -> Result<tonic::Response<proto::IngestResponse>, tonic::Status> {
         if request.get_ref().encoded_len() > MAX_ENVELOPE_BYTES {
-            if let Ok(mut adapter) = self.adapter.try_lock() {
-                adapter.record_security_signal(
-                    crate::SecuritySignal::AdmissionAbuse,
-                    request.get_ref(),
-                );
-            }
+            self.record_security_signal(crate::SecuritySignal::AdmissionAbuse, request.get_ref());
             return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge).grpc_status_value());
         }
         let caller = match catch_unwind(AssertUnwindSafe(|| {
@@ -514,9 +616,8 @@ where
                     GatewayErrorCode::Unauthenticated
                         | GatewayErrorCode::InvalidAuthorization
                         | GatewayErrorCode::RateLimited
-                ) && let Ok(mut adapter) = self.adapter.try_lock()
-                {
-                    adapter.record_security_signal(
+                ) {
+                    self.record_security_signal(
                         crate::SecuritySignal::AuthAbuse,
                         request.get_ref(),
                     );
@@ -526,12 +627,7 @@ where
             Err(_) => return Err(GatewayError::internal().grpc_status_value()),
         };
         if let Err(error) = self.admit_request(&caller, request.get_ref()).await {
-            if let Ok(mut adapter) = self.adapter.try_lock() {
-                adapter.record_security_signal(
-                    crate::SecuritySignal::AdmissionAbuse,
-                    request.get_ref(),
-                );
-            }
+            self.record_security_signal(crate::SecuritySignal::AdmissionAbuse, request.get_ref());
             return Err(error.grpc_status_value());
         }
         let permit = tokio::time::timeout(
@@ -540,26 +636,21 @@ where
         )
         .await
         .map_err(|_| {
-            if let Ok(mut adapter) = self.adapter.try_lock() {
-                adapter.record_security_signal(
-                    crate::SecuritySignal::AdmissionAbuse,
-                    request.get_ref(),
-                );
-            }
+            self.record_security_signal(crate::SecuritySignal::AdmissionAbuse, request.get_ref());
             GatewayError::new(GatewayErrorCode::RateLimited).grpc_status_value()
         })?
         .map_err(|_| GatewayError::internal().grpc_status_value())?;
-        let adapter = self.adapter.clone();
+        // Phase 0.6 item 2b: pick a pool slot via round-robin-then-scan
+        // (`try_lock_pool`) rather than locking the single admission mutex
+        // this replaces. `AdmissionBusy` is now only reported once every
+        // slot in the pool is simultaneously in use, not merely the slot
+        // this request happened to start at.
+        let adapters = self.adapters.clone();
+        let next_adapter = self.next_adapter.clone();
         let envelope = request.into_inner();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let mut adapter = match adapter.try_lock() {
-                Ok(adapter) => adapter,
-                Err(TryLockError::WouldBlock) => {
-                    return Err(GatewayError::new(GatewayErrorCode::AdmissionBusy));
-                }
-                Err(TryLockError::Poisoned(_)) => return Err(GatewayError::internal()),
-            };
+            let mut adapter = try_lock_pool(&adapters, &next_adapter)?;
             catch_unwind(AssertUnwindSafe(|| {
                 adapter.ingest_envelope(&caller, envelope)
             }))
@@ -599,6 +690,113 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    fn adapter() -> crate::AuthenticatedIngestAdapter<InMemoryPublisher> {
+        crate::AuthenticatedIngestAdapter::new(crate::IngestGateway::new(
+            InMemoryPublisher::default(),
+        ))
+    }
+
+    /// Phase 0.6 item 2b: `try_lock_pool` must reach every slot before
+    /// reporting `AdmissionBusy`, not merely the round-robin starting slot.
+    /// Holding real locks on two of three slots and confirming the third is
+    /// still reachable is the direct N>1 generalization of the pre-pool
+    /// single-adapter `try_lock`-or-busy test coverage.
+    #[test]
+    fn try_lock_pool_scans_every_slot_before_reporting_busy() {
+        let adapters: Vec<Mutex<_>> = (0..3).map(|_| Mutex::new(adapter())).collect();
+        let next = AtomicUsize::new(0);
+        let _held_0 = adapters[0].lock().expect("uncontended test lock");
+        let _held_1 = adapters[1].lock().expect("uncontended test lock");
+        assert!(
+            try_lock_pool(&adapters, &next).is_ok(),
+            "slot 2 is free, so the pool must not report AdmissionBusy just \
+             because slots 0 and 1 are held"
+        );
+    }
+
+    /// The pool must report `AdmissionBusy` -- not silently wait, and not
+    /// treat a subset of busy slots as the whole pool -- only once every
+    /// single slot is simultaneously locked.
+    #[test]
+    fn try_lock_pool_reports_admission_busy_only_once_every_slot_is_locked() {
+        let adapters: Vec<Mutex<_>> = (0..2).map(|_| Mutex::new(adapter())).collect();
+        let next = AtomicUsize::new(0);
+        let _held_0 = adapters[0].lock().expect("uncontended test lock");
+        let _held_1 = adapters[1].lock().expect("uncontended test lock");
+        match try_lock_pool(&adapters, &next) {
+            Err(error) => assert_eq!(error.code, GatewayErrorCode::AdmissionBusy),
+            Ok(_) => panic!("every slot is locked; the pool must not report success"),
+        }
+    }
+
+    /// `next_adapter`'s round-robin start means consecutive calls do not
+    /// pile onto the same slot when every slot is free.
+    #[test]
+    fn try_lock_pool_round_robins_the_starting_slot_across_calls() {
+        let adapters: Vec<Mutex<_>> = (0..3).map(|_| Mutex::new(adapter())).collect();
+        let next = AtomicUsize::new(0);
+        let mut started_at = Vec::new();
+        for _ in 0..3 {
+            let before = next.load(Ordering::Relaxed) % adapters.len();
+            let guard = try_lock_pool(&adapters, &next).expect("every slot is free");
+            started_at.push(before);
+            drop(guard);
+        }
+        assert_eq!(started_at, vec![0, 1, 2]);
+    }
+
+    /// A pool with no members can never admit anything -- `with_pool` must
+    /// fail loudly (a construction-time bug) rather than silently building a
+    /// service that reports `AdmissionBusy` forever.
+    #[test]
+    #[should_panic(expected = "at least one admission adapter")]
+    fn with_pool_panics_on_an_empty_pool() {
+        let _ = AuthenticatedGrpcService::<InMemoryPublisher, NoopVerifier>::with_pool(
+            vec![],
+            NoopVerifier,
+        );
+    }
+
+    /// Every pool member built with a Security Alert backend must share the
+    /// SAME backend (Phase 0.6 item 2b) -- otherwise findings recorded
+    /// through one pool member would be invisible to a caller who lands on
+    /// another. `with_pool` derives its shared handle from whichever member
+    /// has one configured; this pins that it is reachable and that it is
+    /// really shared (not a fresh, independent store per member).
+    #[test]
+    fn with_pool_shares_one_security_store_across_every_member() {
+        let gateway_a = crate::IngestGateway::new(InMemoryPublisher::default())
+            .with_security_store(8)
+            .unwrap();
+        let shared = gateway_a.shared_security_store().unwrap();
+        let gateway_b = crate::IngestGateway::new(InMemoryPublisher::default())
+            .with_shared_security_store(shared);
+        let adapters = vec![
+            crate::AuthenticatedIngestAdapter::new(gateway_a),
+            crate::AuthenticatedIngestAdapter::new(gateway_b),
+        ];
+        let service = AuthenticatedGrpcService::with_pool(adapters, NoopVerifier);
+        assert!(service.security_store.is_some());
+        // A signal recorded through the service-level handle (as the real
+        // `ingest` error paths do) must be visible through EITHER pool
+        // member's gateway, proving they share one backend rather than two
+        // independent ones.
+        let mut envelope = envelope_with_scope("acme", "prod");
+        envelope.event_id = "018f5c91-2d88-7c00-8000-000000000001".to_owned();
+        service.record_security_signal(crate::SecuritySignal::AuthAbuse, &envelope);
+        let caller =
+            Caller::authenticated_for_agent("spiffe://apex/test", "agent", ["acme/prod"])
+                .expect("valid bound test caller");
+        let found_via_member_1 = service.adapters[1]
+            .lock()
+            .expect("uncontended test lock")
+            .gateway()
+            .security_findings_for_scope(&caller, "acme", "prod")
+            .unwrap()
+            .unwrap();
+        assert!(!found_via_member_1.is_empty());
     }
 
     #[tokio::test]
