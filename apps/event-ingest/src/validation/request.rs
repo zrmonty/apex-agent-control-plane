@@ -2,12 +2,15 @@ use std::collections::HashSet;
 
 use prost::Message;
 
+#[cfg(feature = "test-support")]
 use super::canonical::canonical_event_hash;
+use super::canonical::canonical_event_hash_with_data_json;
 use super::control::validate_control_data;
+use super::convert::prost_struct_to_json;
 use super::identifiers::{
     is_lowercase_sha256, is_lowercase_uuidv7, is_rfc3339_utc, is_scope_identifier,
 };
-use super::secrets::{contains_secret_like_control_data, contains_secret_like_data};
+use super::secrets::{contains_secret_like_control_value, contains_secret_like_value};
 use crate::{GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES, proto};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +77,20 @@ impl IngestRequest {
     pub fn from_validated_transport(
         envelope: proto::EventEnvelope,
     ) -> Result<Self, GatewayError> {
+        Self::from_validated_transport_ref(&envelope)
+    }
+
+    /// Borrowing twin of [`Self::from_validated_transport`], identical rule
+    /// for rule. Exists so callers that must keep the original envelope
+    /// alive after a validation failure (to report a redacted security
+    /// finding, e.g. `gateway::adapter::AuthenticatedIngestAdapter::
+    /// ingest_envelope`) don't need to clone the whole envelope up front
+    /// just to retain access to it on the error path. The public, owned
+    /// entry point above simply borrows through to this one so there is a
+    /// single implementation of the admission rules.
+    pub(crate) fn from_validated_transport_ref(
+        envelope: &proto::EventEnvelope,
+    ) -> Result<Self, GatewayError> {
         if envelope.encoded_len() > MAX_ENVELOPE_BYTES {
             return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
         }
@@ -134,30 +151,31 @@ impl IngestRequest {
         {
             return Err(GatewayError::new(GatewayErrorCode::InvalidStructure));
         }
-        let contains_secret = envelope
+        // `data` was already required present by the structural check above
+        // (`envelope.data.is_none()`). Converting it to JSON here -- once --
+        // and threading the result through to the canonical hash below
+        // avoids re-running the same recursive protobuf-Struct-to-JSON
+        // conversion a second time per event for what both the secret scan
+        // and the canonical hash need: an identical JSON view of the same
+        // `data` value. See `canonical_event_hash_with_data_json`'s doc
+        // comment for why reusing it here cannot change the hash.
+        let data = envelope
             .data
             .as_ref()
-            .map(|data| {
-                if envelope.r#type == 9 {
-                    contains_secret_like_control_data(data)
-                } else {
-                    contains_secret_like_data(data)
-                }
-            })
-            .transpose()?
-            .unwrap_or(false);
+            .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
+        let data_json = prost_struct_to_json(data)?;
+        let contains_secret = if envelope.r#type == 9 {
+            contains_secret_like_control_value(&data_json)
+        } else {
+            contains_secret_like_value(&data_json)
+        };
         if contains_secret {
             return Err(GatewayError::new(GatewayErrorCode::SecretExposure));
         }
         if envelope.r#type == 9 {
-            validate_control_data(
-                envelope
-                    .data
-                    .as_ref()
-                    .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?,
-            )?;
+            validate_control_data(data)?;
         }
-        if canonical_event_hash(&envelope)? != integrity.event_hash {
+        if canonical_event_hash_with_data_json(envelope, data_json)? != integrity.event_hash {
             return Err(GatewayError::new(GatewayErrorCode::InvalidIntegrity));
         }
         let serialized = envelope.encode_to_vec();
@@ -165,7 +183,7 @@ impl IngestRequest {
             return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
         }
         Ok(Self {
-            event_id: envelope.event_id,
+            event_id: envelope.event_id.clone(),
             workspace_id: scope.workspace_id.clone(),
             namespace_id: scope.namespace_id.clone(),
             scope_key: format!("{}/{}", scope.workspace_id, scope.namespace_id),

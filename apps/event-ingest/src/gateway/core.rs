@@ -160,12 +160,11 @@ impl<P: EventPublisher> IngestGateway<P> {
         caller: &Caller,
         event: IngestRequest,
     ) -> Result<IngestOutcome, GatewayError> {
-        let signal_event = event.clone();
-        let result = self.ingest_inner(caller, event);
+        let result = self.ingest_inner(caller, &event);
         if let Err(error) = &result
             && let Some(signal) = signal_for_error(error.code)
         {
-            self.record_security_signal(signal, &signal_event);
+            self.record_security_signal(signal, &event);
         }
         result
     }
@@ -173,7 +172,7 @@ impl<P: EventPublisher> IngestGateway<P> {
     fn ingest_inner(
         &mut self,
         caller: &Caller,
-        event: IngestRequest,
+        event: &IngestRequest,
     ) -> Result<IngestOutcome, GatewayError> {
         if !caller.is_valid() || caller.bound_agent_id().is_none() {
             return Err(GatewayError::new(GatewayErrorCode::Unauthenticated));
@@ -183,7 +182,7 @@ impl<P: EventPublisher> IngestGateway<P> {
         }
         let scope_key = event.scope_key().to_owned();
         if !caller.allows_scope(&scope_key) {
-            self.record_security_signal(SecuritySignal::ScopeIdentityDenied, &event);
+            self.record_security_signal(SecuritySignal::ScopeIdentityDenied, event);
             return Err(GatewayError::new(GatewayErrorCode::ScopeDenied));
         }
         // Preserve deterministic request-validation errors before decoding the
@@ -212,7 +211,7 @@ impl<P: EventPublisher> IngestGateway<P> {
             .as_ref()
             .is_some_and(|actor| actor.r#type == 2 && actor.id == bound_agent_id);
         if envelope.agent_id != bound_agent_id || !agent_actor_matches {
-            self.record_security_signal(SecuritySignal::ScopeIdentityDenied, &event);
+            self.record_security_signal(SecuritySignal::ScopeIdentityDenied, event);
             return Err(GatewayError::new(GatewayErrorCode::ScopeDenied));
         }
         let payload_fingerprint: [u8; 32] = Sha256::digest(&event.envelope).into();
@@ -229,12 +228,12 @@ impl<P: EventPublisher> IngestGateway<P> {
                 return Err(GatewayError::new(GatewayErrorCode::IdempotencyInProgress));
             }
             ReservationResult::Conflict => {
-                self.record_security_signal(SecuritySignal::TelemetryIntegrity, &event);
+                self.record_security_signal(SecuritySignal::TelemetryIntegrity, event);
                 return Err(GatewayError::new(GatewayErrorCode::IdempotencyConflict));
             }
             ReservationResult::Reserved(reservation) => reservation,
         };
-        let publish_result = catch_unwind(AssertUnwindSafe(|| self.publisher.publish(&event)))
+        let publish_result = catch_unwind(AssertUnwindSafe(|| self.publisher.publish(event)))
             .map_err(|_| GatewayError::internal())?;
         let outcome = match publish_result {
             Ok(outcome) => outcome,

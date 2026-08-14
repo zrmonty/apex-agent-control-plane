@@ -13,6 +13,29 @@ use crate::{GatewayError, GatewayErrorCode, proto};
 pub fn canonical_event_hash(
     envelope: &proto::EventEnvelope,
 ) -> Result<String, GatewayError> {
+    let data = envelope
+        .data
+        .as_ref()
+        .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
+    let data_json = prost_struct_to_json(data)?;
+    canonical_event_hash_with_data_json(envelope, data_json)
+}
+
+/// Twin of [`canonical_event_hash`] that accepts an already-converted JSON
+/// form of `envelope.data`, for callers that must convert that same `data`
+/// field to JSON for another reason on the same request (currently
+/// `validation::request::from_validated_transport_ref`'s secret-policy
+/// check) and would otherwise redo an identical, potentially large
+/// (up to `MAX_ENVELOPE_BYTES`-bounded) recursive conversion a second time
+/// per event. `data_json` MUST be the exact output of
+/// `prost_struct_to_json(envelope.data.as_ref().unwrap())` -- the conversion
+/// is a pure function of `envelope.data`, so a value obtained that way is
+/// byte-for-byte what this function would have computed itself, and the
+/// hash stays exactly as deterministic/injective as before.
+pub(crate) fn canonical_event_hash_with_data_json(
+    envelope: &proto::EventEnvelope,
+    data_json: Value,
+) -> Result<String, GatewayError> {
     let scope = envelope
         .scope
         .as_ref()
@@ -29,10 +52,6 @@ pub fn canonical_event_hash(
         .integrity
         .as_ref()
         .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidIntegrity))?;
-    let data = envelope
-        .data
-        .as_ref()
-        .ok_or_else(|| GatewayError::new(GatewayErrorCode::InvalidStructure))?;
 
     let mut root = Map::new();
     root.insert(
@@ -113,7 +132,7 @@ pub fn canonical_event_hash(
         value.insert("model".to_owned(), Value::String(version.model.clone()));
         Value::Object(value)
     });
-    root.insert("data".to_owned(), prost_struct_to_json(data)?);
+    root.insert("data".to_owned(), data_json);
     root.insert("integrity".to_owned(), {
         let mut value = Map::new();
         value.insert(
