@@ -380,6 +380,54 @@ impl<P: EventPublisher, V: CallerVerifier> AuthenticatedGrpcService<P, V> {
         })
     }
 
+    /// Periodically prunes committed idempotency rows outside the configured
+    /// retention window. Postgres stores share one table across pool members,
+    /// while file/memory stores are forced to a single member, so one
+    /// designated adapter is sufficient and avoids N duplicate sweeps.
+    pub fn spawn_idempotency_retention_worker(
+        &self,
+        interval: Duration,
+        retention_millis: u64,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        P: Send + 'static,
+        V: 'static,
+    {
+        let adapters = self.adapters.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let adapters = adapters.clone();
+                let now_millis = now_unix_millis();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut adapter = match adapters[0].try_lock() {
+                        Ok(adapter) => adapter,
+                        Err(TryLockError::WouldBlock) => return Ok(()),
+                        Err(TryLockError::Poisoned(_)) => {
+                            return Err(GatewayError::internal());
+                        }
+                    };
+                    catch_unwind(AssertUnwindSafe(|| {
+                        adapter.maintain_idempotency(now_millis, retention_millis)
+                    }))
+                    .map_err(|_| GatewayError::internal())?
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!(
+                        "event-ingest idempotency retention deferred: {}: {}",
+                        error.code.public_code(),
+                        error.summary
+                    ),
+                    Err(_) => eprintln!(
+                        "event-ingest idempotency retention deferred: INTERNAL_FAILURE: retention task failed"
+                    ),
+                }
+            }
+        })
+    }
+
     /// Starts the Phase 0.6 item 6 backlog monitor: samples outbox depth and
     /// oldest-pending age every `interval` and, on a threshold breach, logs a
     /// structured operational warning and records a redacted operational

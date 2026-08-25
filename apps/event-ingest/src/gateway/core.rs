@@ -333,6 +333,17 @@ impl<P: EventPublisher> IngestGateway<P> {
         self.publisher.maintain_outbox(now_millis, retention_millis)
     }
 
+    /// Prunes committed idempotency keys outside `retention_millis`.
+    /// Durable stores override `IdempotencyStore::maintain`; memory-backed
+    /// stores intentionally retain their process-lifetime state.
+    pub fn maintain_idempotency(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        self.idempotency.maintain(now_millis, retention_millis)
+    }
+
     pub fn ingest(
         &mut self,
         caller: &Caller,

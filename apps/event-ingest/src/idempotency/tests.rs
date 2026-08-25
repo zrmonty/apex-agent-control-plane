@@ -249,3 +249,46 @@ fn file_idempotency_covers_capacity_pending_abort_and_path_rejection() {
     );
     std::fs::remove_dir_all(base).unwrap();
 }
+
+
+#[test]
+fn file_idempotency_maintains_committed_retention_and_reuses_capacity() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-idempotency-retention-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&base).unwrap();
+    let path = base.join("idempotency.jsonl");
+    let expired_key = key("018f5c91-2d88-7c00-8000-000000000001");
+    let live_key = key("018f5c91-2d88-7c00-8000-000000000002");
+
+    {
+        let mut store = FileIdempotencyStore::open(&path, &base, 1).unwrap();
+        let reservation = match store.reserve(expired_key.clone(), [1; 32]).unwrap() {
+            ReservationResult::Reserved(value) => value,
+            other => panic!("unexpected reservation result: {other:?}"),
+        };
+        store.commit(reservation).unwrap();
+        assert_eq!(
+            store.reserve(live_key.clone(), [2; 32]).unwrap_err().code,
+            GatewayErrorCode::IdempotencyCapacity
+        );
+
+        store.maintain(u64::MAX, 0).unwrap();
+
+        let reservation = match store.reserve(live_key.clone(), [2; 32]).unwrap() {
+            ReservationResult::Reserved(value) => value,
+            other => panic!("expired committed key did not release capacity: {other:?}"),
+        };
+        store.commit(reservation).unwrap();
+    }
+
+    let journal = std::fs::read_to_string(&path).unwrap();
+    assert!(!journal.contains(&expired_key.event_id));
+    assert!(journal.contains(&live_key.event_id));
+    std::fs::remove_dir_all(base).unwrap();
+}

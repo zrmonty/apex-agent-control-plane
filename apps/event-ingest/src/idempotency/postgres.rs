@@ -201,6 +201,24 @@ impl IdempotencyStore for PostgresIdempotencyStore {
             );
         }
     }
+
+    fn maintain(
+        &mut self,
+        _now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        // PostgreSQL's clock is authoritative for rows written by every
+        // replica. The caller's wall clock is intentionally not used here.
+        self.client
+            .execute(
+                "DELETE FROM apex_ingest_idempotency
+                 WHERE state = 'committed'
+                   AND committed_at < now() - make_interval(secs => $1)",
+                &[&(retention_millis as f64 / 1000.0)],
+            )
+            .map_err(|_| GatewayError::internal())?;
+        Ok(())
+    }
 }
 
 impl PostgresIdempotencyStore {

@@ -1,7 +1,8 @@
 use super::*;
 use crate::outbox::{EnqueueResult, EventOutbox, FileOutbox, InMemoryOutbox, OutboxKey, OutboxedPublisher};
 use crate::{
-    AuthenticatedIngestAdapter, GatewayErrorCode, InMemoryPublisher, IngestGateway, IngestRequest,
+    AuthenticatedIngestAdapter, FileIdempotencyStore, GatewayErrorCode, IdempotencyKey,
+    IdempotencyStore, InMemoryPublisher, IngestGateway, IngestRequest, ReservationResult,
     bounded_event_ingest_server,
 };
 use std::time::Duration;
@@ -156,5 +157,59 @@ async fn spawn_outbox_retention_worker_prunes_completed_rows_and_frees_capacity(
         EnqueueResult::Enqueued,
         "the sweep spawned by spawn_outbox_retention_worker must prune the completed row and free capacity"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn spawn_idempotency_retention_worker_prunes_committed_keys_and_frees_capacity() {
+    let base = std::env::temp_dir().join(format!(
+        "apex-idempotency-retention-worker-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&base).unwrap();
+    let path = base.join("idempotency.jsonl");
+    let first = IdempotencyKey {
+        workspace_id: "acme".into(),
+        namespace_id: "prod".into(),
+        event_id: "018f5c91-2d88-7c00-8000-0000000000b1".into(),
+    };
+    let second = IdempotencyKey {
+        workspace_id: "acme".into(),
+        namespace_id: "prod".into(),
+        event_id: "018f5c91-2d88-7c00-8000-0000000000b2".into(),
+    };
+
+    let mut idempotency = FileIdempotencyStore::open(&path, &base, 1).unwrap();
+    let reservation = match idempotency.reserve(first, [1; 32]).unwrap() {
+        ReservationResult::Reserved(value) => value,
+        other => panic!("unexpected reservation result: {other:?}"),
+    };
+    idempotency.commit(reservation).unwrap();
+    assert_eq!(
+        idempotency.reserve(second.clone(), [2; 32]).unwrap_err().code,
+        GatewayErrorCode::IdempotencyCapacity
+    );
+
+    let adapter = AuthenticatedIngestAdapter::new(IngestGateway::with_idempotency_store(
+        InMemoryPublisher::default(),
+        Box::new(idempotency),
+    ));
+    let service = AuthenticatedGrpcService::new(adapter, OkVerifier);
+    let handle = service.spawn_idempotency_retention_worker(Duration::from_millis(5), 0);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    handle.abort();
+    let _ = handle.await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(service);
+
+    let mut reopened = FileIdempotencyStore::open(&path, &base, 1).unwrap();
+    assert!(matches!(
+        reopened.reserve(second, [2; 32]).unwrap(),
+        ReservationResult::Reserved(_)
+    ));
     let _ = std::fs::remove_dir_all(&base);
 }

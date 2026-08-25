@@ -45,4 +45,16 @@ pub trait IdempotencyStore {
     ) -> Result<ReservationResult, GatewayError>;
     fn commit(&mut self, reservation: IdempotencyReservation) -> Result<(), GatewayError>;
     fn abort(&mut self, reservation: IdempotencyReservation);
+
+    /// Remove durable committed entries older than the configured retention.
+    ///
+    /// Backends without durable retention state may keep the default no-op;
+    /// production stores override this to reclaim capacity safely.
+    fn maintain(
+        &mut self,
+        _now_millis: u64,
+        _retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        Ok(())
+    }
 }

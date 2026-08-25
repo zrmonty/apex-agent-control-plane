@@ -495,6 +495,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_secs(outbox_retention_interval_secs),
             outbox_retention_secs.saturating_mul(1000),
         );
+        let _idempotency_retention_worker = service.spawn_idempotency_retention_worker(
+            Duration::from_secs(outbox_retention_interval_secs),
+            outbox_retention_secs.saturating_mul(1000),
+        );
         // Phase 0.6 item 6: early-warning backlog observability, one layer
         // above the item-5 hard capacity ceiling that already bounds outbox
         // growth (see `AuthenticatedGrpcService::spawn_backlog_monitor`'s doc

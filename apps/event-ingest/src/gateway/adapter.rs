@@ -35,6 +35,15 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         self.gateway.maintain_outbox(now_millis, retention_millis)
     }
 
+    pub(crate) fn maintain_idempotency(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        self.gateway
+            .maintain_idempotency(now_millis, retention_millis)
+    }
+
     /// See `IngestGateway::backlog_stats`. Used only by
     /// `AuthenticatedGrpcService::spawn_backlog_monitor` (Phase 0.6 item 6).
     pub(crate) fn backlog_stats(&mut self) -> Result<(u64, Option<u64>), GatewayError>

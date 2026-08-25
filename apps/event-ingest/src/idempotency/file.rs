@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,13 @@ use crate::{GatewayError, GatewayErrorCode, is_lowercase_uuidv7, is_scope_identi
 const MAX_IDEMPOTENCY_RECORD_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum IdempotencyRecord {
@@ -22,6 +30,9 @@ enum IdempotencyRecord {
         namespace_id: String,
         event_id: String,
         payload_hash: [u8; 32],
+        /// Legacy records omit this field and are retained indefinitely.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committed_at_millis: Option<u64>,
     },
 }
 
@@ -34,12 +45,14 @@ enum IdempotencyRecord {
 /// request to be reconciled by the outbox replay worker.
 #[derive(Debug)]
 pub struct FileIdempotencyStore {
-    file: File,
+    file: Option<File>,
+    path: PathBuf,
     // Held for the process lifetime: file journals are single-writer only.
     _writer_lock: File,
     capacity: usize,
     next_token: u64,
     committed: HashMap<IdempotencyKey, [u8; 32]>,
+    committed_at_millis: HashMap<IdempotencyKey, Option<u64>>,
     pending: HashMap<IdempotencyReservation, (IdempotencyKey, [u8; 32])>,
 }
 
@@ -96,11 +109,13 @@ impl FileIdempotencyStore {
             .try_lock_exclusive()
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
         let mut store = Self {
-            file,
+            file: Some(file),
+            path: path.to_owned(),
             _writer_lock: writer_lock,
             capacity,
             next_token: 1,
             committed: HashMap::new(),
+            committed_at_millis: HashMap::new(),
             pending: HashMap::new(),
         };
         store.load()?;
@@ -110,6 +125,8 @@ impl FileIdempotencyStore {
     fn load(&mut self) -> Result<(), GatewayError> {
         let reader = BufReader::new(
             self.file
+                .as_ref()
+                .ok_or_else(GatewayError::invalid_idempotency_configuration)?
                 .try_clone()
                 .map_err(|_| GatewayError::invalid_idempotency_configuration())?,
         );
@@ -125,6 +142,7 @@ impl FileIdempotencyStore {
                 namespace_id,
                 event_id,
                 payload_hash,
+                committed_at_millis,
             } = record;
             if !is_scope_identifier(&workspace_id)
                 || !is_scope_identifier(&namespace_id)
@@ -142,8 +160,9 @@ impl FileIdempotencyStore {
                     return Err(GatewayError::idempotency_conflict());
                 }
             } else {
-                self.committed.insert(key, payload_hash);
+                self.committed.insert(key.clone(), payload_hash);
             }
+            self.committed_at_millis.insert(key, committed_at_millis);
             if self.committed.len() > self.capacity {
                 return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
             }
@@ -158,18 +177,95 @@ impl FileIdempotencyStore {
         if encoded.len() > MAX_IDEMPOTENCY_RECORD_BYTES {
             return Err(GatewayError::new(GatewayErrorCode::PayloadTooLarge));
         }
-        let current_size = self
+        let file = self
             .file
+            .as_mut()
+            .ok_or_else(GatewayError::invalid_idempotency_configuration)?;
+        let current_size = file
             .metadata()
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?
             .len();
         if current_size.saturating_add(encoded.len() as u64) > MAX_IDEMPOTENCY_FILE_BYTES {
             return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
         }
-        self.file
-            .write_all(&encoded)
-            .and_then(|_| self.file.sync_data())
+        file.write_all(&encoded)
+            .and_then(|_| file.sync_data())
             .map_err(|_| GatewayError::new(GatewayErrorCode::Internal))
+    }
+
+    fn compact_journal(&mut self) -> Result<(), GatewayError> {
+        let mut encoded = Vec::new();
+        for (key, payload_hash) in &self.committed {
+            let record = IdempotencyRecord::Committed {
+                workspace_id: key.workspace_id.clone(),
+                namespace_id: key.namespace_id.clone(),
+                event_id: key.event_id.clone(),
+                payload_hash: *payload_hash,
+                committed_at_millis: self.committed_at_millis.get(key).copied().flatten(),
+            };
+            let mut record_bytes = serde_json::to_vec(&record)
+                .map_err(|_| GatewayError::new(GatewayErrorCode::Internal))?;
+            record_bytes.push(b'\n');
+            if record_bytes.len() > MAX_IDEMPOTENCY_RECORD_BYTES
+                || encoded.len().saturating_add(record_bytes.len())
+                    > MAX_IDEMPOTENCY_FILE_BYTES as usize
+            {
+                return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
+            }
+            encoded.extend_from_slice(&record_bytes);
+        }
+
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(GatewayError::invalid_idempotency_configuration)?;
+        let temp_path = self.path.with_file_name(format!(
+            ".{name}.compact-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|_| GatewayError::new(GatewayErrorCode::Internal))?;
+        let result = temp
+            .write_all(&encoded)
+            .and_then(|_| temp.sync_data())
+            .map_err(|_| GatewayError::new(GatewayErrorCode::Internal));
+        if result.is_err() {
+            drop(temp);
+            let _ = fs::remove_file(&temp_path);
+            return result;
+        }
+        drop(temp);
+        drop(
+            self.file
+                .take()
+                .ok_or_else(GatewayError::invalid_idempotency_configuration)?,
+        );
+        if fs::rename(&temp_path, &self.path).is_err() {
+            let _ = fs::remove_file(&temp_path);
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .read(true)
+                    .open(&self.path)
+                    .map_err(|_| GatewayError::invalid_idempotency_configuration())?,
+            );
+            return Err(GatewayError::new(GatewayErrorCode::Internal));
+        }
+        self.file = Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&self.path)
+                .map_err(|_| GatewayError::invalid_idempotency_configuration())?,
+        );
+        Ok(())
     }
 }
 
@@ -235,18 +331,59 @@ impl IdempotencyStore for FileIdempotencyStore {
             .get(&reservation)
             .cloned()
             .ok_or_else(GatewayError::internal)?;
+        let committed_at_millis = now_millis();
         self.append(&IdempotencyRecord::Committed {
             workspace_id: key.workspace_id.clone(),
             namespace_id: key.namespace_id.clone(),
             event_id: key.event_id.clone(),
             payload_hash: hash,
+            committed_at_millis: Some(committed_at_millis),
         })?;
         self.pending.remove(&reservation);
-        self.committed.insert(key, hash);
+        self.committed.insert(key.clone(), hash);
+        self.committed_at_millis
+            .insert(key, Some(committed_at_millis));
         Ok(())
     }
 
     fn abort(&mut self, reservation: IdempotencyReservation) {
         self.pending.remove(&reservation);
+    }
+
+    fn maintain(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError> {
+        let cutoff = now_millis.saturating_sub(retention_millis);
+        let expired_keys: Vec<IdempotencyKey> = self
+            .committed_at_millis
+            .iter()
+            .filter_map(|(key, committed_at)| {
+                committed_at
+                    .filter(|committed_at| *committed_at <= cutoff)
+                    .map(|_| key.clone())
+            })
+            .collect();
+        if expired_keys.is_empty() {
+            return Ok(());
+        }
+
+        let removed: Vec<(IdempotencyKey, [u8; 32], Option<u64>)> = expired_keys
+            .into_iter()
+            .filter_map(|key| {
+                let payload_hash = self.committed.remove(&key)?;
+                let committed_at = self.committed_at_millis.remove(&key)?;
+                Some((key, payload_hash, committed_at))
+            })
+            .collect();
+        if let Err(error) = self.compact_journal() {
+            for (key, payload_hash, committed_at) in removed {
+                self.committed.insert(key.clone(), payload_hash);
+                self.committed_at_millis.insert(key, committed_at);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 }
