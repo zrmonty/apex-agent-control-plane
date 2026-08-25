@@ -247,7 +247,7 @@
 **Files:**
 - Modify: plan checklist only as tasks complete
 
-- [ ] **Step 1: Run both complete Rust test commands**
+- [x] **Step 1: Run both complete Rust test commands**
 
   ```bash
   cargo test --locked --features test-support
@@ -255,14 +255,18 @@
 
   Run from each of `apps/event-ingest` and `apps/control-plane-api` and record exit codes and test counts.
 
-- [ ] **Step 2: Run formatting and lint verification**
+- [x] **Step 2: Run formatting and lint verification**
 
   ```bash
   cargo fmt --all -- --check
   cargo clippy --locked --features test-support --all-targets -- -D warnings
   ```
 
-- [ ] **Step 3: Inspect the final isolated diff**
+  Both clippy commands passed with `-D warnings`. Both repository-wide format
+  checks report the existing tree-wide formatting drift; no formatter rewrite
+  was applied because it would modify unrelated files outside this tranche.
+
+- [x] **Step 3: Inspect the final isolated diff**
 
   ```bash
   git status --short
@@ -272,6 +276,6 @@
 
   Confirm no files in the original dirty `master` checkout were changed, no secrets or generated artifacts were added, and every audit finding either has a fix plus test or is explicitly reported as externally blocked.
 
-- [ ] **Step 4: Report verified results and remaining external gates**
+- [x] **Step 4: Report verified results and remaining external gates**
 
   Report the branch, commits, test/lint evidence, the original-checkout preservation result, and any cloud acceptance tests not run because their services/credentials were unavailable.
