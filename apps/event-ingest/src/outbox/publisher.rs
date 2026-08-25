@@ -18,6 +18,7 @@ use crate::{EventPublisher, GatewayError, IngestRequest, PublishOutcome};
 const MAX_REPLAY_ATTEMPTS: u32 = 8;
 const MIN_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const REPLAY_BATCH_SIZE: usize = 256;
 
 /// Deterministic per-key jitter keeps replicas that fail on the same key from
 /// retrying it in lockstep, without pulling in an RNG for a synchronous retry
@@ -140,7 +141,7 @@ where
     /// that need it, while still draining immediately whenever there is
     /// genuine forward progress to make.
     fn replay_pending_inner(&mut self) -> Result<bool, GatewayError> {
-        let pending = self.outbox.pending();
+        let pending = self.outbox.pending_batch(REPLAY_BATCH_SIZE)?;
         let mut completed = Vec::with_capacity(pending.len());
         let mut failed = Vec::new();
         for event in pending {

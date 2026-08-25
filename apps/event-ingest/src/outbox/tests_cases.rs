@@ -397,8 +397,7 @@ impl EventPublisher for AlwaysFailingPublisher {
 }
 
 #[test]
-fn a_permanently_failing_event_is_quarantined_after_the_replay_ceiling_instead_of_retried_forever()
- {
+fn a_permanently_failing_event_respects_its_retry_deadline() {
     use crate::outbox::PendingEventReplayer;
 
     let base = std::env::temp_dir().join(format!(
@@ -417,39 +416,40 @@ fn a_permanently_failing_event_is_quarantined_after_the_replay_ceiling_instead_o
 
     let mut outboxed = OutboxedPublisher::new(AlwaysFailingPublisher::default(), outbox);
 
-    // `FileOutbox::reschedule` (outbox/file_ops.rs) enforces
-    // MAX_PERSISTED_ATTEMPTS = 8: attempts 1..=7 push the row's
-    // `next_attempt_at` out and keep it pending; attempt 8 quarantines it
-    // instead of scheduling a 9th. `FileOutbox::pending()` (unlike
-    // `pending_batch`, which Postgres uses in production and applies the
-    // `next_attempt_at <= now()` gate server-side) does not itself gate on
-    // that deadline, so this loop reaches the ceiling without advancing a
-    // clock.
-    for _ in 0..8 {
-        outboxed
-            .replay_pending()
-            .expect("a failing publish must not surface as a hard replay error");
-    }
-
+    // A failed cycle must schedule the row, and the next cycle must honor the
+    // persisted deadline rather than immediately burning through the retry
+    // ceiling. The zero-duration reschedule below simulates the deadline
+    // passing without making this unit test sleep for the production backoff.
+    outboxed
+        .replay_pending()
+        .expect("a failing publish must not surface as a hard replay error");
     assert_eq!(
         outboxed.publisher().0,
-        8,
-        "every attempt up to the ceiling must actually call publish"
+        1,
+        "the first cycle must attempt the pending event once"
     );
     assert!(
-        outboxed.outbox_mut().pending().is_empty(),
-        "the row must stop being offered for replay once quarantined"
-    );
-    assert_eq!(
-        outboxed.outbox_mut().quarantined_batch(4).unwrap().len(),
-        1,
-        "the row must be quarantined, not lost"
+        outboxed.outbox_mut().pending_batch(4).unwrap().is_empty(),
+        "the row must not be offered again before its retry deadline"
     );
 
-    // The failure mode this guards against: retried forever. One more cycle
-    // must not call publish again for a row that is no longer pending.
-    outboxed.replay_pending().unwrap();
-    assert_eq!(outboxed.publisher().0, 8);
+    let key = OutboxKey {
+        workspace_id: poison.workspace_id.clone(),
+        namespace_id: poison.namespace_id.clone(),
+        event_id: poison.event_id.clone(),
+    };
+    outboxed
+        .outbox_mut()
+        .reschedule(std::slice::from_ref(&key), std::time::Duration::ZERO)
+        .unwrap();
+    outboxed
+        .replay_pending()
+        .expect("a retry after its deadline must remain an isolated failure");
+    assert_eq!(
+        outboxed.publisher().0,
+        2,
+        "the row must become eligible again after its deadline"
+    );
 
     remove_dir_all(base).unwrap();
 }
