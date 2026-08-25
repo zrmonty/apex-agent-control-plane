@@ -28,10 +28,8 @@ enum InboxRecord {
         command_id: String,
         retired_at_millis: u64,
     },
-    /// Durable record of an operator cancellation. Replayed the same way
-    /// `Acknowledged` is: `load()` sets the in-memory flag and discards
-    /// `at_millis`, which exists for the journal's own readability rather
-    /// than to drive any replay decision -- same as `Acknowledged`'s.
+    /// Durable record of an operator cancellation. Its timestamp is the
+    /// retention clock because a cancelled command has never been delivered.
     Cancelled {
         workspace_id: String,
         namespace_id: String,
@@ -201,7 +199,7 @@ impl FileCommandInbox {
                     workspace_id,
                     namespace_id,
                     command_id,
-                    ..
+                    at_millis,
                 } => {
                     if let Some(entry) = self.state.entries.get_mut(&InboxKey {
                         workspace_id,
@@ -209,6 +207,7 @@ impl FileCommandInbox {
                         command_id,
                     }) {
                         entry.cancelled = true;
+                        entry.cancelled_at_millis = Some(at_millis);
                     }
                 }
             }
@@ -306,15 +305,12 @@ impl FileCommandInbox {
             }
             if entry.cancelled {
                 // A cancelled entry is always undelivered (`attempts == 0`),
-                // so there is no delivery timestamp to carry forward; 0 is
-                // consistent with the `Acknowledged` case above, whose
-                // `at_millis` is likewise informational only and discarded on
-                // replay.
+                // so its own terminal timestamp is the retention clock.
                 records.push(InboxRecord::Cancelled {
                     workspace_id: key.workspace_id.clone(),
                     namespace_id: key.namespace_id.clone(),
                     command_id: key.command_id.clone(),
-                    at_millis: entry.last_delivered_millis.unwrap_or_default(),
+                    at_millis: entry.cancelled_at_millis.unwrap_or_default(),
                 });
             }
         }
@@ -537,7 +533,7 @@ impl CommandInbox for FileCommandInbox {
     }
 
     fn cancel(&mut self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError> {
-        let result = self.state.cancel(key)?;
+        let result = self.state.cancel(key, now_millis)?;
         // Journal after the in-memory mutation, mirroring `acknowledge`: if
         // the append fails, the in-memory flag is rolled back so the two
         // never disagree about whether this command is cancelled.
@@ -551,6 +547,7 @@ impl CommandInbox for FileCommandInbox {
         {
             if let Some(entry) = self.state.entries.get_mut(key) {
                 entry.cancelled = false;
+                entry.cancelled_at_millis = None;
             }
             return Err(error);
         }
@@ -565,22 +562,32 @@ impl CommandInbox for FileCommandInbox {
     ) -> Result<(), CommandError> {
         let cutoff_millis = now_millis.saturating_sub(retention_millis);
         let previous = self.state.clone();
-        let settled: Vec<_> = self
+        let settled: Vec<(InboxKey, u64)> = self
             .state
             .entries
             .iter()
             .filter_map(|(key, entry)| {
+                if entry.cancelled {
+                    return entry
+                        .cancelled_at_millis
+                        .filter(|cancelled_at| *cancelled_at <= cutoff_millis)
+                        .map(|cancelled_at| (key.clone(), cancelled_at));
+                }
                 ((entry.acknowledged || entry.attempts >= max_attempts)
                     && entry
                         .last_delivered_millis
                         .is_some_and(|delivered_at| delivered_at <= cutoff_millis))
-                .then_some(key.clone())
+                .then_some((key.clone(), now_millis))
             })
             .collect();
-        for key in &settled {
-            self.state.retire(key, now_millis);
+        for (key, retired_at_millis) in &settled {
+            self.state.retire(key, *retired_at_millis);
         }
-        let changed = !settled.is_empty() || self.state.remove_expired_retired(cutoff_millis);
+        // Do not short-circuit this expression: a command can become
+        // settled and already be past retention in the same sweep (notably a
+        // cancellation), so the tombstone cleanup must still run now.
+        let expired_retired = self.state.remove_expired_retired(cutoff_millis);
+        let changed = !settled.is_empty() || expired_retired;
         if !changed {
             return Ok(());
         }
@@ -591,4 +598,3 @@ impl CommandInbox for FileCommandInbox {
         Ok(())
     }
 }
-

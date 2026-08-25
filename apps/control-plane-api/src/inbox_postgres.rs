@@ -338,22 +338,33 @@ impl CommandInbox for PostgresCommandInbox {
     }
 
     fn undelivered_count(&mut self) -> usize {
-        self.client
-            .query_one(
-                "SELECT COUNT(*) FROM apex_control_inbox WHERE attempts = 0",
-                &[],
-            )
-            .ok()
-            .and_then(|row| row.get::<_, i64>(0).try_into().ok())
-            .unwrap_or(0)
+        self.try_undelivered_count().unwrap_or(0)
     }
 
     fn pending_count(&mut self) -> usize {
-        self.client
+        self.try_pending_count().unwrap_or(0)
+    }
+
+    fn try_undelivered_count(&mut self) -> Result<usize, CommandError> {
+        let count: i64 = self
+            .client
+            .query_one(
+                "SELECT COUNT(*) FROM apex_control_inbox
+                 WHERE attempts = 0 AND cancelled_at_millis IS NULL",
+                &[],
+            )
+            .map_err(|_| CommandError::internal())?
+            .get(0);
+        usize::try_from(count).map_err(|_| CommandError::internal())
+    }
+
+    fn try_pending_count(&mut self) -> Result<usize, CommandError> {
+        let count: i64 = self
+            .client
             .query_one("SELECT COUNT(*) FROM apex_control_inbox", &[])
-            .ok()
-            .and_then(|row| row.get::<_, i64>(0).try_into().ok())
-            .unwrap_or(0)
+            .map_err(|_| CommandError::internal())?
+            .get(0);
+        usize::try_from(count).map_err(|_| CommandError::internal())
     }
 
     fn acknowledge(
@@ -586,9 +597,16 @@ impl CommandInbox for PostgresCommandInbox {
         self.client
             .execute(
                 "DELETE FROM apex_control_inbox
-                 WHERE (acknowledged_at_millis IS NOT NULL OR attempts >= $1)
-                   AND last_delivered_millis IS NOT NULL
-                   AND $2 - last_delivered_millis >= $3",
+                 WHERE (
+                     (cancelled_at_millis IS NOT NULL
+                      AND $2 - cancelled_at_millis >= $3)
+                     OR (
+                         cancelled_at_millis IS NULL
+                         AND (acknowledged_at_millis IS NOT NULL OR attempts >= $1)
+                         AND last_delivered_millis IS NOT NULL
+                         AND $2 - last_delivered_millis >= $3
+                     )
+                 )",
                 &[&i64::from(max_attempts), &now_millis, &retention_millis],
             )
             .map_err(|_| CommandError::internal())?;

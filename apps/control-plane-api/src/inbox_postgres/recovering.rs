@@ -75,6 +75,14 @@ impl CommandInbox for RecoveringPostgresCommandInbox {
         self.inner.pending_count()
     }
 
+    fn try_undelivered_count(&mut self) -> Result<usize, CommandError> {
+        self.with_retry(|inner| inner.try_undelivered_count())
+    }
+
+    fn try_pending_count(&mut self) -> Result<usize, CommandError> {
+        self.with_retry(|inner| inner.try_pending_count())
+    }
+
     fn acknowledge(
         &mut self,
         target: &PollTarget,

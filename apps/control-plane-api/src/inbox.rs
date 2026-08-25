@@ -399,6 +399,18 @@ pub trait CommandInbox: Send {
     /// but retained for redelivery or idempotency.
     fn pending_count(&mut self) -> usize;
 
+    /// Fallible diagnostic form. Backends with remote storage override this
+    /// so a query failure cannot be mistaken for a healthy zero.
+    fn try_undelivered_count(&mut self) -> Result<usize, CommandError> {
+        Ok(self.undelivered_count())
+    }
+
+    /// Fallible diagnostic form. Local backends inherit the infallible count;
+    /// remote backends must surface transport/query failures.
+    fn try_pending_count(&mut self) -> Result<usize, CommandError> {
+        Ok(self.pending_count())
+    }
+
     fn acknowledge(
         &mut self,
         target: &PollTarget,
@@ -474,6 +486,14 @@ impl<T: CommandInbox + ?Sized> CommandInbox for Box<T> {
 
     fn pending_count(&mut self) -> usize {
         (**self).pending_count()
+    }
+
+    fn try_undelivered_count(&mut self) -> Result<usize, CommandError> {
+        (**self).try_undelivered_count()
+    }
+
+    fn try_pending_count(&mut self) -> Result<usize, CommandError> {
+        (**self).try_pending_count()
     }
 
     fn acknowledge(

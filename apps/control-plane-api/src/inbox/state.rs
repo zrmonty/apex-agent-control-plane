@@ -53,6 +53,9 @@ pub(super) struct Entry {
     /// construction: cancellation only ever succeeds while `attempts == 0`,
     /// and `acknowledge` requires `attempts >= 1`.
     pub(super) cancelled: bool,
+    /// When cancellation became terminal. Unlike delivery, cancellation has
+    /// no `last_delivered_millis`, so retention must use this timestamp.
+    pub(super) cancelled_at_millis: Option<u64>,
 }
 
 impl InboxState {
@@ -150,6 +153,7 @@ impl InboxState {
                 acknowledged: false,
                 sequence,
                 cancelled: false,
+                cancelled_at_millis: None,
             },
         );
         *self.scope_counts.entry(scope).or_insert(0) += 1;
@@ -241,7 +245,7 @@ impl InboxState {
     pub(super) fn undelivered_count(&self) -> usize {
         self.entries
             .values()
-            .filter(|entry| entry.attempts == 0)
+            .filter(|entry| entry.attempts == 0 && !entry.cancelled)
             .count()
     }
 
@@ -269,7 +273,11 @@ impl InboxState {
 
     /// Retracts a never-delivered command. See `CommandInbox::cancel` for the
     /// full contract.
-    pub(super) fn cancel(&mut self, key: &InboxKey) -> Result<CancelResult, CommandError> {
+    pub(super) fn cancel(
+        &mut self,
+        key: &InboxKey,
+        now_millis: u64,
+    ) -> Result<CancelResult, CommandError> {
         if let Some(entry) = self.entries.get_mut(key) {
             if entry.cancelled {
                 return Ok(CancelResult::AlreadyCancelled);
@@ -278,6 +286,7 @@ impl InboxState {
                 return Err(CommandError::already_delivered());
             }
             entry.cancelled = true;
+            entry.cancelled_at_millis = Some(now_millis);
             return Ok(CancelResult::Cancelled);
         }
         if self.retired.contains_key(key) {
@@ -472,7 +481,7 @@ impl CommandInbox for InMemoryCommandInbox {
         Ok(ListCommandsPage { commands, has_more })
     }
 
-    fn cancel(&mut self, key: &InboxKey, _now_millis: u64) -> Result<CancelResult, CommandError> {
-        self.state.cancel(key)
+    fn cancel(&mut self, key: &InboxKey, now_millis: u64) -> Result<CancelResult, CommandError> {
+        self.state.cancel(key, now_millis)
     }
 }

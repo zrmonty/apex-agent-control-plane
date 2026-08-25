@@ -40,6 +40,10 @@ CREATE INDEX IF NOT EXISTS apex_control_inbox_retention_idx
     ON apex_control_inbox (last_delivered_millis)
     WHERE last_delivered_millis IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS apex_control_inbox_cancelled_retention_idx
+    ON apex_control_inbox (cancelled_at_millis)
+    WHERE cancelled_at_millis IS NOT NULL;
+
 -- No *separate* index was added for the per-`(workspace_id, namespace_id)`
 -- quota's `SELECT COUNT(*) ... WHERE workspace_id = $1 AND namespace_id = $2`
 -- (`PostgresCommandInbox::record`, `inbox_postgres.rs`): the index below,

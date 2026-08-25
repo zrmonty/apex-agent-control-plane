@@ -185,6 +185,11 @@ fn cancelling_an_undelivered_command_succeeds_and_it_is_never_polled() {
         inbox.status(&key, DEFAULT_MAX_DELIVERY_ATTEMPTS).unwrap(),
         Some((DeliveryStatus::Cancelled, 0))
     );
+    assert_eq!(
+        inbox.undelivered_count(),
+        0,
+        "cancellation is terminal and must not remain in the never-delivered diagnostic"
+    );
     // The whole point: a cancelled command must never reach a poll.
     assert!(
         inbox

@@ -52,6 +52,42 @@ fn expiring_a_retired_command_frees_its_scope_quota() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn expiring_a_cancelled_command_frees_capacity_and_preserves_its_cancel_time() {
+    let dir = std::env::temp_dir().join(format!(
+        "apex-inbox-cancel-retention-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("inbox.jsonl");
+    let key = InboxKey {
+        workspace_id: "acme".to_owned(),
+        namespace_id: "prod".to_owned(),
+        command_id: "cmd-cancel-retention".to_owned(),
+    };
+    {
+        let mut inbox = FileCommandInbox::open(&path, &dir, 1, 1).unwrap();
+        inbox.record(&command(&key.command_id, "agent-a")).unwrap();
+        assert_eq!(inbox.cancel(&key, 1_000).unwrap(), CancelResult::Cancelled);
+        assert_eq!(inbox.undelivered_count(), 0);
+    }
+
+    let mut inbox = FileCommandInbox::open(&path, &dir, 1, 1).unwrap();
+    assert_eq!(inbox.undelivered_count(), 0);
+    inbox.maintain(2_000, 100, DEFAULT_MAX_DELIVERY_ATTEMPTS).unwrap();
+    assert_eq!(inbox.pending_count(), 0, "expired cancellation should leave no active row");
+    assert_eq!(
+        inbox.record(&command("cmd-after-cancel", "agent-a")).unwrap(),
+        RecordResult::Recorded,
+        "a cancelled command older than retention must stop consuming capacity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Regression test for a command that is *refused* -- for global capacity
 /// or, as exercised here, per-scope quota -- never reaching the journal.
 ///

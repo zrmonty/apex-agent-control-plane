@@ -57,12 +57,12 @@ impl ControlInboxBackend {
     }
 
     pub fn pending_count(&self) -> Result<u64, CommandError> {
-        let count = self.with_lock(|inbox| inbox.pending_count())?;
+        let count = self.with_lock(|inbox| inbox.try_pending_count())??;
         u64::try_from(count).map_err(|_| CommandError::internal())
     }
 
     pub fn undelivered_count(&self) -> Result<u64, CommandError> {
-        let count = self.with_lock(|inbox| inbox.undelivered_count())?;
+        let count = self.with_lock(|inbox| inbox.try_undelivered_count())??;
         u64::try_from(count).map_err(|_| CommandError::internal())
     }
 
