@@ -312,6 +312,7 @@ services:
       APEX_CLICKHOUSE_ENDPOINT: https://clickhouse-projection:8443/v1/events
       APEX_ALLOW_PRIVATE_SINK_DESTINATIONS: "1"
       APEX_PRIVATE_SINK_HOSTS: clickhouse-projection,archive-provider
+      APEX_DEBUG_SINK_CONFIG: ${APEX_DEBUG_SINK_CONFIG:-}
       APEX_CLICKHOUSE_CA_FILE: /var/lib/apex-secrets/ca
       APEX_CLICKHOUSE_CLIENT_CERT_FILE: /var/lib/apex-secrets/ingest_http_client_cert
       APEX_CLICKHOUSE_CLIENT_KEY_FILE: /var/lib/apex-secrets/ingest_http_client_key
