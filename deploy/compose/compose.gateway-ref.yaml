@@ -41,6 +41,17 @@ x-control-build: &control-build
       RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
       CARGO_FEATURES: ${CONTROL_CARGO_FEATURES:-}
 
+# The reference providers share one image so their runtime dependencies are
+# installed in the image rather than assumed to exist in the bare Python base
+# image used by the gateway-ref overlay.
+x-provider-build: &provider-build
+  image: apex-reference-providers:gateway-ref
+  build:
+    context: ../../apps/reference-providers
+    dockerfile: Dockerfile
+    args:
+      RUNTIME_IMAGE: ${PROVIDER_RUNTIME_IMAGE:-python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de}
+
 services:
   jetstream:
     image: nats@sha256:dd5152d5de4ce2a22b970cc553dd5b45ac9533bdddc440a79f970ac489ce2fa5
@@ -153,7 +164,7 @@ services:
       - nats_password
 
   clickhouse-projection:
-    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    <<: *provider-build
     working_dir: /app
     environment:
       PYTHONPATH: /app
@@ -191,7 +202,7 @@ services:
         target: ca
 
   archive-provider:
-    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    <<: *provider-build
     working_dir: /app
     environment:
       PYTHONPATH: /app

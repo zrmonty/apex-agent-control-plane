@@ -232,7 +232,7 @@ jobs:
           export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
           docker compose $P down -v --remove-orphans || true
-          docker compose $P build ingest-gateway
+          docker compose $P build ingest-gateway clickhouse-projection archive-provider
           # The optional-feature build is a separate artifact and broke
           # separately: --features postgres compiles deploy/postgres/*.sql via
           # include_str!, so a context omitting that directory fails outright

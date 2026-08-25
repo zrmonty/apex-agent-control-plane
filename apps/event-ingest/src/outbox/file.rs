@@ -39,7 +39,7 @@ fn parse_fingerprint(hex: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let value = std::str::from_utf8(chunk).ok()?;
         out[index] = u8::from_str_radix(value, 16).ok()?;
     }
