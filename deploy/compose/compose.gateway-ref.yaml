@@ -172,9 +172,6 @@ services:
       APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
-        "python",
-        "-m",
-        "apex_reference_providers",
         "clickhouse_projection",
         "--bind",
         "0.0.0.0",
@@ -211,9 +208,6 @@ services:
       APEX_PROVIDER_ALLOW_UNPINNED_CLIENT: "1"
     command:
       [
-        "python",
-        "-m",
-        "apex_reference_providers",
         "archive_provider",
         "--bind",
         "0.0.0.0",
