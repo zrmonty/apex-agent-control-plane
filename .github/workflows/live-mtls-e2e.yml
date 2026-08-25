@@ -230,6 +230,7 @@ jobs:
           FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
           export APEX_BEARER_CERT_SHA256="$FP"
           export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
+          export APEX_DEBUG_SINK_CONFIG=1
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
           docker compose $P down -v --remove-orphans || true
           docker compose $P build ingest-gateway clickhouse-projection archive-provider
