@@ -82,6 +82,10 @@ class Handler(DiagnosticHandler):
             )
             return
         self.send_response(204)
+        # The gateway acknowledges only an exact status plus this single
+        # matching receipt. Without the echo, a proxy-generated 204 would
+        # falsely look like a durable projection.
+        self.send_header("X-Apex-Event-Hash", event_hash)
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802

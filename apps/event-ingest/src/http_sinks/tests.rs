@@ -353,7 +353,13 @@ fn secret_reader_private_key_gate_matches_the_permissions_primitive() {
 fn publishers_use_local_http_server_for_success_and_failure_paths() {
     let event = valid_event();
     let client = http_client();
-    let (endpoint, handle) = local_http_server(200, "");
+    let event_hash = crate::proto::EventEnvelope::decode(event.envelope())
+        .unwrap()
+        .integrity
+        .unwrap()
+        .event_hash;
+    let response_headers = format!("X-Apex-Event-Hash: {event_hash}\r\n");
+    let (endpoint, handle) = local_http_server(204, &response_headers);
     let mut clickhouse = ClickHouseHttpPublisher {
         client: client.clone(),
         config: placeholder_config(&endpoint),
@@ -387,11 +393,6 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
     );
     let _ = handle.join().unwrap();
 
-    let event_hash = crate::proto::EventEnvelope::decode(event.envelope())
-        .unwrap()
-        .integrity
-        .unwrap()
-        .event_hash;
     let headers = format!("X-Apex-Event-Hash: {event_hash}\r\n");
     let (endpoint, handle) = local_http_server(412, &headers);
     let mut archive = ArchiveHttpPublisher {
@@ -409,9 +410,83 @@ fn publishers_use_local_http_server_for_success_and_failure_paths() {
 }
 
 #[test]
+fn clickhouse_ack_requires_exact_status_and_matching_hash_echo() {
+    let event = valid_event();
+    let event_hash = crate::proto::EventEnvelope::decode(event.envelope())
+        .unwrap()
+        .integrity
+        .unwrap()
+        .event_hash;
+    let matching_header = format!("X-Apex-Event-Hash: {event_hash}\r\n");
+
+    // An unexpected 2xx is not an acknowledgement, even when it echoes the
+    // right hash: accepting it would let a proxy or provider shim invent a
+    // success status outside the frozen protocol.
+    let (endpoint, handle) = local_http_server(200, &matching_header);
+    let mut clickhouse = ClickHouseHttpPublisher {
+        client: http_client(),
+        config: placeholder_config(&endpoint),
+        endpoint,
+        bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
+    };
+    assert_eq!(
+        DurableEventSink::write_event(&mut clickhouse, &event)
+            .unwrap_err()
+            .code,
+        crate::GatewayErrorCode::InvalidSinkConfiguration
+    );
+    let _ = handle.join().unwrap();
+
+    // The exact success status is still terminal when its integrity receipt
+    // is absent. The sink must retry only after a provider protocol fix, not
+    // pretend the row is durable.
+    let (endpoint, handle) = local_http_server(204, "");
+    let mut clickhouse = ClickHouseHttpPublisher {
+        client: http_client(),
+        config: placeholder_config(&endpoint),
+        endpoint,
+        bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
+    };
+    assert_eq!(
+        DurableEventSink::write_event(&mut clickhouse, &event)
+            .unwrap_err()
+            .code,
+        crate::GatewayErrorCode::InvalidSinkConfiguration
+    );
+    let _ = handle.join().unwrap();
+}
+
+#[test]
 fn archive_receipt_mismatch_and_clickhouse_transport_failure_are_safe() {
     let event = valid_event();
+    let event_hash = crate::proto::EventEnvelope::decode(event.envelope())
+        .unwrap()
+        .integrity
+        .unwrap()
+        .event_hash;
     let (endpoint, handle) = local_http_server(412, "X-Apex-Event-Hash: wrong\r\n");
+    let mut archive = ArchiveHttpPublisher {
+        client: http_client(),
+        config: placeholder_config(&endpoint),
+        endpoint,
+        bearer_token: None,
+        trusted_base: PathBuf::new(),
+        last_rebuild_attempt: None,
+    };
+    assert_eq!(
+        DurableEventSink::write_event(&mut archive, &event)
+            .unwrap_err()
+            .code,
+        crate::GatewayErrorCode::InvalidSinkConfiguration
+    );
+    let _ = handle.join().unwrap();
+
+    let matching_header = format!("X-Apex-Event-Hash: {event_hash}\r\n");
+    let (endpoint, handle) = local_http_server(202, &matching_header);
     let mut archive = ArchiveHttpPublisher {
         client: http_client(),
         config: placeholder_config(&endpoint),

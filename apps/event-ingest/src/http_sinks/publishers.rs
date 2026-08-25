@@ -99,8 +99,12 @@ impl DurableEventSink for ClickHouseHttpPublisher {
                 return Err(GatewayError::publish_failed());
             }
         };
-        if response.status().is_success() {
-            Ok(())
+        if matches!(response.status().as_u16(), 201 | 204) {
+            if response_event_hash_matches(response.headers(), &event_hash) {
+                Ok(())
+            } else {
+                Err(GatewayError::invalid_sink_configuration())
+            }
         } else {
             Err(http_failure(response.status()))
         }
@@ -178,7 +182,7 @@ impl DurableEventSink for ArchiveHttpPublisher {
                 return Err(GatewayError::publish_failed());
             }
         };
-        if response.status().is_success() || response.status().as_u16() == 412 {
+        if matches!(response.status().as_u16(), 201 | 204 | 412) {
             if response_event_hash_matches(response.headers(), &event_hash) {
                 return Ok(());
             }
