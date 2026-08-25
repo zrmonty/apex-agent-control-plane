@@ -20,8 +20,10 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .backends import build_backend
+from .backends.base import ArchiveVerificationError
 from .backends.s3 import ArchiveRetentionError
 from .common import HASH, MAX_EVENT_BYTES, UUID_V7, DiagnosticHandler, build_tls_context
+from .event_validation import EnvelopeValidationError, validate_event_envelope
 
 
 def _env_file(name: str) -> str | None:
@@ -87,7 +89,13 @@ class Handler(DiagnosticHandler):
         if not body:
             self.send_diagnostic(400, "ARCHIVE_CONFIGURATION", "Missing event body.")
             return
-        # X-Apex-Event-Hash is integrity.event_hash (canonical digest), not body SHA-256.
+        try:
+            validate_event_envelope(body, header_id, event_hash)
+        except EnvelopeValidationError:
+            self.send_diagnostic(
+                400, "ARCHIVE_CONFIGURATION", "The event envelope failed validation."
+            )
+            return
         try:
             result = self.backend.put(header_id, event_hash, body)
         except ArchiveRetentionError:
@@ -100,6 +108,14 @@ class Handler(DiagnosticHandler):
                 500,
                 "ARCHIVE_VERIFICATION",
                 "The archive could not prove immutable retention for this event.",
+                retryable=False,
+            )
+            return
+        except ArchiveVerificationError:
+            self.send_diagnostic(
+                500,
+                "ARCHIVE_VERIFICATION",
+                "The archive could not verify the stored event bytes.",
                 retryable=False,
             )
             return

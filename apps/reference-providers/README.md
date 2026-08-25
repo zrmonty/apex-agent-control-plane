@@ -24,9 +24,10 @@ APEX_ARCHIVE_BACKEND=local|s3|azure|gcs
 | `azure` | `APEX_ARCHIVE_AZURE_CONNECTION_STRING` **or** account URL + key; `APEX_ARCHIVE_AZURE_CONTAINER` |
 | `gcs` | `APEX_ARCHIVE_GCS_BUCKET`; ADC or `APEX_ARCHIVE_GCS_CREDENTIALS_FILE` |
 
-Install optional SDKs only in the adapter image:
+Install the provider runtime and optional cloud SDKs only in the adapter image:
 
 ```powershell
+pip install -r apps/reference-providers/requirements.txt
 pip install -r apps/reference-providers/requirements-cloud.txt
 ```
 
@@ -47,6 +48,13 @@ python -m apps.reference_providers.archive_provider `
 ```powershell
 docker build -f apps/reference-providers/Dockerfile `
   -t apex-reference-providers:local apps/reference-providers
+```
+
+Run the provider boundary tests with the runtime requirements installed:
+
+```powershell
+$env:PYTHONPATH = "apps/reference-providers"
+python -m unittest discover -s apps/reference-providers/tests -p "test_*.py"
 ```
 
 Set `APEX_SERVICE=clickhouse_projection` or `archive_provider`.

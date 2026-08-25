@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from .common import HASH, MAX_EVENT_BYTES, UUID_V7, DiagnosticHandler, build_tls_context
+from .event_validation import EnvelopeValidationError, validate_event_envelope
 
 
 class Store:
@@ -21,26 +22,68 @@ class Store:
         self._db.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
-                event_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL,
                 event_hash TEXT NOT NULL,
                 envelope BLOB NOT NULL,
-                workspace_id TEXT,
-                namespace_id TEXT
+                workspace_id TEXT NOT NULL,
+                namespace_id TEXT NOT NULL,
+                PRIMARY KEY (workspace_id, namespace_id, event_id)
             )
             """
         )
+        primary_keys = {
+            row[1]: row[5]
+            for row in self._db.execute("PRAGMA table_info(events)").fetchall()
+        }
+        if primary_keys.get("event_id") == 1:
+            self._db.execute("ALTER TABLE events RENAME TO events_legacy")
+            self._db.execute(
+                """
+                CREATE TABLE events (
+                    event_id TEXT NOT NULL,
+                    event_hash TEXT NOT NULL,
+                    envelope BLOB NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    namespace_id TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, namespace_id, event_id)
+                )
+                """
+            )
+            self._db.execute(
+                """
+                INSERT INTO events(event_id, event_hash, envelope, workspace_id, namespace_id)
+                SELECT event_id, event_hash, envelope,
+                       COALESCE(workspace_id, ''), COALESCE(namespace_id, '')
+                FROM events_legacy
+                """
+            )
+            self._db.execute("DROP TABLE events_legacy")
         self._db.commit()
 
-    def put(self, event_id: str, event_hash: str, body: bytes) -> str:
+    def put(
+        self,
+        workspace_id: str,
+        namespace_id: str,
+        event_id: str,
+        event_hash: str,
+        body: bytes,
+    ) -> str:
         """Return 'created', 'duplicate', or 'conflict'."""
         with self._lock:
             row = self._db.execute(
-                "SELECT event_hash FROM events WHERE event_id = ?", (event_id,)
+                """
+                SELECT event_hash FROM events
+                WHERE workspace_id = ? AND namespace_id = ? AND event_id = ?
+                """,
+                (workspace_id, namespace_id, event_id),
             ).fetchone()
             if row is None:
                 self._db.execute(
-                    "INSERT INTO events(event_id, event_hash, envelope) VALUES (?,?,?)",
-                    (event_id, event_hash, body),
+                    """
+                    INSERT INTO events(event_id, event_hash, envelope, workspace_id, namespace_id)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (event_id, event_hash, body, workspace_id, namespace_id),
                 )
                 self._db.commit()
                 return "created"
@@ -69,11 +112,18 @@ class Handler(DiagnosticHandler):
         if not body:
             self.send_diagnostic(400, "INVALID_ENVELOPE", "Missing event body.")
             return
-        # X-Apex-Event-Hash is the Apex integrity.event_hash (RFC 8785 canonical
-        # digest), not SHA-256 of the raw protobuf body. Gateway clients already
-        # recompute that hash; this reference service stores the header fingerprint
-        # for idempotency and does not re-hash the wire bytes.
-        result = self.store.put(event_id, event_hash, body)
+        try:
+            validated = validate_event_envelope(body, event_id, event_hash)
+        except EnvelopeValidationError:
+            self.send_diagnostic(400, "INVALID_ENVELOPE", "The event envelope failed validation.")
+            return
+        result = self.store.put(
+            validated.workspace_id,
+            validated.namespace_id,
+            validated.event_id,
+            validated.event_hash,
+            body,
+        )
         if result == "conflict":
             self.send_diagnostic(
                 409,

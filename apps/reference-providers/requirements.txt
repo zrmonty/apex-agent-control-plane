@@ -1,0 +1,3 @@
+# Required by both reference provider HTTP services.
+protobuf>=4.25,<6
+rfc8785==0.1.4

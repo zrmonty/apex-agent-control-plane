@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+class ArchiveVerificationError(RuntimeError):
+    """The provider did not return the bytes or metadata that it accepted."""
+
+
 @dataclass(frozen=True)
 class PutResult:
     """Outcome of a create-only object write."""

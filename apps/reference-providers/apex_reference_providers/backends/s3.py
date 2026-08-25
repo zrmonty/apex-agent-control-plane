@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import datetime
 
-from .base import HealthCapabilities, PutResult
+from ..common import MAX_EVENT_BYTES
+from .base import ArchiveVerificationError, HealthCapabilities, PutResult
 
 #: Object Lock retention applied to every archived event. COMPLIANCE is the
 #: default because GOVERNANCE is bypassable: any identity holding
@@ -133,6 +134,29 @@ class S3ArchiveBackend:
                 f"archived object {key!r} has no RetainUntilDate"
             )
 
+    def _verify_content(
+        self, key: str, event_hash: str, body: bytes, version_id: str | None = None
+    ) -> None:
+        kwargs = {"Bucket": self._bucket, "Key": key}
+        if version_id:
+            kwargs["VersionId"] = version_id
+        try:
+            response = self._s3.get_object(**kwargs)
+            declared_length = response.get("ContentLength")
+            if declared_length is not None and declared_length > MAX_EVENT_BYTES:
+                raise ArchiveVerificationError("provider returned an oversized object")
+            metadata = response.get("Metadata") or {}
+            stored_hash = metadata.get("apex_event_hash") or metadata.get("apex-event-hash")
+            actual = response["Body"].read(MAX_EVENT_BYTES + 1)
+        except ArchiveVerificationError:
+            raise
+        except self._ClientError as err:
+            raise ArchiveVerificationError("provider readback failed") from err
+        except Exception as err:  # noqa: BLE001
+            raise ArchiveVerificationError("provider readback failed") from err
+        if stored_hash != event_hash or declared_length != len(body) or actual != body:
+            raise ArchiveVerificationError("provider readback did not match the request")
+
     def put(self, event_id: str, event_hash: str, body: bytes) -> PutResult:
         key = f"events/{event_id}.pb"
         try:
@@ -142,6 +166,8 @@ class S3ArchiveBackend:
                 meta = head.get("Metadata") or {}
                 existing = meta.get("apex_event_hash") or meta.get("apex-event-hash")
                 if existing == event_hash:
+                    self._verify_retention(key, head.get("VersionId"))
+                    self._verify_content(key, event_hash, body, head.get("VersionId"))
                     return PutResult(
                         status="replay",
                         version_id=head.get("VersionId"),
@@ -183,6 +209,7 @@ class S3ArchiveBackend:
             result = self._s3.put_object(**put_kwargs)
             version_id = result.get("VersionId")
             self._verify_retention(key, version_id)
+            self._verify_content(key, event_hash, body, version_id)
             return PutResult(
                 status="created",
                 version_id=version_id,
@@ -197,6 +224,8 @@ class S3ArchiveBackend:
                     meta = head.get("Metadata") or {}
                     existing = meta.get("apex_event_hash") or meta.get("apex-event-hash")
                     if existing == event_hash:
+                        self._verify_retention(key, head.get("VersionId"))
+                        self._verify_content(key, event_hash, body, head.get("VersionId"))
                         return PutResult(
                             status="replay",
                             version_id=head.get("VersionId"),
