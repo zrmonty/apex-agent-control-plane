@@ -24,7 +24,7 @@ impl AuthenticatedHttpConfig {
     ) -> Result<(reqwest::blocking::Client, Option<Zeroizing<String>>), GatewayError> {
         crate::install_rustls_provider();
         let endpoint = reqwest::Url::parse(&self.endpoint)
-            .map_err(|_| sink_config_error("endpoint parse"))?;
+            .map_err(|_| GatewayError::invalid_sink_configuration())?;
         if endpoint.scheme() != "https"
             || self.endpoint.len() > MAX_HTTP_ENDPOINT_BYTES
             || endpoint.host_str().is_none()
@@ -40,52 +40,44 @@ impl AuthenticatedHttpConfig {
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
         {
-            return Err(sink_config_error("endpoint shape"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
         if !safe_endpoint_host(&endpoint) {
-            return Err(sink_config_error("endpoint host"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
         // Resolve once during trusted startup, reject any unsafe destination,
         // and pin the client to the accepted addresses. This prevents a DNS
         // answer from changing between configuration validation and request
         // dispatch (including DNS-rebinding to internal services).
-        let resolved_addrs = resolve_endpoint_addrs(&endpoint)
-            .map_err(|_| sink_config_error("endpoint resolution"))?;
+        let resolved_addrs = resolve_endpoint_addrs(&endpoint)?;
         if trusted_base.is_symlink() {
-            return Err(sink_config_error("trusted base symlink"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
         let base = trusted_base
             .canonicalize()
-            .map_err(|_| sink_config_error("trusted base canonicalization"))?;
+            .map_err(|_| GatewayError::invalid_sink_configuration())?;
         if !base.is_dir() || base.is_symlink() {
-            return Err(sink_config_error("trusted base directory"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
-        let ca = read_secret(&self.ca_file, &base, false)
-            .map_err(|_| sink_config_error("CA material"))?;
-        let cert = read_secret(&self.client_cert_file, &base, false)
-            .map_err(|_| sink_config_error("client certificate material"))?;
-        let key = read_secret(&self.client_key_file, &base, true)
-            .map_err(|_| sink_config_error("client key material"))?;
-        let ca_path = canonical_secret_path(&self.ca_file, &base, false)
-            .map_err(|_| sink_config_error("CA path"))?;
-        let cert_path = canonical_secret_path(&self.client_cert_file, &base, false)
-            .map_err(|_| sink_config_error("client certificate path"))?;
-        let key_path = canonical_secret_path(&self.client_key_file, &base, true)
-            .map_err(|_| sink_config_error("client key path"))?;
+        let ca = read_secret(&self.ca_file, &base, false)?;
+        let cert = read_secret(&self.client_cert_file, &base, false)?;
+        let key = read_secret(&self.client_key_file, &base, true)?;
+        let ca_path = canonical_secret_path(&self.ca_file, &base, false)?;
+        let cert_path = canonical_secret_path(&self.client_cert_file, &base, false)?;
+        let key_path = canonical_secret_path(&self.client_key_file, &base, true)?;
         if ca_path == cert_path || ca_path == key_path || cert_path == key_path {
-            return Err(sink_config_error("material path collision"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
         let bearer_path = self
             .bearer_token_file
             .as_ref()
             .map(|path| canonical_secret_path(path, &base, true))
-            .transpose()
-            .map_err(|_| sink_config_error("bearer token path"))?;
+            .transpose()?;
         if bearer_path
             .as_ref()
             .is_some_and(|path| path == &ca_path || path == &cert_path || path == &key_path)
         {
-            return Err(sink_config_error("bearer material path collision"));
+            return Err(GatewayError::invalid_sink_configuration());
         }
         let builder = reqwest::blocking::Client::builder()
             .use_rustls_tls()
@@ -98,16 +90,16 @@ impl AuthenticatedHttpConfig {
             .pool_idle_timeout(Duration::from_secs(30))
             .add_root_certificate(
                 reqwest::Certificate::from_pem(&ca)
-                    .map_err(|_| sink_config_error("CA parsing"))?,
+                    .map_err(|_| GatewayError::invalid_sink_configuration())?,
             )
             .identity(
                 reqwest::Identity::from_pem(&[cert.as_slice(), key.as_slice()].concat())
-                    .map_err(|_| sink_config_error("client identity parsing"))?,
+                    .map_err(|_| GatewayError::invalid_sink_configuration())?,
             )
             .resolve_to_addrs(
                 endpoint
                     .host_str()
-                    .ok_or_else(|| sink_config_error("endpoint host extraction"))?,
+                    .ok_or_else(GatewayError::invalid_sink_configuration)?,
                 &resolved_addrs,
             );
         let token = self
@@ -120,23 +112,16 @@ impl AuthenticatedHttpConfig {
     }
 }
 
-fn sink_config_error(stage: &str) -> GatewayError {
-    if std::env::var("APEX_DEBUG_SINK_CONFIG").ok().as_deref() == Some("1") {
-        eprintln!("event-ingest sink configuration rejected at {stage}");
-    }
-    GatewayError::invalid_sink_configuration()
-}
-
 fn resolve_endpoint_addrs(endpoint: &reqwest::Url) -> Result<Vec<SocketAddr>, GatewayError> {
     let host = endpoint
         .host_str()
-        .ok_or_else(|| sink_config_error("endpoint host extraction"))?;
+        .ok_or_else(GatewayError::invalid_sink_configuration)?;
     let port = endpoint
         .port_or_known_default()
-        .ok_or_else(|| sink_config_error("endpoint port"))?;
+        .ok_or_else(GatewayError::invalid_sink_configuration)?;
     let addresses = (host, port)
         .to_socket_addrs()
-        .map_err(|_| sink_config_error("endpoint DNS resolution"))?
+        .map_err(|_| GatewayError::invalid_sink_configuration())?
         .collect::<Vec<_>>();
     if addresses.is_empty()
         || (!private_sink_destinations_explicitly_allowed(host)
@@ -144,7 +129,7 @@ fn resolve_endpoint_addrs(endpoint: &reqwest::Url) -> Result<Vec<SocketAddr>, Ga
                 .iter()
                 .any(|address| !safe_endpoint_address(address.ip())))
     {
-        return Err(sink_config_error("endpoint address policy"));
+        return Err(GatewayError::invalid_sink_configuration());
     }
     Ok(addresses)
 }
