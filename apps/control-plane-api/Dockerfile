@@ -73,6 +73,6 @@ RUN useradd --system --uid 10002 --no-create-home apex-control
 # restages the material at 0600 before the gateway starts; the gateway's own
 # check stays strict and still fails closed if that step did not happen.
 RUN install -d -o 10002 -g 10002 -m 0700 /var/lib/apex-control /var/lib/apex-control-secrets
-COPY --from=build /src/apps/control-plane-api/target/release/apex-control-plane-api /usr/local/bin/apex-control-plane-api
+COPY --from=build /src/target/release/apex-control-plane-api /usr/local/bin/apex-control-plane-api
 USER 10002:10002
 ENTRYPOINT ["/usr/local/bin/apex-control-plane-api"]

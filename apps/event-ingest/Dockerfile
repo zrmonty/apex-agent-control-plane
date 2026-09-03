@@ -65,6 +65,6 @@ RUN useradd --system --uid 10001 --no-create-home apex
 # the material at 0600 before the gateway starts; the gateway's own check
 # stays strict and still fails closed if that step did not happen.
 RUN install -d -o 10001 -g 10001 -m 0700 /var/lib/apex /var/lib/apex-secrets
-COPY --from=build /src/apps/event-ingest/target/release/apex-event-ingest /usr/local/bin/apex-event-ingest
+COPY --from=build /src/target/release/apex-event-ingest /usr/local/bin/apex-event-ingest
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/apex-event-ingest"]
