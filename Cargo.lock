@@ -147,7 +147,9 @@ name = "apex-policy"
 version = "0.1.0"
 dependencies = [
  "apex-domain",
+ "async-trait",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

@@ -91,3 +91,124 @@ fn approval_and_operational_errors_have_explicit_safe_status() {
     assert!(GovernanceError::EventAdmissionFailed.is_retryable());
     assert!(!GovernanceError::Internal.is_retryable());
 }
+
+fn test_authorization_request() -> AuthorizationRequest {
+    let caller =
+        Caller::authenticated_for_agent("spiffe://apex/test", "agent-1", ["acme/prod"]).unwrap();
+    AuthorizationRequest::new(
+        caller,
+        GovernanceScope::new("acme", "prod").unwrap(),
+        ToolName::new("portfolio.read").unwrap(),
+        ActionName::new("read").unwrap(),
+        ResourceName::new("portfolio:alpha").unwrap(),
+        DataClassification::Confidential,
+        TraceContext::new("trace-1", None, None, Some("run-1")).unwrap(),
+    )
+    .unwrap()
+}
+
+struct RecordingGovernance {
+    decision: AuthorizationDecision,
+    policy: PolicySnapshot,
+}
+
+#[async_trait::async_trait]
+impl ApexGovernance for RecordingGovernance {
+    async fn authorize(
+        &self,
+        _request: AuthorizationRequest,
+    ) -> Result<AuthorizationDecision, GovernanceError> {
+        Ok(self.decision.clone())
+    }
+
+    async fn get_policy(
+        &self,
+        _scope: &GovernanceScope,
+    ) -> Result<PolicySnapshot, GovernanceError> {
+        Ok(self.policy.clone())
+    }
+}
+
+struct RecordingEvents {
+    event_id: EventId,
+}
+
+impl RecordingEvents {
+    fn with_event_id(value: &str) -> Self {
+        Self {
+            event_id: EventId::new(value).unwrap(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApexEvents for RecordingEvents {
+    async fn emit(&self, _event: ToolExecutionEvent) -> Result<EventReceipt, GovernanceError> {
+        Ok(EventReceipt::new(self.event_id.clone()))
+    }
+}
+
+struct RecordingApproval;
+
+#[async_trait::async_trait]
+impl ApexApproval for RecordingApproval {
+    async fn request(&self, _action: ApprovalAction) -> Result<ApprovalDecision, GovernanceError> {
+        Ok(ApprovalDecision::pending())
+    }
+}
+
+#[tokio::test]
+async fn governance_event_and_approval_traits_are_replaceable_and_content_free() {
+    let request = test_authorization_request();
+    let decision = AuthorizationDecision::allow(
+        PolicyId::new("ria-read-v1").unwrap(),
+        ReasonCode::new("policy.allowed").unwrap(),
+        vec![FieldPath::new("client.account_number").unwrap()],
+    );
+    let event = ToolExecutionEvent::new(
+        &request,
+        &decision,
+        ToolExecutionMetadata::new(
+            BackendName::new("portfolio-db").unwrap(),
+            ToolExecutionStatus::Succeeded,
+            12,
+            1,
+            DataSizeSummary::new(320, 6400, 1800, 1800),
+            FilteringSummary::new(vec![FieldPath::new("client.account_number").unwrap()]),
+        ),
+    );
+    let events: Box<dyn ApexEvents> = Box::new(RecordingEvents::with_event_id(
+        "018f5c91-2d88-7c00-8000-000000000001",
+    ));
+    let receipt = events.emit(event.clone()).await.unwrap();
+    let governance: Box<dyn ApexGovernance> = Box::new(RecordingGovernance {
+        decision: decision.clone(),
+        policy: PolicySnapshot::new(
+            request.scope().clone(),
+            PolicyId::new("ria-read-v1").unwrap(),
+            7,
+        ),
+    });
+    let approval: Box<dyn ApexApproval> = Box::new(RecordingApproval);
+
+    let authorized = governance.authorize(request.clone()).await.unwrap();
+    let policy = governance.get_policy(request.scope()).await.unwrap();
+    let approval_result = approval
+        .request(ApprovalAction::new(
+            request,
+            ReasonCode::new("policy.approval_required").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receipt.event_id().as_str(),
+        "018f5c91-2d88-7c00-8000-000000000001"
+    );
+    assert_eq!(event.sizes().output_bytes(), 1800);
+    assert_eq!(event.filtering().removed_fields().len(), 1);
+    assert_eq!(authorized, decision);
+    assert_eq!(policy.revision(), 7);
+    assert_eq!(approval_result.outcome(), ApprovalOutcome::Pending);
+    assert!(!format!("{event:?}").contains("raw-client-record"));
+}
