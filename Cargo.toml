@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/apex-contract",
     "crates/apex-domain",
+    "crates/apex-auth",
     "apps/event-ingest",
     "apps/control-plane-api",
     "apps/agent-supervisor",

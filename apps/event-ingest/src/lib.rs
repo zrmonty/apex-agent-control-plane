@@ -6,7 +6,6 @@ pub use apex_contract::{RedactedProstCodec, RedactedProstDecoder, RedactedProstE
 
 mod auth;
 mod backoff;
-mod ephemeral;
 mod gateway;
 mod http_sinks;
 mod idempotency;
@@ -30,12 +29,12 @@ pub use auth::{
     AuthenticatedGrpcService, BearerTokenResolver, BearerTokenVerifier, CallerVerifier,
     PeerIdentity, bounded_event_ingest_server,
 };
-pub use ephemeral::{
+pub use apex_auth::{
     DenyHintKey, EphemeralError, EphemeralErrorCode, EphemeralStore, FallbackEphemeralStore,
     FingerprintCounterKey, InMemoryEphemeralStore, RateLimitDecision, RateLimitKey,
 };
 #[cfg(feature = "valkey")]
-pub use ephemeral::{ValkeyConfig, ValkeyEphemeralStore};
+pub use apex_auth::{ValkeyConfig, ValkeyEphemeralStore};
 pub use apex_domain::{
     DiagnosticCorrelation, DiagnosticEvidence, DiagnosticFailure, DiagnosticScope,
     GatewayDiagnosticReport, GatewayError, GatewayErrorCode, RedactionSummary,

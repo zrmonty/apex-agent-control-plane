@@ -211,3 +211,5 @@ pub trait EphemeralStore: Send {
     /// Absence means "no accelerated deny," not "authorized."
     fn is_denied(&mut self, key: &DenyHintKey) -> Result<bool, EphemeralError>;
 }
+
+

@@ -1,0 +1,23 @@
+[package]
+name = "apex-auth"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+apex-domain = { path = "../apex-domain" }
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "transport", "tls-ring"] }
+redis = { version = "1.5", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
+
+[features]
+default = []
+test-support = []
+valkey = ["dep:redis"]
+
+[dev-dependencies]
+apex-domain = { path = "../apex-domain", features = ["test-support"] }
+
+[lints.rust]
+unsafe_code = "forbid"

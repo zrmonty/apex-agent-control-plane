@@ -22,7 +22,7 @@ pub struct PeerIdentity {
 }
 
 impl PeerIdentity {
-    pub(crate) fn from_request<T>(request: &tonic::Request<T>) -> Option<Self> {
+    pub fn from_request<T>(request: &tonic::Request<T>) -> Option<Self> {
         let certs = request
             .extensions()
             .get::<TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()?
@@ -429,3 +429,4 @@ impl<R: BearerTokenResolver> CallerVerifier for BearerTokenVerifier<R> {
 
 #[cfg(test)]
 mod tests;
+

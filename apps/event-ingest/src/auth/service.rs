@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use prost::Message;
 use tokio::sync::Semaphore;
 
-use super::verifier::{CallerVerifier, PeerIdentity};
+use apex_auth::{CallerVerifier, PeerIdentity};
 use crate::{
     BacklogObserver, Caller, EphemeralStore, EventPublisher, GatewayError, GatewayErrorCode,
     MAX_ENVELOPE_BYTES, OutboxMaintainer, PendingEventReplayer, RateLimitKey,

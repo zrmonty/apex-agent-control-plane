@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 apex-contract = { path = "../../crates/apex-contract" }
+apex-auth = { path = "../../crates/apex-auth" }
 apex-domain = { path = "../../crates/apex-domain" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 prost = "0.14"
@@ -40,7 +41,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # lived in rustls-pki-types since 1.9.0.
 rustls-pki-types = { version = "1", optional = true }
 zeroize = "1.8"
-redis = { version = "1.5", optional = true, default-features = false, features = ["tls-rustls", "tls-rustls-webpki-roots"] }
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
 tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring", "webpki-roots"] }
 uuid = { version = "1", optional = true, features = ["v4"] }
@@ -50,7 +50,7 @@ default = []
 test-support = ["apex-domain/test-support"]
 # Optional Valkey (Redis-protocol) acceleration adapter. The in-memory
 # EphemeralStore remains available without this feature.
-valkey = ["dep:redis"]
+valkey = ["apex-auth/valkey"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
 postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pki-types", "dep:uuid"]
 

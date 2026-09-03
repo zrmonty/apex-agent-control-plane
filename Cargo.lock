@@ -33,6 +33,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-auth"
+version = "0.1.0"
+dependencies = [
+ "apex-domain",
+ "redis",
+ "sha2 0.10.9",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "apex-contract"
 version = "0.1.0"
 dependencies = [
@@ -88,6 +99,7 @@ dependencies = [
 name = "apex-event-ingest"
 version = "0.1.0"
 dependencies = [
+ "apex-auth",
  "apex-contract",
  "apex-domain",
  "async-nats",
@@ -96,7 +108,6 @@ dependencies = [
  "postgres",
  "prost",
  "prost-types",
- "redis",
  "reqwest",
  "rustls",
  "rustls-pki-types",

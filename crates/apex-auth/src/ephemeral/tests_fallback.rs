@@ -434,3 +434,5 @@ fn fallback_uses_the_primary_result_when_it_succeeds() {
     let _ = store.primary();
     let _ = store.fallback();
 }
+
+

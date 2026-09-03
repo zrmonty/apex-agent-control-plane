@@ -347,3 +347,5 @@ fn authorization_parser_rejects_whitespace_controls_and_scheme_ambiguity() {
     assert!(verifier.verify(&metadata(b"bearer valid-token")).is_ok());
     assert!(verifier.verify(&metadata(b"BEARER valid-token")).is_ok());
 }
+
+
