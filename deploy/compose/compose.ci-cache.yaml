@@ -1,0 +1,67 @@
+# CI-only overlay. Do not include this file in normal local Compose commands:
+# the gha cache backend requires GitHub Actions' BuildKit runtime credentials.
+
+x-ingest-cache: &ingest-cache
+  cache_from:
+    - type=gha,scope=apex-ingest
+  cache_to:
+    - type=gha,mode=max,scope=apex-ingest
+
+x-control-cache: &control-cache
+  cache_from:
+    - type=gha,scope=apex-control
+  cache_to:
+    - type=gha,mode=max,scope=apex-control
+
+x-control-pg-cache: &control-pg-cache
+  cache_from:
+    - type=gha,scope=apex-control-pg
+  cache_to:
+    - type=gha,mode=max,scope=apex-control-pg
+
+x-provider-cache: &provider-cache
+  cache_from:
+    - type=gha,scope=apex-reference-providers
+  cache_to:
+    - type=gha,mode=max,scope=apex-reference-providers
+
+services:
+  ingest-gateway:
+    build:
+      <<: *ingest-cache
+
+  control-plane-api:
+    build:
+      <<: *control-cache
+
+  control-plane-api-oidc:
+    build:
+      <<: *control-cache
+
+  clickhouse-projection:
+    build:
+      <<: *provider-cache
+
+  archive-provider:
+    build:
+      <<: *provider-cache
+
+  control-plane-api-pg-a:
+    build:
+      <<: *control-pg-cache
+
+  control-plane-api-pg-b:
+    build:
+      <<: *control-pg-cache
+
+  ingest-gateway-feature-build:
+    profiles: [ci-build]
+    image: apex-event-ingest-pg-ref:latest
+    build:
+      context: ../..
+      dockerfile: apps/event-ingest/Dockerfile
+      <<: *ingest-cache
+      args:
+        BUILD_IMAGE: ${GATEWAY_BUILD_IMAGE:-rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
+        RUNTIME_IMAGE: ${GATEWAY_RUNTIME_IMAGE:-debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818}
+        CARGO_FEATURES: valkey,postgres

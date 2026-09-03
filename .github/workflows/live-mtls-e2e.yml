@@ -248,16 +248,15 @@ jobs:
           FP="$(tr -d '[:space:]' < live-mtls/secrets/ingest-http-client.sha256)"
           export APEX_BEARER_CERT_SHA256="$FP"
           export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.ci-cache.yaml"
           docker compose $P down -v --remove-orphans || true
-          docker compose $P build ingest-gateway clickhouse-projection archive-provider
-          # The optional-feature build is a separate artifact and broke
-          # separately: --features postgres compiles deploy/postgres/*.sql via
-          # include_str!, so a context omitting that directory fails outright
-          # and no image with the Postgres backends could be produced at all.
-          GATEWAY_CARGO_FEATURES=valkey,postgres docker compose $P build ingest-gateway
-          # Serve the default-feature image.
-          docker compose $P build ingest-gateway
+          # Build the default gateway and control images together while the
+          # providers build in parallel. The later runtime gates still start
+          # each image at its existing proof boundary.
+          docker compose $P build --parallel ingest-gateway control-plane-api clickhouse-projection archive-provider
+          # Validate the optional-feature artifact under its own image tag so
+          # it cannot overwrite the default image used by the live gateway.
+          docker compose $P --profile ci-build build ingest-gateway-feature-build
           # Named explicitly rather than bare `up -d`. This profile now also
           # defines the control gateway and its own secrets-init, and a bare
           # `up -d` would start those here too -- so a control-side init
@@ -296,7 +295,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.ci-cache.yaml"
           docker compose $P build control-plane-api
           # The --features postgres artifact is built and, more importantly,
           # *run* by the "Postgres-backed control gateway" step below, under
@@ -367,7 +366,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.ci-cache.yaml"
           docker compose $P run --rm control-fanout-verify || {
             echo "control fanout never delivered; gateway logs follow" >&2
             docker compose $P logs --no-color --tail 120 control-plane-api jetstream >&2
@@ -413,7 +412,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.ci-cache.yaml"
           transcript=/tmp/apex-ingest-sdk-proof.txt
           python gateway-ref/agent_submits_events.py \
             --endpoint 127.0.0.1:18445 \
@@ -488,7 +487,7 @@ jobs:
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.ci-cache.yaml"
           docker compose $P build control-plane-api-pg-a
           docker compose $P up -d --force-recreate control-plane-api-pg-a control-plane-api-pg-b
           for attempt in $(seq 1 90); do
@@ -533,7 +532,7 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.ci-cache.yaml"
           query() {
             docker compose $P exec -T control-postgres \
               psql -U apex -d apex_control -tAc "$1" | tr -d '[:space:]'
@@ -595,7 +594,7 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.control-valkey.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-pg.yaml -f compose.control-valkey.yaml -f compose.ci-cache.yaml"
           docker compose $P up -d --force-recreate control-valkey control-plane-api-pg-a control-plane-api-pg-b
           for attempt in $(seq 1 60); do
             state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep -E 'control-valkey|control-plane-api-pg' || true)"
@@ -649,7 +648,7 @@ jobs:
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-keycloak.yaml"
+          P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.control-keycloak.yaml -f compose.ci-cache.yaml"
           # Reuses the apex-control-plane-api-ref:latest image the control
           # gateway step above already built.
           docker compose $P up -d --force-recreate keycloak control-plane-api-oidc
