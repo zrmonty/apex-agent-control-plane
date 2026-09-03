@@ -8,7 +8,11 @@ Apex is a self-hosted, cloud-agnostic control plane for AI agents (observability
 
 **Status:** Phase 0 (event contract, Python SDK, hardened ingest admission, Security Alerts, durable outbox/fanout, storage contracts, Compose provider slots) is complete. The out-of-band (OOB) control gateway — originally scoped as Phase 0.5 — is also built and real: cooperative controls (`stop`/`pause`/`resume`/`inject`/`set_budget`/`resolve_hold`), a non-cooperative `force_stop` enacted by a dedicated supervisor process rather than the agent's own, durable per-command delivery tracking, and operator-facing bulk/list/cancel APIs. Phase 1 (operator UI wired to a live backend) has not started — the React UI is still a static preview with illustrative data and calls no backend. Don't assume the UI reflects real control-plane state.
 
-Four components have real, runnable implementations: `apps/event-ingest` (Rust gRPC ingest gateway), `apps/control-plane-api` (Rust gRPC OOB control gateway), `apps/agent-supervisor` (Rust process supervisor that enacts non-cooperative `force_stop`), and `packages/sdk-python` (Python instrumentation SDK, including the reference agent runtime that consumes control-plane-api's control channel). `crates/*` are still empty placeholder directories reserved for future extraction from `event-ingest`. `apps/operator-ui` is still a static Vite preview with no backend calls.
+Four components have real, runnable implementations: `apps/event-ingest` (Rust gRPC ingest gateway), `apps/control-plane-api` (Rust gRPC OOB control gateway), `apps/agent-supervisor` (Rust process supervisor that enacts non-cooperative `force_stop`), and `packages/sdk-python` (Python instrumentation SDK, including the reference agent runtime that consumes control-plane-api's control channel). The Rust workspace now owns reusable contract, domain, auth, security, and durability crates; applications depend on those shared boundaries rather than on one another. `apps/operator-ui` is still a static Vite preview with no backend calls.
+
+## Current execution focus
+
+Follow [docs/roadmap.md](docs/roadmap.md) as the execution source of truth. The only active work is the assessment-directed sequence: create one Rust workspace, extract shared crates, decouple durable admission from downstream fanout, define Apex governance interfaces, build a thin TypeScript MCP gateway, add one read-only RIA portfolio tool, and prove the live operator-visible vertical slice. Treat all other feature and phase roadmaps as paused unless work is required to unblock this sequence or fix a security defect, regression, or data-integrity issue.
 
 ## Commands
 
@@ -181,7 +185,7 @@ A separate binary from `control-plane-api`, one instance per supervised agent ru
 
 ```
 apps/            event-ingest, control-plane-api, agent-supervisor (all real), operator-ui (static preview, no backend calls), reference-providers (Python mTLS stub providers for local/CI)
-crates/           domain, event-contract, policy-engine, authz, cost-ledger, archive-provider, diagnostics -- all currently EMPTY placeholders
+crates/           apex-contract, apex-domain, apex-auth, apex-security, apex-durability (shared Rust foundations), with later policy/telemetry/cost crates still reserved
 packages/         sdk-python
 contracts/        proto/apex/v1 (versioned protobuf), jsonschema
 config/           profiles, policies, pricebooks

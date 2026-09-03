@@ -250,7 +250,6 @@ fn file_idempotency_covers_capacity_pending_abort_and_path_rejection() {
     std::fs::remove_dir_all(base).unwrap();
 }
 
-
 #[test]
 fn file_idempotency_maintains_committed_retention_and_reuses_capacity() {
     let base = std::env::temp_dir().join(format!(

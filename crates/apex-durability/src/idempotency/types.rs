@@ -12,6 +12,13 @@ pub struct IdempotencyReservation {
     pub(crate) token: u64,
 }
 
+impl IdempotencyReservation {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_token_for_test(token: u64) -> Self {
+        Self { token }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReservationResult {
     Reserved(IdempotencyReservation),
@@ -50,11 +57,7 @@ pub trait IdempotencyStore {
     ///
     /// Backends without durable retention state may keep the default no-op;
     /// production stores override this to reclaim capacity safely.
-    fn maintain(
-        &mut self,
-        _now_millis: u64,
-        _retention_millis: u64,
-    ) -> Result<(), GatewayError> {
+    fn maintain(&mut self, _now_millis: u64, _retention_millis: u64) -> Result<(), GatewayError> {
         Ok(())
     }
 }

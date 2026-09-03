@@ -315,4 +315,3 @@ fn postgres_outbox_parallel_enqueue_with_divergent_envelopes_conflicts() {
         "every losing replica must get a typed answer (conflict or already-pending)"
     );
 }
-

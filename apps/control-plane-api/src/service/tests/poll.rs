@@ -37,7 +37,7 @@ async fn an_agent_retrieves_the_stop_command_issued_against_it() {
 /// agent blocked on a specific hold. Recorded directly against the
 /// inbox (rather than through `submit_command`) because parameter-shape
 /// validation for this action's `hold_token`/`decision`/`reason` payload
-/// lives in `apex_event_ingest::validate_control_data`
+/// lives in `apex_durability::validate_control_data`
 /// (`apps/event-ingest/src/validation/control.rs`), a shared boundary
 /// this change deliberately leaves untouched (see the commit message);
 /// that crate still needs `resolve_hold` added to its own action
@@ -446,7 +446,7 @@ async fn poll_is_rate_limited_per_agent_after_the_ceiling() {
 #[tokio::test]
 async fn a_saturated_accelerator_concurrency_limit_falls_back_to_the_local_poll_ceiling() {
     let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(
-        apex_event_ingest::InMemoryEphemeralStore::new(),
+        apex_auth::InMemoryEphemeralStore::new(),
     )));
     let service = service_with_two_agents().with_ephemeral_store(store);
     let _permits = service
@@ -528,7 +528,7 @@ fn the_poll_rate_limit_key_is_disjoint_from_the_operator_one() {
     assert!(!poll.bucket.contains("agent-a"));
     // Both must satisfy the store's own key grammar, or every
     // check_rate_limit call errors and the shared ceiling never applies.
-    let mut store = apex_event_ingest::InMemoryEphemeralStore::new();
+    let mut store = apex_auth::InMemoryEphemeralStore::new();
     assert!(
         store
             .check_rate_limit(&poll, 1, Duration::from_secs(1))

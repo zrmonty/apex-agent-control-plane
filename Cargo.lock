@@ -60,7 +60,8 @@ dependencies = [
 name = "apex-control-plane-api"
 version = "0.1.0"
 dependencies = [
- "apex-event-ingest",
+ "apex-auth",
+ "apex-durability",
  "base64",
  "fs2",
  "jsonwebtoken",
@@ -96,10 +97,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "apex-event-ingest"
+name = "apex-durability"
 version = "0.1.0"
 dependencies = [
- "apex-auth",
  "apex-contract",
  "apex-domain",
  "apex-security",
@@ -113,13 +113,32 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde",
- "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tokio-postgres-rustls",
- "tonic",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "apex-event-ingest"
+version = "0.1.0"
+dependencies = [
+ "apex-auth",
+ "apex-contract",
+ "apex-domain",
+ "apex-durability",
+ "apex-security",
+ "async-nats",
+ "getrandom 0.4.3",
+ "prost",
+ "prost-types",
+ "rustls",
+ "sha2 0.10.9",
+ "tokio",
+ "tonic",
+ "tonic-prost",
  "zeroize",
 ]
 

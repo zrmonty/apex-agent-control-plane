@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use super::env::{
     AgentRevocationEnv, AgentTokenSource, DEFAULT_BIND_ADDR, OperatorTokenSource,
     admission_limit_value, agent_revocation_env_value, agent_token_source_value,
-    bounded_secs_value, control_postgres_url_value, command_retention_value,
+    bounded_secs_value, command_retention_value, control_postgres_url_value,
     control_valkey_host_value, expected_token_typ_value, fanout_interval_value,
-    global_subjects_value, inbox_scope_quota_value, nats_retry_attempts_value,
-    operator_token_source_value, metrics_bind_addr_value, resolve_bind_addr_value,
+    global_subjects_value, inbox_scope_quota_value, metrics_bind_addr_value,
+    nats_retry_attempts_value, operator_token_source_value, resolve_bind_addr_value,
 };
 use super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -88,7 +88,10 @@ fn agent_revocation_env_refuses_tuning_without_the_file() {
 
 #[test]
 fn agent_revocation_env_bounds_tuning_values() {
-    assert!(agent_revocation_env_value(Some("/run/secrets/agent-revocations"), Some("0"), None).is_err());
+    assert!(
+        agent_revocation_env_value(Some("/run/secrets/agent-revocations"), Some("0"), None)
+            .is_err()
+    );
     assert!(
         agent_revocation_env_value(Some("/run/secrets/agent-revocations"), Some("301"), None)
             .is_err()
@@ -167,7 +170,8 @@ fn bind_address_rejects_values_that_are_not_socket_addresses() {
 fn metrics_endpoint_is_optional_and_loopback_only() {
     assert_eq!(metrics_bind_addr_value(None).unwrap(), None);
     assert_eq!(
-        metrics_bind_addr_value(Some("127.0.0.1:9943")).unwrap()
+        metrics_bind_addr_value(Some("127.0.0.1:9943"))
+            .unwrap()
             .unwrap()
             .to_string(),
         "127.0.0.1:9943"
@@ -269,7 +273,10 @@ fn admission_limit_is_range_checked_rather_than_clamped() {
 #[test]
 fn inbox_scope_quota_defaults_sensibly_and_is_bounded_by_capacity() {
     assert_eq!(inbox_scope_quota_value(None, 1_000_000).unwrap(), 20_000);
-    assert_eq!(inbox_scope_quota_value(Some(""), 1_000_000).unwrap(), 20_000);
+    assert_eq!(
+        inbox_scope_quota_value(Some(""), 1_000_000).unwrap(),
+        20_000
+    );
     assert_eq!(inbox_scope_quota_value(Some("1"), 1_000_000).unwrap(), 1);
     assert_eq!(
         inbox_scope_quota_value(Some("1000000"), 1_000_000).unwrap(),
@@ -401,7 +408,7 @@ fn trusted_secret_path_defers_to_the_platform_private_key_permission_check() {
     // `private` branch must agree exactly with the shared permissions
     // primitive rather than silently ignoring it in either direction. Same
     // assertion `event-ingest`'s startup tests make about its own copy.
-    let restricted = apex_event_ingest::permissions::private_key_permissions_restricted(&canonical);
+    let restricted = apex_durability::permissions::private_key_permissions_restricted(&canonical);
     assert_eq!(
         trusted_secret_path(&key, &root, 4096, true, "key").is_ok(),
         restricted
@@ -436,8 +443,14 @@ fn fanout_interval_defaults_to_the_ingest_replay_cadence_and_is_bounded() {
         Duration::from_secs(5),
         "the default must stay pinned to event-ingest's replay cadence"
     );
-    assert_eq!(fanout_interval_value(Some("")).unwrap(), Duration::from_secs(5));
-    assert_eq!(fanout_interval_value(Some("1")).unwrap(), Duration::from_secs(1));
+    assert_eq!(
+        fanout_interval_value(Some("")).unwrap(),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        fanout_interval_value(Some("1")).unwrap(),
+        Duration::from_secs(1)
+    );
     assert_eq!(
         fanout_interval_value(Some("3600")).unwrap(),
         Duration::from_secs(3600)
@@ -506,7 +519,7 @@ fn control_postgres_url_is_this_crate_s_own_variable() {
         Some("postgres://apex@db/control".to_owned())
     );
 
-    // `apex_event_ingest::PostgresOutbox` hardcodes the `apex_event_outbox`
+    // `apex_durability::PostgresOutbox` hardcodes the `apex_event_outbox`
     // table name, so honouring event-ingest's variable here would silently
     // point the control gateway at the ingest gateway's outbox table -- where
     // each service's replay worker would claim and republish the other's rows
@@ -535,7 +548,7 @@ fn control_postgres_url_is_this_crate_s_own_variable() {
 #[cfg(feature = "test-support")]
 #[test]
 fn lazy_jetstream_publisher_connects_without_panicking_inside_the_worker_runtime() {
-    use apex_event_ingest::{EventPublisher, IngestRequest, NatsTlsConfig};
+    use apex_durability::{EventPublisher, IngestRequest, NatsTlsConfig};
 
     use super::fanout::LazyJetStreamPublisher;
 
@@ -544,7 +557,7 @@ fn lazy_jetstream_publisher_connects_without_panicking_inside_the_worker_runtime
         fs::write(base.join(name), b"-----BEGIN CERTIFICATE-----\nnot-real\n").unwrap();
     }
     let key = base.join("client.key").canonicalize().unwrap();
-    if !apex_event_ingest::permissions::private_key_permissions_restricted(&key) {
+    if !apex_durability::permissions::private_key_permissions_restricted(&key) {
         // Same reason the symlink case skips: the host's default file ACL is
         // not what this test is about, and `NatsTlsConfig::validated` would
         // refuse the key before any connection is attempted.

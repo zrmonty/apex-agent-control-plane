@@ -20,8 +20,7 @@ pub use memory::InMemoryOutbox;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresOutbox;
 pub use publisher::{
-    BacklogObserver, OutboxMaintainer, OutboxedPublisher, PendingEventReplayer,
-    spawn_fanout_worker,
+    BacklogObserver, OutboxMaintainer, OutboxedPublisher, PendingEventReplayer, spawn_fanout_worker,
 };
 pub use shared::SharedOutbox;
 pub use types::{EnqueueResult, EventOutbox, OutboxKey};

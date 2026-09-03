@@ -1,4 +1,4 @@
-//! Durable command outbox. Reuses `apex_event_ingest`'s `EventOutbox`
+//! Durable command outbox. Reuses `apex_durability`'s `EventOutbox`
 //! implementations (`InMemoryOutbox`, `FileOutbox`, and -- with the
 //! `postgres` feature -- `PostgresOutbox`) instead of forking a second
 //! durability story.
@@ -15,14 +15,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use apex_event_ingest::{EnqueueResult, EventOutbox, IngestRequest};
+use apex_durability::{EnqueueResult, EventOutbox, IngestRequest};
 // `GatewayError`/`GatewayErrorCode` are only referenced by bare name inside
 // `RecoveringPostgresOutbox` below, which is itself `postgres`-only -- a
 // non-`postgres` build never uses either name (the one unconditional
 // `GatewayError` reference, in the `From` impl just below, spells the type
 // out fully-qualified on purpose so that impl does not need this import).
 #[cfg(feature = "postgres")]
-use apex_event_ingest::{GatewayError, GatewayErrorCode};
+use apex_durability::{GatewayError, GatewayErrorCode};
 
 use crate::errors::CommandError;
 
@@ -146,7 +146,7 @@ impl ControlOutboxBackend {
 
     pub(crate) fn reschedule(
         &self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
         after: Duration,
     ) -> Result<(), CommandError> {
         self.with_lock_from_async(|outbox| outbox.reschedule(keys, after))??;
@@ -155,7 +155,7 @@ impl ControlOutboxBackend {
 
     pub(crate) fn quarantine(
         &self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
         reason: &'static str,
     ) -> Result<(), CommandError> {
         self.with_lock_from_async(|outbox| outbox.quarantine(keys, reason))??;
@@ -165,7 +165,7 @@ impl ControlOutboxBackend {
     pub fn quarantined_batch(
         &self,
         limit: usize,
-    ) -> Result<Vec<apex_event_ingest::OutboxKey>, CommandError> {
+    ) -> Result<Vec<apex_durability::OutboxKey>, CommandError> {
         Ok(self.with_lock(|outbox| outbox.quarantined_batch(limit))??)
     }
 
@@ -175,7 +175,7 @@ impl ControlOutboxBackend {
 
     pub fn requeue_quarantined(
         &self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
     ) -> Result<(), CommandError> {
         self.with_lock(|outbox| outbox.requeue_quarantined(keys))??;
         Ok(())
@@ -216,8 +216,8 @@ pub fn submit_command(
     })
 }
 
-impl From<apex_event_ingest::GatewayError> for CommandError {
-    fn from(error: apex_event_ingest::GatewayError) -> Self {
+impl From<apex_durability::GatewayError> for CommandError {
+    fn from(error: apex_durability::GatewayError) -> Self {
         CommandError::from_gateway_error(&error)
     }
 }
@@ -233,13 +233,13 @@ impl From<apex_event_ingest::GatewayError> for CommandError {
 pub struct RecoveringPostgresOutbox {
     connection_string: String,
     capacity: usize,
-    inner: apex_event_ingest::PostgresOutbox,
+    inner: apex_durability::PostgresOutbox,
 }
 
 #[cfg(feature = "postgres")]
 impl RecoveringPostgresOutbox {
     pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, GatewayError> {
-        let inner = apex_event_ingest::PostgresOutbox::connect(connection_string, capacity)?;
+        let inner = apex_durability::PostgresOutbox::connect(connection_string, capacity)?;
         Ok(Self {
             connection_string: connection_string.to_owned(),
             capacity,
@@ -249,12 +249,12 @@ impl RecoveringPostgresOutbox {
 
     fn with_retry<T>(
         &mut self,
-        mut operation: impl FnMut(&mut apex_event_ingest::PostgresOutbox) -> Result<T, GatewayError>,
+        mut operation: impl FnMut(&mut apex_durability::PostgresOutbox) -> Result<T, GatewayError>,
     ) -> Result<T, GatewayError> {
         match operation(&mut self.inner) {
             Ok(value) => Ok(value),
             Err(error) if error.code == GatewayErrorCode::Internal => {
-                let replacement = apex_event_ingest::PostgresOutbox::connect(
+                let replacement = apex_durability::PostgresOutbox::connect(
                     &self.connection_string,
                     self.capacity,
                 )?;
@@ -272,13 +272,13 @@ impl EventOutbox for RecoveringPostgresOutbox {
         self.with_retry(|inner| inner.enqueue(event))
     }
 
-    fn mark_complete(&mut self, key: &apex_event_ingest::OutboxKey) -> Result<(), GatewayError> {
+    fn mark_complete(&mut self, key: &apex_durability::OutboxKey) -> Result<(), GatewayError> {
         self.with_retry(|inner| inner.mark_complete(key))
     }
 
     fn mark_complete_many(
         &mut self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
     ) -> Result<(), GatewayError> {
         self.with_retry(|inner| inner.mark_complete_many(keys))
     }
@@ -304,7 +304,7 @@ impl EventOutbox for RecoveringPostgresOutbox {
 
     fn reschedule(
         &mut self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
         after: Duration,
     ) -> Result<(), GatewayError> {
         self.with_retry(|inner| inner.reschedule(keys, after))
@@ -312,7 +312,7 @@ impl EventOutbox for RecoveringPostgresOutbox {
 
     fn quarantine(
         &mut self,
-        keys: &[apex_event_ingest::OutboxKey],
+        keys: &[apex_durability::OutboxKey],
         reason: &'static str,
     ) -> Result<(), GatewayError> {
         self.with_retry(|inner| inner.quarantine(keys, reason))

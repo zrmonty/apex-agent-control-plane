@@ -41,7 +41,7 @@ enum InboxRecord {
 /// Append-only, fsync-backed delivery journal.
 ///
 /// Deliberately the same shape and the same disciplines as
-/// `apex_event_ingest::FileOutbox`: confined beneath an operator-owned base
+/// `apex_durability::FileOutbox`: confined beneath an operator-owned base
 /// directory, symlinks refused, bounded record and file sizes, an exclusive
 /// writer lock held for the process lifetime, and a startup replay that fails
 /// closed on malformed data rather than silently dropping a pending command.

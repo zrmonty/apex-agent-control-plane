@@ -3,7 +3,7 @@
 //! additionally funnels through [`ControlGatewayService::submit_force_stop`]'s
 //! dual-approval gate -- see [`crate::dual_approval`].
 
-use apex_event_ingest::IngestRequest;
+use apex_durability::IngestRequest;
 
 use crate::auth::{OperatorCaller, OperatorCredentialResolver};
 use crate::dual_approval::{ApprovalKey, ApprovalOutcome};
@@ -42,19 +42,15 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
         if !operator.allows_scope(&input.workspace_id, &input.namespace_id) {
             return Err(CommandError::scope_denied().into_status());
         }
-        let (command_id, _timestamp) =
-            resolve_command_id_and_timestamp(input.command_id.clone())
-                .map_err(CommandError::into_status)?;
+        let (command_id, _timestamp) = resolve_command_id_and_timestamp(input.command_id.clone())
+            .map_err(CommandError::into_status)?;
 
         let status_key = InboxKey {
             workspace_id: input.workspace_id.clone(),
             namespace_id: input.namespace_id.clone(),
             command_id: command_id.clone(),
         };
-        let already_recorded = self
-            .inbox_status(&status_key)
-            .await?
-            .is_some();
+        let already_recorded = self.inbox_status(&status_key).await?.is_some();
 
         let mut input = input;
         input.command_id = Some(command_id.clone());
@@ -71,7 +67,8 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
                 .submit(approval_key, fingerprint, operator.subject())
                 .map_err(CommandError::into_status)?;
             match outcome {
-                ApprovalOutcome::AwaitingSecond | ApprovalOutcome::AlreadyApprovedBySameOperator => {
+                ApprovalOutcome::AwaitingSecond
+                | ApprovalOutcome::AlreadyApprovedBySameOperator => {
                     return Ok(tonic::Response::new(proto::ControlCommandResponse {
                         duplicate: false,
                         command_id,
@@ -416,15 +413,16 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
                 };
                 slots[slot] = Some(filled);
             }
-            self.metrics.storage_healthy.store(
-                !any_storage_failure,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            self.metrics
+                .storage_healthy
+                .store(!any_storage_failure, std::sync::atomic::Ordering::Relaxed);
         }
 
         let results = slots
             .into_iter()
-            .map(|slot| slot.expect("every target index is filled exactly once, by phase 1 or phase 2"))
+            .map(|slot| {
+                slot.expect("every target index is filled exactly once, by phase 1 or phase 2")
+            })
             .collect();
 
         Ok(tonic::Response::new(proto::SubmitBulkCommandResponse {

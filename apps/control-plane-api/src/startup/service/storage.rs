@@ -11,9 +11,9 @@ use apex_control_plane_api::{
 #[cfg(feature = "postgres")]
 use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
 
-use super::super::env::{control_postgres_url, control_valkey_env, inbox_scope_quota};
 #[cfg(feature = "postgres")]
 use super::super::env::postgres_pool_size;
+use super::super::env::{control_postgres_url, control_valkey_env, inbox_scope_quota};
 
 const OUTBOX_CAPACITY: usize = 1_000_000;
 
@@ -84,7 +84,6 @@ fn inbox_base() -> PathBuf {
     }
 }
 
-
 /// Builds the optional cross-replica admission accelerator.
 ///
 /// Structurally `event-ingest`'s `build_ephemeral_store`, with one deliberate
@@ -112,10 +111,10 @@ pub(super) fn build_ephemeral_store(
     let configured = control_valkey_env()?;
     #[cfg(feature = "valkey")]
     {
-        use apex_event_ingest::{EphemeralStore, FallbackEphemeralStore, InMemoryEphemeralStore};
+        use apex_auth::{EphemeralStore, FallbackEphemeralStore, InMemoryEphemeralStore};
 
         if let Some(settings) = configured {
-            let config = apex_event_ingest::ValkeyConfig {
+            let config = apex_auth::ValkeyConfig {
                 host: settings.host,
                 port: settings.port,
                 username: settings.username,
@@ -171,7 +170,7 @@ pub(super) fn build_ephemeral_store(
 /// That last case is the one this function used to get wrong in the other
 /// direction. It unconditionally built a `FileOutbox`, so `--features postgres`
 /// changed nothing about the running binary -- it only forwarded the feature to
-/// `apex-event-ingest`. A deployment that believed it had a multi-writer
+/// `apex-durability`. A deployment that believed it had a multi-writer
 /// backend had a single-writer one, which is exactly the assumption
 /// cross-replica work would have been built on top of.
 pub(super) fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::Error>> {
@@ -191,7 +190,7 @@ pub(super) fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::
                     RecoveringPostgresOutbox::connect(&url, OUTBOX_CAPACITY).map_err(|error| {
                         format!("failed to open control outbox: {}", error.code.as_str())
                     })?;
-                outboxes.push(Box::new(outbox) as Box<dyn apex_event_ingest::EventOutbox + Send>);
+                outboxes.push(Box::new(outbox) as Box<dyn apex_durability::EventOutbox + Send>);
             }
             println!("apex-control-plane-api outbox backend: postgres");
             println!("apex-control-plane-api postgres outbox pool: {pool_size} connection(s)");
@@ -215,7 +214,7 @@ pub(super) fn open_outbox() -> Result<ControlOutboxBackend, Box<dyn std::error::
         std::env::var("APEX_CONTROL_OUTBOX_FILE").unwrap_or_else(|_| "commands.jsonl".to_owned()),
     );
     let file_outbox =
-        apex_event_ingest::FileOutbox::open(&outbox_file, &outbox_base, OUTBOX_CAPACITY)
+        apex_durability::FileOutbox::open(&outbox_file, &outbox_base, OUTBOX_CAPACITY)
             .map_err(|error| format!("failed to open control outbox: {}", error.code.as_str()))?;
     println!("apex-control-plane-api outbox backend: file");
     Ok(ControlOutboxBackend::new(Box::new(file_outbox)))

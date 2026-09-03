@@ -1,6 +1,6 @@
 //! Builds a validated `control` (`EventType::Control`) event envelope from an
 //! accepted `ControlCommandRequest` and hands it to
-//! `apex_event_ingest::IngestRequest::from_validated_transport` -- the exact
+//! `apex_durability::IngestRequest::from_validated_transport` -- the exact
 //! same admission gate the ingest data path enforces. This module never
 //! bypasses that gate; it only assembles the envelope fields that gate
 //! requires (actor, version, integrity hash) from gateway-owned constants
@@ -9,7 +9,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use apex_event_ingest::{GatewayError, IngestRequest, canonical_event_hash};
+use apex_durability::{GatewayError, IngestRequest, canonical_event_hash};
 use prost::Message;
 use prost_types::Struct as ProstStruct;
 use prost_types::value::Kind;
@@ -109,7 +109,7 @@ pub struct AcceptedCommand {
 pub fn pending_command_from_ingest_request(
     request: &IngestRequest,
 ) -> Result<PendingCommand, CommandError> {
-    let envelope = apex_event_ingest::proto::EventEnvelope::decode(request.envelope())
+    let envelope = apex_durability::proto::EventEnvelope::decode(request.envelope())
         .map_err(|_| CommandError::internal())?;
     if envelope.r#type != 9 {
         return Err(CommandError::internal());
@@ -124,12 +124,20 @@ pub fn pending_command_from_ingest_request(
             _ => None,
         })
         .ok_or_else(CommandError::internal)?;
-    let reason_code = match data.fields.get("reason_code").and_then(|value| value.kind.as_ref()) {
+    let reason_code = match data
+        .fields
+        .get("reason_code")
+        .and_then(|value| value.kind.as_ref())
+    {
         Some(Kind::StringValue(value)) => Some(value.clone()),
         Some(Kind::NullValue(_)) | None => None,
         _ => return Err(CommandError::internal()),
     };
-    let parameters = match data.fields.get("parameters").and_then(|value| value.kind.as_ref()) {
+    let parameters = match data
+        .fields
+        .get("parameters")
+        .and_then(|value| value.kind.as_ref())
+    {
         Some(Kind::StructValue(value)) => value.encode_to_vec(),
         _ => return Err(CommandError::internal()),
     };
@@ -143,17 +151,18 @@ pub fn pending_command_from_ingest_request(
     // cooperative `stop` -- recorded correctly in the trace, delivered
     // wrongly to the one process (`apps/agent-supervisor`) that actually
     // acts on it.
-    let (action, reason_code) = if action == "stop" && reason_code.as_deref() == Some(FORCE_STOP_AUDIT_MARKER) {
-        ("force_stop".to_owned(), None)
-    } else if let Some(original) = reason_code
-        .as_deref()
-        .filter(|_| action == "stop")
-        .and_then(|value| value.strip_prefix(FORCE_STOP_AUDIT_PREFIX))
-    {
-        ("force_stop".to_owned(), Some(original.to_owned()))
-    } else {
-        (action, reason_code)
-    };
+    let (action, reason_code) =
+        if action == "stop" && reason_code.as_deref() == Some(FORCE_STOP_AUDIT_MARKER) {
+            ("force_stop".to_owned(), None)
+        } else if let Some(original) = reason_code
+            .as_deref()
+            .filter(|_| action == "stop")
+            .and_then(|value| value.strip_prefix(FORCE_STOP_AUDIT_PREFIX))
+        {
+            ("force_stop".to_owned(), Some(original.to_owned()))
+        } else {
+            (action, reason_code)
+        };
     Ok(PendingCommand {
         command_id: envelope.event_id,
         workspace_id: scope.workspace_id,
@@ -264,7 +273,7 @@ pub fn build_control_request(
         delivery_attempt: 0,
     };
 
-    // `apex_event_ingest::validation::control::validate_control_data` --
+    // `apex_durability::validation::control::validate_control_data` --
     // deliberately out of scope for this pass, see this crate's own
     // instruction not to modify `apps/event-ingest` -- hard-codes the set of
     // action names and the single `enforcement` literal a `control` event's
@@ -294,9 +303,13 @@ pub fn build_control_request(
     } else {
         input.reason_code.clone()
     };
-    let data = build_control_data(audit_action_name, audit_reason_code.as_deref(), input.parameters);
+    let data = build_control_data(
+        audit_action_name,
+        audit_reason_code.as_deref(),
+        input.parameters,
+    );
 
-    let envelope = apex_event_ingest::proto::EventEnvelope {
+    let envelope = apex_durability::proto::EventEnvelope {
         event_id: command_id.clone(),
         timestamp,
         r#type: 9, // EventType::CONTROL
@@ -304,16 +317,16 @@ pub fn build_control_request(
         run_id: input.run_id,
         parent_run_id: input.parent_run_id,
         trace_id: input.trace_id,
-        scope: Some(apex_event_ingest::proto::Scope {
+        scope: Some(apex_durability::proto::Scope {
             workspace_id: input.workspace_id,
             namespace_id: input.namespace_id,
             agent_group_ids: vec![],
         }),
-        actor: Some(apex_event_ingest::proto::Actor {
+        actor: Some(apex_durability::proto::Actor {
             r#type: 1, // ActorType::USER -- a human/automated operator, not the agent workload.
             id: operator.subject().to_owned(),
         }),
-        version: Some(apex_event_ingest::proto::Version {
+        version: Some(apex_durability::proto::Version {
             agent_code: GATEWAY_AGENT_CODE.to_owned(),
             prompt: GATEWAY_PROMPT_REVISION.to_owned(),
             model: GATEWAY_MODEL.to_owned(),
@@ -326,7 +339,7 @@ pub fn build_control_request(
     let event_hash = canonical_event_hash(&envelope_with_placeholder_integrity(&envelope))
         .map_err(|error| CommandError::from_gateway_error(&error))?;
     let mut envelope = envelope;
-    envelope.integrity = Some(apex_event_ingest::proto::Integrity {
+    envelope.integrity = Some(apex_durability::proto::Integrity {
         prev_hash: None,
         event_hash,
     });
@@ -345,10 +358,10 @@ pub fn build_control_request(
 /// events) but does not read `event_hash` itself, so a placeholder
 /// `Integrity` with an empty hash is enough to compute the real hash.
 fn envelope_with_placeholder_integrity(
-    envelope: &apex_event_ingest::proto::EventEnvelope,
-) -> apex_event_ingest::proto::EventEnvelope {
+    envelope: &apex_durability::proto::EventEnvelope,
+) -> apex_durability::proto::EventEnvelope {
     let mut clone = envelope.clone();
-    clone.integrity = Some(apex_event_ingest::proto::Integrity {
+    clone.integrity = Some(apex_durability::proto::Integrity {
         prev_hash: None,
         event_hash: String::new(),
     });
@@ -378,11 +391,8 @@ fn build_control_data(
     parameters: Option<ProstStruct>,
 ) -> ProstStruct {
     let mut fields = prost_types::Struct::default().fields;
-    fields.insert(
-        "action".to_owned(),
-        string_value(action),
-    );
-    // Always "cooperative": `apex_event_ingest::validation::control::validate_control_data`
+    fields.insert("action".to_owned(), string_value(action));
+    // Always "cooperative": `apex_durability::validation::control::validate_control_data`
     // (out of scope for this pass -- see `build_control_request`'s own
     // comment on why `force_stop` is recorded as `action: "stop"` here) hard-
     // codes this as the *only* literal it accepts for every control action,
@@ -559,8 +569,7 @@ pub(crate) fn now_unix_millis() -> u64 {
 /// keeps the end-to-end mapping expressible for the tests that pin it.
 #[cfg(test)]
 fn rfc3339_from_uuidv7(command_id: &str) -> Option<String> {
-    uuidv7_unix_millis(command_id)
-        .map(|millis| format_rfc3339_micros(u128::from(millis) * 1_000))
+    uuidv7_unix_millis(command_id).map(|millis| format_rfc3339_micros(u128::from(millis) * 1_000))
 }
 
 fn format_rfc3339_micros(total_micros: u128) -> String {
@@ -572,9 +581,7 @@ fn format_rfc3339_micros(total_micros: u128) -> String {
     let hour = secs_of_day / 3600;
     let minute = (secs_of_day % 3600) / 60;
     let second = secs_of_day % 60;
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z")
 }
 
 /// Howard Hinnant's `civil_from_days`: converts a day count relative to the

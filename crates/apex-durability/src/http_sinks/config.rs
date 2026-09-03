@@ -307,10 +307,7 @@ mod tests {
     #[test]
     fn build_client_rejects_private_and_cgnat_destinations_by_default() {
         let base = std::env::temp_dir();
-        for endpoint in [
-            "https://10.0.0.5/v1/events",
-            "https://100.64.0.5/v1/events",
-        ] {
+        for endpoint in ["https://10.0.0.5/v1/events", "https://100.64.0.5/v1/events"] {
             let config = AuthenticatedHttpConfig {
                 endpoint: endpoint.to_owned(),
                 ca_file: base.join("ca.pem"),
@@ -349,10 +346,10 @@ mod tests {
         // their plain IPv4 form (loopback, RFC1918, link-local, CGNAT), not
         // the (looser) native IPv6 checks, which don't recognize them.
         for unsafe_ip in [
-            "::ffff:127.0.0.1",     // loopback
-            "::ffff:10.0.0.5",      // RFC1918 private
+            "::ffff:127.0.0.1",       // loopback
+            "::ffff:10.0.0.5",        // RFC1918 private
             "::ffff:169.254.169.254", // cloud metadata endpoint
-            "::ffff:100.64.0.5",    // CGNAT shared address space
+            "::ffff:100.64.0.5",      // CGNAT shared address space
         ] {
             let address: IpAddr = unsafe_ip.parse().unwrap();
             assert!(

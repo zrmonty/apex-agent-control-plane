@@ -3,7 +3,7 @@
 //! diagnostics stay safe to hand to an operator or an AI assistant: no raw
 //! transport errors, credentials, or command payload content ever land here.
 
-use apex_event_ingest::{GatewayError, GatewayErrorCode};
+use apex_durability::{GatewayError, GatewayErrorCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandErrorCode {

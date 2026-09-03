@@ -10,7 +10,7 @@
 //! is validated
 //! and canonicalized into a `control` event using the same admission rules
 //! `event-ingest` enforces on its data path
-//! (`apex_event_ingest::IngestRequest::from_validated_transport`), then
+//! (`apex_durability::IngestRequest::from_validated_transport`), then
 //! durably enqueued so it survives a crash before fanout, and later flows
 //! into the same queryable trace as everything else.
 //!
@@ -86,7 +86,7 @@ pub use service::{
 pub use status::{GatewayRuntimeMetrics, GatewayRuntimeSnapshot, GatewayShutdown};
 
 /// Maximum admitted `ControlCommandRequest` size, matching the ingest
-/// envelope ceiling (`apex_event_ingest::MAX_ENVELOPE_BYTES`) plus headroom
+/// envelope ceiling (`apex_durability::MAX_ENVELOPE_BYTES`) plus headroom
 /// for the outer request framing.
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 300 * 1024;
 
@@ -100,5 +100,5 @@ pub const MAX_CONTROL_REQUEST_BYTES: usize = 300 * 1024;
 pub const MAX_AGENT_REVOCATION_FILE_BYTES: usize = 256 * 1024;
 
 pub fn install_rustls_provider() {
-    apex_event_ingest::install_rustls_provider();
+    apex_durability::install_rustls_provider();
 }

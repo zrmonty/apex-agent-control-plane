@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use apex_event_ingest::InMemoryOutbox;
+use apex_auth::PeerIdentity;
+use apex_durability::InMemoryOutbox;
 use prost_types::Struct as ProstStruct;
 
 use crate::auth::{OperatorCaller, OperatorTokenAuthenticator, StaticOperatorTokenResolver};
@@ -15,7 +16,7 @@ pub(super) fn service() -> ControlGatewayService<StaticOperatorTokenResolver> {
         "op-token",
         OperatorCaller::scoped("operator:zack", ["acme/prod"]).unwrap(),
     );
-    let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> =
+    let outbox: Box<dyn apex_durability::EventOutbox + Send> =
         Box::new(InMemoryOutbox::new(64).unwrap());
     ControlGatewayService::new(
         OperatorTokenAuthenticator::new(resolver),
@@ -27,8 +28,8 @@ pub(super) fn service() -> ControlGatewayService<StaticOperatorTokenResolver> {
 /// SHA-256-of-leaf value, so a test can construct one directly without a
 /// TLS session; the live tests in `tests/live_control_poll.rs` are what
 /// prove the real extraction path.
-pub(super) fn peer(byte: u8) -> apex_event_ingest::PeerIdentity {
-    apex_event_ingest::PeerIdentity {
+pub(super) fn peer(byte: u8) -> PeerIdentity {
+    PeerIdentity {
         certificate_sha256: [byte; 32],
     }
 }
@@ -54,14 +55,14 @@ pub(super) fn service_with_two_agents() -> ControlGatewayService<StaticOperatorT
 
 pub(super) fn poll_request(
     bearer: &str,
-    peer: apex_event_ingest::PeerIdentity,
+    peer: PeerIdentity,
 ) -> tonic::Request<proto::PollCommandsRequest> {
     poll_request_for(bearer, peer, proto::PollCommandsRequest { max_commands: 0 })
 }
 
 pub(super) fn poll_request_for(
     bearer: &str,
-    peer: apex_event_ingest::PeerIdentity,
+    peer: PeerIdentity,
     body: proto::PollCommandsRequest,
 ) -> tonic::Request<proto::PollCommandsRequest> {
     let mut request = tonic::Request::new(body);

@@ -25,7 +25,7 @@
 //!   with `--features postgres`; setting it without that is a hard startup
 //!   error rather than a silent downgrade to the file backend. **It must
 //!   resolve to a database or schema of the control gateway's own.**
-//!   `apex_event_ingest::PostgresOutbox` hardcodes the `apex_event_outbox`
+//!   `apex_durability::PostgresOutbox` hardcodes the `apex_event_outbox`
 //!   table name, so pointing both services at one database gives them one
 //!   outbox table -- where each service's replay worker would claim the
 //!   other's rows (`FOR UPDATE SKIP LOCKED`) and republish them through its
@@ -131,7 +131,7 @@
 //! - `APEX_CONTROL_VALKEY_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD_FILE` /
 //!   `_CA_FILE` / `_CLIENT_CERT_FILE` / `_CLIENT_KEY_FILE` -- optional
 //!   **cross-replica** admission ceiling, reusing
-//!   `apex_event_ingest`'s `EphemeralStore`/`ValkeyEphemeralStore` rather than
+//!   `apex_durability`'s `EphemeralStore`/`ValkeyEphemeralStore` rather than
 //!   forking a second accelerator. Requires `--features valkey`; setting the
 //!   host without it is a hard startup error. Without it the ceiling is
 //!   process-local, so N replicas admit N x the configured limit.

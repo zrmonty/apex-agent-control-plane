@@ -71,10 +71,7 @@ struct FailingPublisher {
 }
 
 impl EventPublisher for FailingPublisher {
-    fn publish(
-        &mut self,
-        _event: &IngestRequest,
-    ) -> Result<crate::PublishOutcome, GatewayError> {
+    fn publish(&mut self, _event: &IngestRequest) -> Result<crate::PublishOutcome, GatewayError> {
         self.calls += 1;
         if self.fail {
             Err(GatewayError::publish_failed())
@@ -154,7 +151,7 @@ fn adapter_replays_pending_and_records_rejected_envelope_signals() {
         InMemoryOutbox::new(4).unwrap(),
     );
     let event = sample_request(EVENT);
-    outboxed.outbox.enqueue(&event).expect("seed pending");
+    outboxed.outbox_mut().enqueue(&event).expect("seed pending");
     let mut adapter = AuthenticatedIngestAdapter::new(IngestGateway::new(outboxed));
     adapter.replay_pending().expect("replay drains");
     assert_eq!(
@@ -207,7 +204,7 @@ impl IdempotencyStore for FailCommitStore {
         let token = self.next_token;
         self.next_token += 1;
         Ok(crate::ReservationResult::Reserved(
-            crate::IdempotencyReservation { token },
+            crate::IdempotencyReservation::from_token_for_test(token),
         ))
     }
 
@@ -454,17 +451,25 @@ fn a_first_submission_through_the_outbox_still_reports_accepted() {
     let mut gateway = IngestGateway::with_idempotency_store(publisher, Box::new(idempotency));
 
     assert_eq!(
-        gateway.ingest(&scope_caller(), sample_request(EVENT)).unwrap(),
+        gateway
+            .ingest(&scope_caller(), sample_request(EVENT))
+            .unwrap(),
         IngestOutcome::Accepted
     );
     assert!(
-        gateway.publisher().publisher().published_event_ids().is_empty(),
+        gateway
+            .publisher()
+            .publisher()
+            .published_event_ids()
+            .is_empty(),
         "admission must durably enqueue only -- fanout must not happen on this call stack"
     );
 
     // Driving the fanout worker's replay pass is what actually delivers the
     // durably-enqueued row.
-    gateway.replay_pending().expect("fanout worker pass drains the pending row");
+    gateway
+        .replay_pending()
+        .expect("fanout worker pass drains the pending row");
     assert_eq!(
         gateway.publisher().publisher().published_event_ids(),
         [EVENT.to_owned()]
@@ -473,7 +478,9 @@ fn a_first_submission_through_the_outbox_still_reports_accepted() {
     // The ordinary replay path: the idempotency store answers Duplicate before
     // the publisher is consulted at all.
     assert_eq!(
-        gateway.ingest(&scope_caller(), sample_request(EVENT)).unwrap(),
+        gateway
+            .ingest(&scope_caller(), sample_request(EVENT))
+            .unwrap(),
         IngestOutcome::Duplicate
     );
     assert_eq!(

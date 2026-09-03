@@ -20,8 +20,7 @@ fn replica_pair(
     ControlGatewayService<StaticOperatorTokenResolver>,
 ) {
     let build = || {
-        let service =
-            service().with_admission_limits(limit, std::time::Duration::from_secs(60));
+        let service = service().with_admission_limits(limit, std::time::Duration::from_secs(60));
         match &store {
             Some(store) => service.with_ephemeral_store(Arc::clone(store)),
             None => service,
@@ -68,7 +67,7 @@ async fn two_replicas_without_a_shared_store_admit_twice_the_ceiling() {
 #[tokio::test]
 async fn two_replicas_sharing_a_store_are_bounded_to_one_ceiling_between_them() {
     let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(
-        apex_event_ingest::InMemoryEphemeralStore::new(),
+        apex_auth::InMemoryEphemeralStore::new(),
     )));
     let replicas = replica_pair(8, Some(store));
     assert_eq!(accepted_across(&replicas, 64).await, 8);
@@ -81,41 +80,40 @@ async fn two_replicas_sharing_a_store_are_bounded_to_one_ceiling_between_them() 
 #[tokio::test]
 async fn a_dead_shared_store_falls_back_to_the_local_ceiling_rather_than_failing_open() {
     struct DeadStore;
-    impl apex_event_ingest::EphemeralStore for DeadStore {
+    impl apex_auth::EphemeralStore for DeadStore {
         fn check_rate_limit(
             &mut self,
             _key: &RateLimitKey,
             _limit: u32,
             _window: Duration,
-        ) -> Result<apex_event_ingest::RateLimitDecision, apex_event_ingest::EphemeralError>
-        {
-            Err(apex_event_ingest::EphemeralError::unavailable())
+        ) -> Result<apex_auth::RateLimitDecision, apex_auth::EphemeralError> {
+            Err(apex_auth::EphemeralError::unavailable())
         }
         fn increment_fingerprint(
             &mut self,
-            _key: &apex_event_ingest::FingerprintCounterKey,
+            _key: &apex_auth::FingerprintCounterKey,
             _window: Duration,
-        ) -> Result<u64, apex_event_ingest::EphemeralError> {
-            Err(apex_event_ingest::EphemeralError::unavailable())
+        ) -> Result<u64, apex_auth::EphemeralError> {
+            Err(apex_auth::EphemeralError::unavailable())
         }
         fn fingerprint_count(
             &mut self,
-            _key: &apex_event_ingest::FingerprintCounterKey,
-        ) -> Result<u64, apex_event_ingest::EphemeralError> {
-            Err(apex_event_ingest::EphemeralError::unavailable())
+            _key: &apex_auth::FingerprintCounterKey,
+        ) -> Result<u64, apex_auth::EphemeralError> {
+            Err(apex_auth::EphemeralError::unavailable())
         }
         fn set_deny_hint(
             &mut self,
-            _key: &apex_event_ingest::DenyHintKey,
+            _key: &apex_auth::DenyHintKey,
             _ttl: Duration,
-        ) -> Result<(), apex_event_ingest::EphemeralError> {
-            Err(apex_event_ingest::EphemeralError::unavailable())
+        ) -> Result<(), apex_auth::EphemeralError> {
+            Err(apex_auth::EphemeralError::unavailable())
         }
         fn is_denied(
             &mut self,
-            _key: &apex_event_ingest::DenyHintKey,
-        ) -> Result<bool, apex_event_ingest::EphemeralError> {
-            Err(apex_event_ingest::EphemeralError::unavailable())
+            _key: &apex_auth::DenyHintKey,
+        ) -> Result<bool, apex_auth::EphemeralError> {
+            Err(apex_auth::EphemeralError::unavailable())
         }
     }
     let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(DeadStore)));
@@ -129,43 +127,42 @@ async fn a_dead_shared_store_falls_back_to_the_local_ceiling_rather_than_failing
 #[tokio::test]
 async fn a_permissive_shared_store_cannot_raise_the_local_ceiling() {
     struct AlwaysAllow;
-    impl apex_event_ingest::EphemeralStore for AlwaysAllow {
+    impl apex_auth::EphemeralStore for AlwaysAllow {
         fn check_rate_limit(
             &mut self,
             _key: &RateLimitKey,
             limit: u32,
             _window: Duration,
-        ) -> Result<apex_event_ingest::RateLimitDecision, apex_event_ingest::EphemeralError>
-        {
-            Ok(apex_event_ingest::RateLimitDecision {
+        ) -> Result<apex_auth::RateLimitDecision, apex_auth::EphemeralError> {
+            Ok(apex_auth::RateLimitDecision {
                 allowed: true,
                 remaining: limit,
             })
         }
         fn increment_fingerprint(
             &mut self,
-            _key: &apex_event_ingest::FingerprintCounterKey,
+            _key: &apex_auth::FingerprintCounterKey,
             _window: Duration,
-        ) -> Result<u64, apex_event_ingest::EphemeralError> {
+        ) -> Result<u64, apex_auth::EphemeralError> {
             Ok(0)
         }
         fn fingerprint_count(
             &mut self,
-            _key: &apex_event_ingest::FingerprintCounterKey,
-        ) -> Result<u64, apex_event_ingest::EphemeralError> {
+            _key: &apex_auth::FingerprintCounterKey,
+        ) -> Result<u64, apex_auth::EphemeralError> {
             Ok(0)
         }
         fn set_deny_hint(
             &mut self,
-            _key: &apex_event_ingest::DenyHintKey,
+            _key: &apex_auth::DenyHintKey,
             _ttl: Duration,
-        ) -> Result<(), apex_event_ingest::EphemeralError> {
+        ) -> Result<(), apex_auth::EphemeralError> {
             Ok(())
         }
         fn is_denied(
             &mut self,
-            _key: &apex_event_ingest::DenyHintKey,
-        ) -> Result<bool, apex_event_ingest::EphemeralError> {
+            _key: &apex_auth::DenyHintKey,
+        ) -> Result<bool, apex_auth::EphemeralError> {
             Ok(false)
         }
     }
@@ -184,7 +181,7 @@ async fn a_permissive_shared_store_cannot_raise_the_local_ceiling() {
 async fn a_saturated_accelerator_concurrency_limit_falls_back_to_the_local_ceiling_rather_than_failing_shut()
  {
     let store: SharedEphemeralStore = Arc::new(Mutex::new(Box::new(
-        apex_event_ingest::InMemoryEphemeralStore::new(),
+        apex_auth::InMemoryEphemeralStore::new(),
     )));
     let service = service()
         .with_admission_limits(8, std::time::Duration::from_secs(60))
@@ -242,7 +239,7 @@ fn the_admission_key_is_namespaced_away_from_the_ingest_workload() {
     // Both components have to satisfy the store's own key grammar, or
     // every check_rate_limit call would fail InvalidKey and the shared
     // ceiling would silently never apply.
-    let mut store = apex_event_ingest::InMemoryEphemeralStore::new();
+    let mut store = apex_auth::InMemoryEphemeralStore::new();
     assert!(
         store
             .check_rate_limit(&key, 1, Duration::from_secs(1))

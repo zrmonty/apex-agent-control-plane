@@ -6,7 +6,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use apex_event_ingest::NatsTlsConfig;
+use apex_durability::NatsTlsConfig;
 
 use super::{optional, path};
 
@@ -118,7 +118,7 @@ pub(crate) fn control_postgres_url() -> Result<Option<String>, io::Error> {
 /// `APEX_CONTROL_POSTGRES_URL` is this crate's own variable, deliberately not
 /// `event-ingest`'s `APEX_POSTGRES_URL`.
 ///
-/// `apex_event_ingest::PostgresOutbox` hardcodes the table name
+/// `apex_durability::PostgresOutbox` hardcodes the table name
 /// `apex_event_outbox` (`deploy/postgres/outbox.sql`). Two services pointed at
 /// one database therefore share one outbox table, and that is not a cosmetic
 /// overlap: `event-ingest`'s replay worker claims pending rows with

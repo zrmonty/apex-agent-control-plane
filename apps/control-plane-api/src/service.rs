@@ -1,6 +1,6 @@
 //! The `ControlGateway` tonic service: authenticate the operator, validate
 //! and canonicalize the command into a `control` event, and durably enqueue
-//! it. Modeled on `apex_event_ingest`'s `AuthenticatedGrpcService`
+//! it. Modeled on `apex_durability`'s `AuthenticatedGrpcService`
 //! (`apps/event-ingest/src/auth/service.rs`), but with its own independent
 //! auth boundary and without any dependency on the ingest data path being
 //! reachable.
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use apex_event_ingest::{Caller, EphemeralStore, RateLimitKey};
+use apex_auth::{Caller, EphemeralStore, RateLimitKey};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
@@ -78,7 +78,7 @@ pub(crate) const MAX_BULK_COMMAND_TARGETS: usize = 64;
 /// The `RateLimitKey.namespace` every control-gateway admission counter lives
 /// under.
 ///
-/// `apex_event_ingest`'s `ephemeral::types::KEY_PREFIX` is the fixed literal
+/// `apex_durability`'s `ephemeral::types::KEY_PREFIX` is the fixed literal
 /// `apex:ingest`, and this crate deliberately does not fork that module to
 /// change it, so the *namespace component* is what separates the two services'
 /// keyspaces. It is a value `event-ingest` can never produce for its own
@@ -253,7 +253,7 @@ impl<R: OperatorCredentialResolver> ControlGatewayService<R> {
 
     /// Attaches the cross-replica admission counter.
     ///
-    /// Mirrors `apex_event_ingest::AuthenticatedGrpcService::with_ephemeral_store`
+    /// Mirrors `apex_durability::AuthenticatedGrpcService::with_ephemeral_store`
     /// exactly, including the "optional accelerator, local ceiling is the hard
     /// floor" contract: this store can only ever *deny* an admission that the
     /// local bucket would have allowed. It can never grant one.

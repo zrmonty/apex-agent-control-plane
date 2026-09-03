@@ -149,7 +149,9 @@ fn journal_recovers_from_a_torn_trailing_record() {
             FindingJournal::open(&scratch_path, &scratch_root, 4).expect("scratch journal opens");
         assert!(
             scratch
-                .append(finding_with_event_id("018f5f2a-7b00-7000-8000-000000000002"))
+                .append(finding_with_event_id(
+                    "018f5f2a-7b00-7000-8000-000000000002"
+                ))
                 .expect("scratch append succeeds")
         );
     }
@@ -200,7 +202,9 @@ fn journal_still_fails_closed_on_a_corrupt_middle_record_with_a_good_record_afte
             FindingJournal::open(&scratch_path, &scratch_root, 4).expect("scratch journal opens");
         assert!(
             scratch
-                .append(finding_with_event_id("018f5f2a-7b00-7000-8000-000000000002"))
+                .append(finding_with_event_id(
+                    "018f5f2a-7b00-7000-8000-000000000002"
+                ))
                 .expect("scratch append succeeds")
         );
         fs::read_to_string(&scratch_path).expect("scratch journal readable")

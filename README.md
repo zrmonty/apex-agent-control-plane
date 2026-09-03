@@ -4,7 +4,7 @@ Apex is a self-hosted control plane for AI agents. It is cloud-agnostic.
 
 Apex helps teams observe, govern, evaluate, secure, and control agent workloads. It runs on local hosts, on-premises systems, and cloud systems. Each agent action is a scoped event. Security, compliance, and cost controls stay near the runtime.
 
-> **Status:** Phase 0 is complete. It delivers the event contract, Python SDK (`Apex.connect`, gold-standard template, model execution attribution), hardened ingest admission, Security Alerts, durable outbox and fanout seams, storage contracts, and Compose provider slots. Phase 1 has started with the React operator UI scaffold and an out-of-band control-plane command gateway (`apps/control-plane-api`, Phase 0.5) is under active development. Live control-plane sessions, authenticated operator API access, and server-derived UI data remain later work. See [Phase 0 progress](docs/phase-0-progress.md).
+> **Status:** Phase 0 and the out-of-band control gateway baseline are complete. The active roadmap now focuses only on the assessment-directed Rust workspace refactor, decoupled durable admission and fanout, Apex governance interfaces, and one thin TypeScript MCP gateway with a read-only RIA vertical slice. All other roadmap work is on hold. See the [Apex execution roadmap](docs/roadmap.md).
 
 ## What Apex provides
 
@@ -110,7 +110,7 @@ Phase 0 supports the paths below. **Implemented** means the client or boundary i
 | Ingest → ClickHouse projection | Authenticated HTTPS POST; mTLS; optional bearer | Canonical event bytes; `X-Apex-Event-Id` | Client, reference provider, live-mTLS, gateway-ref |
 | Ingest → archive staging | Authenticated HTTPS PUT; mTLS; optional bearer; create-only keys | One event per event-id key; `If-None-Match: *` | Client and reference provider; backends: local, S3/MinIO, Azure Blob, GCS |
 | Operators → operator UI | Local React 19 + Vite preview; the browser is not an authorization boundary | Clearly labelled illustrative topology, connection workflow, and reserved operating routes | Phase 1 scaffold implemented; live API/session integration pending |
-| Operators → control-plane API (OOB commands) | gRPC; operator-token auth independent of the ingest data path | `stop` / `pause` / `resume` / `inject` / `set_budget` cooperative controls (ADR-0005), canonicalized into `control` events, durable command outbox (ADR-0006) | In progress (`apps/control-plane-api`); not yet merged, no authenticated UI session wiring |
+| Operators → control-plane API (OOB commands) | gRPC; operator-token auth independent of the ingest data path | `stop` / `pause` / `resume` / `inject` / `set_budget` cooperative controls (ADR-0005), canonicalized into `control` events, durable command outbox (ADR-0006) | Implemented; authenticated UI session wiring remains pending and is governed by the active roadmap |
 
 The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-staging`, required and explicit — there is no default-on path) binds one shared token to exactly one workload identity, scope set, and pinned client certificate. It is a single-agent staging fallback, not a multi-tenant credential store: do not point more than one agent identity at the same gateway through this path. Real multi-agent and multi-tenant fleets use SPIFFE/SPIRE workload identity instead (see [Frictionless Secure Agent Integration](docs/architecture/Frictionless%20Secure%20Agent%20Integration.md)).
 
@@ -152,7 +152,7 @@ Apex runs as several small containers. No image does more than one job. The defi
 
 Every service above drops all Linux capabilities and mounts its filesystem read-only except for an explicit data volume or `/tmp`. `ingest-gateway` also runs as a fixed non-root UID (`apps/event-ingest/Dockerfile`). `clickhouse-projection` and `archive-provider` do not: `apps/reference-providers/Dockerfile` has no `USER` directive and `compose.yaml` does not override it, so both currently run as root — a known hardening gap, not a deliberate choice, worth closing before either is treated as production-hardened rather than a reference implementation. Every service-to-service link is mTLS regardless; `clickhouse-projection` and `archive-provider` pin the exact client certificate fingerprint they accept and fail closed on anything else. See [Security and regulated deployment posture](#security-and-regulated-deployment-posture).
 
-Two more services are planned but not yet packaged as images: the out-of-band control gateway (`apps/control-plane-api`) and the operator UI (`apps/operator-ui`) both run today as a bare binary or a local dev server, not a container. See [Phase 0.5 progress](docs/phase-0.5-progress.md) for what is left before the control gateway gets its own `Dockerfile` and Compose entry.
+The out-of-band control gateway (`apps/control-plane-api`) has a `Dockerfile` and Compose entries. The operator UI (`apps/operator-ui`) remains a local dev server rather than a container. Further UI/session integration is part of the active vertical slice; unrelated UI expansion remains on hold.
 
 ## Design principles
 
@@ -194,8 +194,9 @@ flowchart LR
 
 ```text
 apps/
-  control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget); in progress
+  control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget); implemented
   event-ingest/            gRPC ingestion and event validation
+  mcp-gateway/             Thin TypeScript MCP data plane; planned by the active roadmap
   operator-ui/             Operations, compliance, evaluation, Cost Lens GUI
 crates/
   domain/                  Shared domain types and scope model
@@ -274,12 +275,7 @@ It includes usage and token accounting, requested versus effective model attribu
 
 ## Build order
 
-1. Implement [telemetry and control semantics](docs/architecture/Telemetry%20and%20Control%20Semantics.md): contracts, scope, idempotency, classification, policy, command lifecycle, and security-sensitive fields.
-2. Build Rust ingest, NATS JetStream, PostgreSQL control state, ClickHouse analytics, and the Python SDK.
-3. Deliver secure agent enrollment, identity, authorization, policy profiles, audit evidence, archive-provider contracts, and the security test harness.
-4. Build core GUI: Operations Home, Agent Story, Trace Explorer, Cost Lens actuals, diagnostics, and Compliance Center.
-5. Add Security Center, alerting and containment, HA deployment, workload mTLS, custom roles, approvals, and continuous policy monitoring.
-6. Add evaluation and replay, forecasts, anomaly detection, fleet visualization, correlated security detection, and advanced operations.
+The former build order is superseded. Follow the [Apex execution roadmap](docs/roadmap.md): Rust workspace refactor, decoupled durable admission and fanout, Apex governance interfaces, one thin TypeScript MCP gateway, one read-only RIA tool, and one live operator-visible vertical slice. Everything else is paused until that slice passes its completion gate.
 
 ## Contributing
 

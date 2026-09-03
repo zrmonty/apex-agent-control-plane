@@ -3,10 +3,10 @@
 //! Deliberately a copy of the discipline in
 //! `apps/event-ingest/src/startup/secrets.rs` rather than a shared import:
 //! those helpers live in that binary's `startup` module, which is not part of
-//! the `apex_event_ingest` library crate and therefore is not importable from
+//! the `apex_durability` library crate and therefore is not importable from
 //! here. The one piece that *is* public -- the platform-specific private-key
 //! permission check -- is reused rather than reimplemented
-//! (`apex_event_ingest::permissions::private_key_permissions_restricted`).
+//! (`apex_durability::permissions::private_key_permissions_restricted`).
 
 use std::fs;
 use std::io::{self, Read};
@@ -121,7 +121,7 @@ pub(crate) fn trusted_secret_path(
             format!("{label} is outside the trusted secret policy"),
         ));
     }
-    if private && !apex_event_ingest::permissions::private_key_permissions_restricted(&canonical) {
+    if private && !apex_durability::permissions::private_key_permissions_restricted(&canonical) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{label} permissions are too broad"),

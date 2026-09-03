@@ -202,11 +202,7 @@ impl IdempotencyStore for PostgresIdempotencyStore {
         }
     }
 
-    fn maintain(
-        &mut self,
-        _now_millis: u64,
-        retention_millis: u64,
-    ) -> Result<(), GatewayError> {
+    fn maintain(&mut self, _now_millis: u64, retention_millis: u64) -> Result<(), GatewayError> {
         // PostgreSQL's clock is authoritative for rows written by every
         // replica. The caller's wall clock is intentionally not used here.
         self.client

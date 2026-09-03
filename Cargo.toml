@@ -5,6 +5,7 @@ members = [
     "crates/apex-domain",
     "crates/apex-auth",
     "crates/apex-security",
+    "crates/apex-durability",
     "apps/event-ingest",
     "apps/control-plane-api",
     "apps/agent-supervisor",

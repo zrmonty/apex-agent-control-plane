@@ -219,7 +219,7 @@ fn hex(value: &str) -> String {
 /// admission namespace and nothing else.
 ///
 /// This is the half of the isolation story that the ceiling assertions cannot
-/// show. `apex_event_ingest`'s ephemeral key prefix is the fixed literal
+/// show. `apex_durability`'s ephemeral key prefix is the fixed literal
 /// `apex:ingest`, which this crate deliberately does not fork, so the
 /// *namespace component* plus a narrowed ACL key pattern is what keeps the two
 /// services' counters apart -- and a pattern that was accidentally widened to
@@ -317,7 +317,8 @@ async fn the_admission_ceiling_is_shared_across_replicas_and_survives_a_valkey_o
     // whole defect: an admission control that quietly scales with the replica
     // count is not the control that was configured.
     assert_eq!(
-        shared.accepted, limit,
+        shared.accepted,
+        limit,
         "combined admission across both replicas must equal the configured ceiling, not {} x it",
         attempts / limit.max(1)
     );

@@ -155,7 +155,8 @@ impl EventOutbox for FileOutbox {
             attempts: None,
             created_at_millis: Some(created_at_millis),
         })?;
-        self.pending_since_millis.insert(key.clone(), created_at_millis);
+        self.pending_since_millis
+            .insert(key.clone(), created_at_millis);
         self.pending.insert(key, event.clone());
         Ok(EnqueueResult::Enqueued)
     }

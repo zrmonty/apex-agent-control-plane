@@ -5,7 +5,7 @@
 //! accepted `stop`/`pause`/`inject` becomes an actual `control` event in the
 //! queryable trace instead of a row nobody reads.
 //!
-//! The publisher stack is `apex_event_ingest`'s, unmodified and unforked:
+//! The publisher stack is `apex_durability`'s, unmodified and unforked:
 //! [`AsyncNatsJetStreamClient`] -> [`NatsJetStreamTransport`] ->
 //! [`RetryingJetStreamTransport`] -> [`JetStreamPublisher`], the same four
 //! layers `apps/event-ingest/src/startup/service.rs` composes. What is new
@@ -40,7 +40,7 @@ use apex_control_plane_api::{
     ControlOutboxBackend, GatewayRuntimeMetrics, GatewayShutdown,
     spawn_fanout_worker_with_metrics_and_shutdown,
 };
-use apex_event_ingest::{
+use apex_durability::{
     AsyncNatsJetStreamClient, EventPublisher, GatewayError, IngestRequest, JetStreamPublisher,
     NatsJetStreamTransport, NatsTlsConfig, PublishOutcome, RetryingJetStreamTransport,
 };
@@ -49,8 +49,9 @@ use super::env::{fanout_interval, nats_config, nats_retry_attempts};
 
 /// The concrete publisher stack, spelled once so the lazy wrapper and its
 /// builder cannot drift apart.
-type ControlJetStreamPublisher =
-    JetStreamPublisher<RetryingJetStreamTransport<NatsJetStreamTransport<AsyncNatsJetStreamClient>>>;
+type ControlJetStreamPublisher = JetStreamPublisher<
+    RetryingJetStreamTransport<NatsJetStreamTransport<AsyncNatsJetStreamClient>>,
+>;
 
 /// An [`EventPublisher`] that connects on first publish rather than at
 /// construction.
@@ -147,9 +148,7 @@ fn connect_off_runtime(
                 tokio::runtime::RuntimeFlavor::MultiThread
             ) =>
         {
-            tokio::task::block_in_place(|| {
-                connect_off_thread(config, trusted_base, retry_attempts)
-            })
+            tokio::task::block_in_place(|| connect_off_thread(config, trusted_base, retry_attempts))
         }
         _ => connect_off_thread(config, trusted_base, retry_attempts),
     }

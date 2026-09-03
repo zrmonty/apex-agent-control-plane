@@ -383,10 +383,7 @@ mod capacity_estimate_tests {
 
     #[test]
     fn allows_when_estimate_plus_margin_is_below_capacity() {
-        assert_eq!(
-            capacity_decision(100, 1_000, 50),
-            CapacityDecision::Allow
-        );
+        assert_eq!(capacity_decision(100, 1_000, 50), CapacityDecision::Allow);
         // Exactly at the boundary (estimate + margin == capacity) must NOT
         // allow: the true count could equal capacity in the worst case.
         assert_eq!(
@@ -427,8 +424,14 @@ mod capacity_estimate_tests {
     fn zero_capacity_never_panics_and_denies() {
         // connect() already rejects capacity == 0, but the decision function
         // itself must still be total (no panics) for any input.
-        assert_eq!(capacity_decision(0, 0, capacity_margin(0)), CapacityDecision::Deny);
-        assert_eq!(capacity_decision(5, 0, capacity_margin(0)), CapacityDecision::Deny);
+        assert_eq!(
+            capacity_decision(0, 0, capacity_margin(0)),
+            CapacityDecision::Deny
+        );
+        assert_eq!(
+            capacity_decision(5, 0, capacity_margin(0)),
+            CapacityDecision::Deny
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! These exist because `--features postgres` used to change nothing about the
 //! running binary: `startup::service::storage::open_outbox` unconditionally built a
 //! `FileOutbox`, and the feature only forwarded the dependency to
-//! `apex-event-ingest`. Nothing in this repository could tell the difference,
+//! `apex-durability`. Nothing in this repository could tell the difference,
 //! because every other test either drives the crate in-process (choosing the
 //! backend itself) or drives the file-backed container.
 //!
@@ -222,7 +222,9 @@ async fn two_replicas_accept_one_command_id_exactly_once() {
         let response = joined
             .expect("submission task must not panic")
             .unwrap_or_else(|status| {
-                panic!("a concurrent duplicate submission failed instead of being recognised: {status}")
+                panic!(
+                    "a concurrent duplicate submission failed instead of being recognised: {status}"
+                )
             });
         assert_eq!(
             response.command_id, command_id,
@@ -264,7 +266,9 @@ async fn a_command_accepted_on_one_replica_is_pollable_from_the_other() {
     let mut request = tonic::Request::new(command);
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {operator}").parse().expect("valid metadata"),
+        format!("Bearer {operator}")
+            .parse()
+            .expect("valid metadata"),
     );
     operator_client
         .submit_command(request)
@@ -275,7 +279,10 @@ async fn a_command_accepted_on_one_replica_is_pollable_from_the_other() {
         .await
         .expect("replica B must serve the shared inbox");
     assert!(
-        response.commands.iter().any(|command| command.command_id == command_id),
+        response
+            .commands
+            .iter()
+            .any(|command| command.command_id == command_id),
         "replica B did not return the command accepted by replica A"
     );
     assert_eq!(response.agent_id, "reference-agent");

@@ -16,10 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Reuses the durable outbox, event-envelope validation/canonicalization, and
-# GatewayError taxonomy from the ingest admission core instead of forking
-# them. The OOB control gateway is a distinct authentication boundary and
-# transport, not a distinct durability or event-contract story.
-apex-event-ingest = { path = "../event-ingest" }
+# GatewayError taxonomy from shared crates instead of depending on the ingest
+# application. The OOB control gateway is a distinct authentication boundary
+# and transport, not a distinct durability or event-contract story.
+apex-auth = { path = "../../crates/apex-auth" }
+apex-durability = { path = "../../crates/apex-durability" }
 # Exclusive writer lock on the durable command-inbox journal, the same
 # primitive and the same version `event-ingest`'s `FileOutbox` uses for its own
 # journal. A second process appending to one journal would interleave delivery
@@ -38,9 +39,8 @@ prost-types = "0.14"
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
 # JWKS retrieval for the Keycloak resolver. Same client, same TLS stack, and
 # the same "trust only the configured CA, never a platform root store"
-# discipline as `event-ingest`'s HTTP sinks. Already present transitively
-# through `apex-event-ingest`; declared directly because this crate now uses
-# it in its own right.
+# discipline as the shared HTTPS sinks. Declared directly because this crate
+# uses it in its own right.
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -71,13 +71,13 @@ tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = []
-test-support = ["apex-event-ingest/test-support"]
-postgres = ["apex-event-ingest/postgres", "dep:postgres"]
+test-support = ["apex-auth/test-support", "apex-durability/test-support"]
+postgres = ["apex-durability/postgres", "dep:postgres"]
 # Cross-replica admission ceiling through `event-ingest`'s own Valkey
 # accelerator -- reused, not forked, the same rule the outbox and the JetStream
 # publisher already follow. Without it the ceiling is process-local, which with
 # N replicas means N times the configured limit.
-valkey = ["apex-event-ingest/valkey"]
+valkey = ["apex-auth/valkey"]
 
 [lints.rust]
 unsafe_code = "forbid"

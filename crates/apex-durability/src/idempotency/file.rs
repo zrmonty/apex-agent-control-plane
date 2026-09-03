@@ -350,11 +350,7 @@ impl IdempotencyStore for FileIdempotencyStore {
         self.pending.remove(&reservation);
     }
 
-    fn maintain(
-        &mut self,
-        now_millis: u64,
-        retention_millis: u64,
-    ) -> Result<(), GatewayError> {
+    fn maintain(&mut self, now_millis: u64, retention_millis: u64) -> Result<(), GatewayError> {
         let cutoff = now_millis.saturating_sub(retention_millis);
         let expired_keys: Vec<IdempotencyKey> = self
             .committed_at_millis

@@ -9,18 +9,18 @@
 //! agent's pending commands, and an agent credential would become a way to
 //! issue them.
 //!
-//! **Reused, not forked.** The verification stack is `apex_event_ingest`'s
+//! **Reused, not forked.** The verification stack is `apex_auth`'s
 //! own workload-identity model, unmodified:
 //!
-//! - [`apex_event_ingest::BearerTokenVerifier`] in *strict* mode does the
+//! - [`apex_auth::BearerTokenVerifier`] in *strict* mode does the
 //!   `authorization` header parsing, the fail-closed check that a TLS peer
 //!   certificate is present at all, and the per-(token, peer-certificate)
 //!   failure budget.
-//! - [`apex_event_ingest::BearerTokenResolver::resolve_with_peer`] is the seam
+//! - [`apex_auth::BearerTokenResolver::resolve_with_peer`] is the seam
 //!   a resolver implements, and its default implementation *refuses* any
 //!   resolver that has not explicitly opted into certificate binding -- so a
 //!   resolver that forgets to pin cannot silently be used on the strict path.
-//! - [`apex_event_ingest::Caller::authenticated_for_agent`] is what produces
+//! - [`apex_auth::Caller::authenticated_for_agent`] is what produces
 //!   the bound identity, applying the same `is_scope_identifier` grammar to
 //!   the agent id and scopes that the ingest data path applies.
 //!
@@ -49,10 +49,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use apex_event_ingest::{
-    BearerTokenResolver, BearerTokenVerifier, Caller, CallerVerifier, GatewayError,
-    GatewayErrorCode, PeerIdentity,
-};
+use apex_auth::{BearerTokenResolver, BearerTokenVerifier, CallerVerifier, PeerIdentity};
+use apex_durability::{Caller, GatewayError, GatewayErrorCode};
 use sha2::{Digest, Sha256};
 
 use crate::errors::CommandError;
@@ -237,19 +235,13 @@ pub fn parse_agent_token_table(
         let mut fields = entry.rsplitn(4, AGENT_ENTRY_SEPARATOR);
         let scopes = fields.next().unwrap_or_default().trim();
         let Some(agent_id) = fields.next().map(str::trim) else {
-            return Err(fail(
-                "expected token|cert_sha256|agent_id|scopes",
-            ));
+            return Err(fail("expected token|cert_sha256|agent_id|scopes"));
         };
         let Some(certificate_hex) = fields.next().map(str::trim) else {
-            return Err(fail(
-                "expected token|cert_sha256|agent_id|scopes",
-            ));
+            return Err(fail("expected token|cert_sha256|agent_id|scopes"));
         };
         let Some(token) = fields.next() else {
-            return Err(fail(
-                "expected token|cert_sha256|agent_id|scopes",
-            ));
+            return Err(fail("expected token|cert_sha256|agent_id|scopes"));
         };
         if token.len() < MIN_AGENT_TOKEN_BYTES {
             return Err(fail("agent token is shorter than 16 bytes"));
@@ -444,7 +436,7 @@ fn map_agent_auth_error(error: &GatewayError) -> CommandError {
 
 /// Derives the TLS peer identity of an incoming request.
 ///
-/// `apex_event_ingest::PeerIdentity::from_request` does exactly this, but is
+/// `apex_auth::PeerIdentity::from_request` does exactly this, but is
 /// `pub(crate)` there, and these passes deliberately only *read*
 /// `apps/event-ingest`. The public `PeerIdentity` type it produces is reused
 /// verbatim, so the fingerprint this returns is the same value
@@ -468,7 +460,8 @@ pub fn peer_identity_from_request<T>(request: &tonic::Request<T>) -> Option<Peer
     }
     let certs = request
         .extensions()
-        .get::<tonic::transport::server::TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>()?
+        .get::<tonic::transport::server::TlsConnectInfo<tonic::transport::server::TcpConnectInfo>>(
+        )?
         .peer_certs()?;
     let leaf = certs.first()?;
     Some(PeerIdentity {

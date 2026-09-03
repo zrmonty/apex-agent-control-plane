@@ -15,45 +15,29 @@ apex-contract = { path = "../../crates/apex-contract" }
 apex-auth = { path = "../../crates/apex-auth" }
 apex-domain = { path = "../../crates/apex-domain" }
 apex-security = { path = "../../crates/apex-security" }
+apex-durability = { path = "../../crates/apex-durability" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 prost = "0.14"
 prost-types = "0.14"
 getrandom = "0.4.3"
-fs2 = "0.4"
-# "query": Phase 0.6 item 4's ClickHouse sink adds `async_insert`/
-# `wait_for_async_insert` as request-level query parameters (see
-# `http_sinks/publishers.rs`) rather than folding them into the configured
-# endpoint string, which `AuthenticatedHttpConfig::build_client` deliberately
-# rejects if it carries a query string at all.
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-serde_jcs = "0.2"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 # tonic 0.14 split its Prost codec/codegen out into tonic-prost. "tls-ring"
 # replaces the old "tls" feature, matching this crate's rustls "ring" crypto
 # provider.
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "transport", "tls-ring"] }
+tonic-prost = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# PEM parsing only (RootCertStore population in postgres_transport.rs). Not
-# rustls-pemfile: that crate is unmaintained (RUSTSEC-2025-0134) and its own
-# advisory says to depend directly on the PEM support it wrapped, which has
-# lived in rustls-pki-types since 1.9.0.
-rustls-pki-types = { version = "1", optional = true }
 zeroize = "1.8"
-postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
-tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring", "webpki-roots"] }
-uuid = { version = "1", optional = true, features = ["v4"] }
 
 [features]
 default = []
-test-support = ["apex-domain/test-support"]
+test-support = ["apex-domain/test-support", "apex-durability/test-support"]
 # Optional Valkey (Redis-protocol) acceleration adapter. The in-memory
 # EphemeralStore remains available without this feature.
 valkey = ["apex-auth/valkey"]
 # Multi-process authoritative outbox + idempotency (deploy/postgres/*.sql).
-postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls-pki-types", "dep:uuid"]
+postgres = ["apex-durability/postgres"]
 
 # In-process gateway/adapter/publisher suite, split by scenario: auth
 # admission, JetStream publishing, envelope validation, idempotency/scope,

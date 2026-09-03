@@ -1,7 +1,7 @@
 //! Independent operator authentication for the OOB control gateway.
 //!
 //! This is a deliberately separate trust boundary from `event-ingest`'s
-//! workload bearer/mTLS auth (`apex_event_ingest::auth`): different
+//! workload bearer/mTLS auth (`apex_durability::auth`): different
 //! credential type, different resolver, different rate-limit bucket space.
 //! An ingest workload token must never be usable here, and an operator
 //! command token must never be usable on the ingest data path -- reusing one
@@ -167,7 +167,8 @@ impl StaticOperatorTokenResolver {
     /// Registers a token. The raw token is hashed immediately; only the
     /// digest is retained.
     pub fn with_token(mut self, token: &str, caller: OperatorCaller) -> Self {
-        self.tokens.insert(Sha256::digest(token.as_bytes()).into(), caller);
+        self.tokens
+            .insert(Sha256::digest(token.as_bytes()).into(), caller);
         self
     }
 }
@@ -382,9 +383,7 @@ impl<R: OperatorCredentialResolver> OperatorTokenAuthenticator<R> {
     }
 }
 
-fn extract_bearer_token(
-    metadata: &tonic::metadata::MetadataMap,
-) -> Result<String, CommandError> {
+fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, CommandError> {
     let mut values = metadata.get_all("authorization").iter();
     let Some(value) = values.next() else {
         return Err(CommandError::unauthenticated());

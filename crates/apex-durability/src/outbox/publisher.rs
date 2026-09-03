@@ -69,8 +69,11 @@ pub trait PendingEventReplayer {
 /// outbox's retention sweep only when its concrete publisher actually wraps
 /// one, mirroring how `PendingEventReplayer` conditionally exposes replay.
 pub trait OutboxMaintainer {
-    fn maintain_outbox(&mut self, now_millis: u64, retention_millis: u64)
-    -> Result<(), GatewayError>;
+    fn maintain_outbox(
+        &mut self,
+        now_millis: u64,
+        retention_millis: u64,
+    ) -> Result<(), GatewayError>;
 }
 
 /// Lets a generic `IngestGateway<P>` conditionally expose backlog depth/age

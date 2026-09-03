@@ -274,7 +274,7 @@ pub struct ListCommandsPage {
 ///
 /// The inbox deliberately does not know how scope is granted; it asks. The
 /// only implementation on the serving path wraps the authenticated
-/// `apex_event_ingest::Caller` and defers to its own `allows_scope`, so the
+/// `apex_durability::Caller` and defers to its own `allows_scope`, so the
 /// answer comes from the credential and nothing else.
 pub trait ScopeAuthorizer {
     fn allows(&self, workspace_id: &str, namespace_id: &str) -> bool;
@@ -557,13 +557,7 @@ fn is_recordable(command: &PendingCommand) -> bool {
         && is_identifier(&command.command_id)
         && matches!(
             command.action.as_str(),
-            "stop"
-                | "pause"
-                | "resume"
-                | "inject"
-                | "set_budget"
-                | "resolve_hold"
-                | "force_stop"
+            "stop" | "pause" | "resume" | "inject" | "set_budget" | "resolve_hold" | "force_stop"
         )
         && command.reason_code.as_deref().is_none_or(is_identifier)
         && command.issued_at.len() <= 64

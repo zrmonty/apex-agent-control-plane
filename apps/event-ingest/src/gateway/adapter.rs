@@ -1,8 +1,8 @@
 use super::IngestOutcome;
 use super::core::IngestGateway;
-use super::publisher::EventPublisher;
 use crate::outbox::{BacklogObserver, OutboxMaintainer, PendingEventReplayer};
 use crate::{GatewayError, GatewayErrorCode, SecuritySignal, proto, validation::Caller};
+use apex_durability::EventPublisher;
 
 pub struct AuthenticatedIngestAdapter<P: EventPublisher> {
     gateway: IngestGateway<P>,

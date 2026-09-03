@@ -119,9 +119,8 @@ impl AsyncNatsJetStreamClient {
         // sidesteps a second hazard: dropping the *old* `Runtime` blocks
         // until its workers join, and Tokio panics if that join happens on a
         // thread already inside any async execution context.
-        let built = std::thread::scope(|scope| {
-            scope.spawn(|| Self::build(&config, &trusted_base)).join()
-        });
+        let built =
+            std::thread::scope(|scope| scope.spawn(|| Self::build(&config, &trusted_base)).join());
         match built {
             Ok(Ok((runtime, jetstream))) => {
                 let old_runtime = std::mem::replace(&mut self.runtime, runtime);

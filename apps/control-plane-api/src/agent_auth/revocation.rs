@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use apex_event_ingest::{BearerTokenResolver, Caller, GatewayError, PeerIdentity};
+use apex_auth::{BearerTokenResolver, Caller, GatewayError, PeerIdentity};
 
 use super::parse_certificate_sha256;
 
@@ -111,7 +111,11 @@ pub struct AgentRevocationError(&'static str);
 
 impl std::fmt::Display for AgentRevocationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "agent revocation list configuration was refused: {}", self.0)
+        write!(
+            f,
+            "agent revocation list configuration was refused: {}",
+            self.0
+        )
     }
 }
 
@@ -163,9 +167,8 @@ fn read_revocation_file(
     path: &Path,
     max_bytes: usize,
 ) -> Result<HashSet<[u8; 32]>, AgentRevocationError> {
-    let file = std::fs::File::open(path).map_err(|_| {
-        AgentRevocationError("unable to read the configured agent revocation file")
-    })?;
+    let file = std::fs::File::open(path)
+        .map_err(|_| AgentRevocationError("unable to read the configured agent revocation file"))?;
     let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
     file.take(max_bytes as u64 + 1)
         .read_to_end(&mut bytes)

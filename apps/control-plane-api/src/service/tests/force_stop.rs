@@ -2,7 +2,7 @@
 //! requires two distinct operator approvals to record. See
 //! `crate::dual_approval`.
 
-use apex_event_ingest::InMemoryOutbox;
+use apex_durability::InMemoryOutbox;
 use prost_types::Struct as ProstStruct;
 
 use crate::auth::{OperatorCaller, StaticOperatorTokenResolver};
@@ -21,8 +21,8 @@ use super::support::*;
 /// does not care which agent_id it is, only that the credential is
 /// distinct, which `service_with_two_agents`'s existing pattern already
 /// proves the gateway supports).
-fn service_with_two_operators_and_one_agent()
--> ControlGatewayService<StaticOperatorTokenResolver> {
+fn service_with_two_operators_and_one_agent() -> ControlGatewayService<StaticOperatorTokenResolver>
+{
     let resolver = StaticOperatorTokenResolver::new()
         .with_token(
             "op-token-alice",
@@ -32,7 +32,7 @@ fn service_with_two_operators_and_one_agent()
             "op-token-bob",
             OperatorCaller::scoped("operator:bob", ["acme/prod"]).unwrap(),
         );
-    let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> =
+    let outbox: Box<dyn apex_durability::EventOutbox + Send> =
         Box::new(InMemoryOutbox::new(64).unwrap());
     let service = ControlGatewayService::new(
         OperatorTokenAuthenticator::new(resolver),
@@ -228,7 +228,9 @@ async fn only_force_stop_requires_dual_approval() {
             fields.insert(
                 "content_classification".to_owned(),
                 prost_types::Value {
-                    kind: Some(prost_types::value::Kind::StringValue("untrusted".to_owned())),
+                    kind: Some(prost_types::value::Kind::StringValue(
+                        "untrusted".to_owned(),
+                    )),
                 },
             );
             request.parameters = Some(ProstStruct {

@@ -19,7 +19,7 @@
 //! connect timeout *plus* name resolution (~3.85s against Docker's embedded
 //! resolver, measured), the store sits behind one process-wide mutex, and a
 //! single live ingest took 135 seconds. This type is deliberately the
-//! **primary** inside a [`apex_event_ingest::FallbackEphemeralStore`], never
+//! **primary** inside a [`apex_auth::FallbackEphemeralStore`], never
 //! used bare, so a failed dial trips that breaker and the next calls skip it
 //! entirely and serve from the local store, retrying on a 1s -> 30s backoff.
 //! One slow probe per cool-down, not one per request.
@@ -28,7 +28,7 @@
 //! blocking thread, so even that one probe cannot stall the tonic worker that
 //! is holding other requests.
 
-use apex_event_ingest::{
+use apex_auth::{
     DenyHintKey, EphemeralError, EphemeralErrorCode, EphemeralStore, FingerprintCounterKey,
     RateLimitDecision, RateLimitKey, ValkeyConfig, ValkeyEphemeralStore,
 };

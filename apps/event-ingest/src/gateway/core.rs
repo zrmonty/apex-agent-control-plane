@@ -5,7 +5,6 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use super::IngestOutcome;
-use super::publisher::{EventPublisher, PublishOutcome};
 use crate::outbox::{BacklogObserver, OutboxMaintainer, PendingEventReplayer};
 use crate::{
     GatewayError, GatewayErrorCode,
@@ -18,6 +17,7 @@ use crate::{
     },
     validation::{Caller, IngestRequest, is_lowercase_uuidv7, is_scope_identifier},
 };
+use apex_durability::{EventPublisher, PublishOutcome};
 
 /// Reserved operational scope for Phase 0.6 item 6's outbox backlog alerts.
 /// Security Findings are otherwise always tenant-scoped
@@ -88,7 +88,9 @@ impl SharedSecurityStore {
     /// panic would be a strictly worse outcome than continuing with
     /// whatever the backend held at the moment of the panic.
     fn guard(&self) -> std::sync::MutexGuard<'_, SecurityAlertBackend> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// True only for the in-memory backend. Mirrors the pre-pool

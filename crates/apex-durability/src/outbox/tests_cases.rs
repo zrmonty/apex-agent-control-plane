@@ -8,10 +8,7 @@ use std::io::Write as _;
 struct CountingPublisher(usize);
 
 impl EventPublisher for CountingPublisher {
-    fn publish(
-        &mut self,
-        _event: &IngestRequest,
-    ) -> Result<crate::PublishOutcome, GatewayError> {
+    fn publish(&mut self, _event: &IngestRequest) -> Result<crate::PublishOutcome, GatewayError> {
         self.0 += 1;
         Ok(crate::PublishOutcome::Published)
     }
@@ -90,7 +87,10 @@ fn a_quarantined_outbox_row_is_not_replayed_after_restart() {
     }
     let mut reopened = FileOutbox::open(&path, &base, 4).unwrap();
     assert!(reopened.pending_batch(4).unwrap().is_empty());
-    assert_eq!(reopened.enqueue(&event).unwrap(), EnqueueResult::AlreadyPending);
+    assert_eq!(
+        reopened.enqueue(&event).unwrap(),
+        EnqueueResult::AlreadyPending
+    );
     remove_dir_all(base).unwrap();
 }
 
@@ -115,7 +115,9 @@ fn quarantined_file_row_can_be_explicitly_requeued_after_restart() {
     {
         let mut outbox = FileOutbox::open(&path, &base, 4).unwrap();
         outbox.enqueue(&event).unwrap();
-        outbox.quarantine(std::slice::from_ref(&key), "test_poison").unwrap();
+        outbox
+            .quarantine(std::slice::from_ref(&key), "test_poison")
+            .unwrap();
     }
     let mut reopened = FileOutbox::open(&path, &base, 4).unwrap();
     assert_eq!(reopened.quarantined_batch(4).unwrap(), vec![key.clone()]);
@@ -298,8 +300,14 @@ fn file_outbox_settles_a_published_batch_in_one_journal_operation() {
         assert!(outbox.pending().is_empty());
     }
     let mut reopened = FileOutbox::open(&path, &base, 4).unwrap();
-    assert_eq!(reopened.enqueue(&first).unwrap(), EnqueueResult::AlreadyComplete);
-    assert_eq!(reopened.enqueue(&second).unwrap(), EnqueueResult::AlreadyComplete);
+    assert_eq!(
+        reopened.enqueue(&first).unwrap(),
+        EnqueueResult::AlreadyComplete
+    );
+    assert_eq!(
+        reopened.enqueue(&second).unwrap(),
+        EnqueueResult::AlreadyComplete
+    );
     remove_dir_all(base).unwrap();
 }
 
@@ -648,4 +656,3 @@ mod continuous_drain_signal {
         assert_eq!(outboxed.publisher().0, 1);
     }
 }
-

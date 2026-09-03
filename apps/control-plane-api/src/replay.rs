@@ -1,5 +1,5 @@
 //! Best-effort, retrying fanout of durably accepted commands to the primary
-//! trace (JetStream/ClickHouse, via an `apex_event_ingest::EventPublisher`).
+//! trace (JetStream/ClickHouse, via an `apex_durability::EventPublisher`).
 //!
 //! This worker is intentionally decoupled from the accept path
 //! ([`crate::outbox::submit_command`]): a command is durable the moment the
@@ -8,12 +8,12 @@
 //! only delays `delivered = true`; it never loses or re-orders-into-loss a
 //! command, and it never blocks a new `SubmitCommand` call.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
-use apex_event_ingest::{EventPublisher, OutboxKey};
+use apex_durability::{EventPublisher, OutboxKey};
 use sha2::{Digest, Sha256};
 
 use crate::outbox::ControlOutboxBackend;
@@ -102,7 +102,7 @@ where
             // and `block_on`, which panics on a tokio worker thread. See that
             // method's doc comment -- this exact call aborted the worker on
             // the first Postgres-backed container start.
-            let pending: Vec<apex_event_ingest::IngestRequest> = match backend
+            let pending: Vec<apex_durability::IngestRequest> = match backend
                 .with_lock_from_async(|outbox| outbox.pending_batch(FANOUT_BATCH_SIZE))
             {
                 Ok(Ok(pending)) => {
@@ -165,9 +165,8 @@ where
                     namespace_id: event.namespace_id().to_owned(),
                     event_id: event.event_id().to_owned(),
                 };
-                let publish_result = catch_unwind(AssertUnwindSafe(|| {
-                    publisher_guard.publish(&event)
-                }));
+                let publish_result =
+                    catch_unwind(AssertUnwindSafe(|| publisher_guard.publish(&event)));
                 match publish_result {
                     // Either outcome means the event is durable: Published
                     // because this call stored it, AlreadyComplete because a
@@ -215,8 +214,8 @@ where
                 }
             }
             if !completed.is_empty() {
-                let settle_result = backend
-                    .with_lock_from_async(|outbox| outbox.mark_complete_many(&completed));
+                let settle_result =
+                    backend.with_lock_from_async(|outbox| outbox.mark_complete_many(&completed));
                 if settle_result.is_err() {
                     if let Some(metrics) = &metrics {
                         metrics
@@ -239,9 +238,7 @@ where
                 let mut retry_groups: HashMap<Duration, Vec<OutboxKey>> = HashMap::new();
                 let mut quarantine = Vec::new();
                 for key in failed {
-                    let attempts = failures
-                        .entry(key.clone())
-                        .or_default();
+                    let attempts = failures.entry(key.clone()).or_default();
                     *attempts = attempts.saturating_add(1);
                     if *attempts >= MAX_REPLAY_ATTEMPTS {
                         quarantine.push(key);
@@ -264,11 +261,15 @@ where
                     }
                 }
                 if !quarantine.is_empty() {
-                    if backend.quarantine(&quarantine, "replay_attempts_exhausted").is_ok() {
+                    if backend
+                        .quarantine(&quarantine, "replay_attempts_exhausted")
+                        .is_ok()
+                    {
                         if let Some(metrics) = &metrics {
-                            metrics
-                                .quarantined_rows
-                                .fetch_add(quarantine.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            metrics.quarantined_rows.fetch_add(
+                                quarantine.len() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                         }
                         for key in quarantine {
                             failures.remove(&key);
@@ -296,7 +297,7 @@ where
 
 #[cfg(all(test, feature = "test-support"))]
 mod tests {
-    use apex_event_ingest::{GatewayError, InMemoryOutbox};
+    use apex_durability::{GatewayError, InMemoryOutbox};
 
     use super::*;
 
@@ -308,14 +309,14 @@ mod tests {
     impl EventPublisher for FlakyPublisher {
         fn publish(
             &mut self,
-            event: &apex_event_ingest::IngestRequest,
-        ) -> Result<apex_event_ingest::PublishOutcome, GatewayError> {
+            event: &apex_durability::IngestRequest,
+        ) -> Result<apex_durability::PublishOutcome, GatewayError> {
             if self.fail_next {
                 self.fail_next = false;
                 return Err(GatewayError::publish_failed());
             }
             self.published.push(event.event_id().to_owned());
-            Ok(apex_event_ingest::PublishOutcome::Published)
+            Ok(apex_durability::PublishOutcome::Published)
         }
     }
 
@@ -367,11 +368,11 @@ mod tests {
         }
     }
 
-    impl apex_event_ingest::EventOutbox for BlockingOutbox {
+    impl apex_durability::EventOutbox for BlockingOutbox {
         fn enqueue(
             &mut self,
-            event: &apex_event_ingest::IngestRequest,
-        ) -> Result<apex_event_ingest::EnqueueResult, GatewayError> {
+            event: &apex_durability::IngestRequest,
+        ) -> Result<apex_durability::EnqueueResult, GatewayError> {
             self.block();
             self.inner.enqueue(event)
         }
@@ -381,7 +382,7 @@ mod tests {
             self.inner.mark_complete(key)
         }
 
-        fn pending(&mut self) -> Vec<apex_event_ingest::IngestRequest> {
+        fn pending(&mut self) -> Vec<apex_durability::IngestRequest> {
             self.block();
             self.inner.pending()
         }
@@ -401,11 +402,11 @@ mod tests {
     /// where this hazard cannot occur.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fanout_worker_survives_an_outbox_that_blocks_on_its_own_runtime() {
-        let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> = Box::new(BlockingOutbox {
+        let outbox: Box<dyn apex_durability::EventOutbox + Send> = Box::new(BlockingOutbox {
             inner: InMemoryOutbox::new(16).unwrap(),
         });
         let backend = Arc::new(ControlOutboxBackend::new(outbox));
-        let request = apex_event_ingest::IngestRequest::new(
+        let request = apex_durability::IngestRequest::new(
             "018f0000-0000-7000-8000-000000000000",
             "acme",
             "prod",
@@ -447,15 +448,18 @@ mod tests {
         let remaining = backend
             .with_lock_from_async(|outbox| outbox.pending())
             .unwrap();
-        assert!(remaining.is_empty(), "the row must still be marked complete");
+        assert!(
+            remaining.is_empty(),
+            "the row must still be marked complete"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn fanout_worker_retries_after_a_transient_publish_failure() {
-        let outbox: Box<dyn apex_event_ingest::EventOutbox + Send> =
+        let outbox: Box<dyn apex_durability::EventOutbox + Send> =
             Box::new(InMemoryOutbox::new(16).unwrap());
         let backend = Arc::new(ControlOutboxBackend::new(outbox));
-        let request = apex_event_ingest::IngestRequest::new(
+        let request = apex_durability::IngestRequest::new(
             "018f0000-0000-7000-8000-000000000000",
             "acme",
             "prod",

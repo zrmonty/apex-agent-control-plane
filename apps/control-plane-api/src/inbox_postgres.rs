@@ -46,9 +46,9 @@ impl PostgresCommandInbox {
         if scope_quota == 0 || scope_quota > capacity {
             return Err(configuration_error());
         }
-        let mut client = apex_event_ingest::connect_postgres(connection_string)
+        let mut client = apex_durability::connect_postgres(connection_string)
             .map_err(|_| configuration_error())?;
-        apex_event_ingest::apply_postgres_schema(
+        apex_durability::apply_postgres_schema(
             &mut client,
             INBOX_SCHEMA_LOCK,
             include_str!("../../../deploy/postgres/control_inbox.sql"),

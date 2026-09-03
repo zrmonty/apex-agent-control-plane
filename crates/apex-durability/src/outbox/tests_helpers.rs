@@ -277,7 +277,10 @@ fn memory_outbox_oldest_pending_millis_is_none_when_empty_and_tracks_the_oldest_
     let first = sample_event("018f5c91-2d88-7c00-8000-000000000001");
     outbox.enqueue(&first).unwrap();
     let age_after_first = outbox.oldest_pending_millis().unwrap();
-    assert!(age_after_first.is_some(), "one pending row must report an age");
+    assert!(
+        age_after_first.is_some(),
+        "one pending row must report an age"
+    );
 
     // A second, later-enqueued row must never make the reported age
     // *younger* -- `oldest_pending_millis` always tracks the OLDEST row.
@@ -321,7 +324,9 @@ fn memory_outbox_quarantine_clears_and_requeue_restarts_the_pending_age() {
         namespace_id: "prod".into(),
         event_id: event.event_id.clone(),
     };
-    outbox.quarantine(std::slice::from_ref(&key), "test").unwrap();
+    outbox
+        .quarantine(std::slice::from_ref(&key), "test")
+        .unwrap();
     assert_eq!(
         outbox.oldest_pending_millis().unwrap(),
         None,
@@ -410,7 +415,9 @@ fn file_outbox_requeue_after_quarantine_restarts_the_pending_age() {
         namespace_id: "prod".into(),
         event_id: event.event_id.clone(),
     };
-    outbox.quarantine(std::slice::from_ref(&key), "test").unwrap();
+    outbox
+        .quarantine(std::slice::from_ref(&key), "test")
+        .unwrap();
     assert_eq!(outbox.oldest_pending_millis().unwrap(), None);
     outbox.requeue_quarantined(&[key]).unwrap();
     assert!(outbox.oldest_pending_millis().unwrap().is_some());
