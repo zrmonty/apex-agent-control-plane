@@ -143,6 +143,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-policy"
+version = "0.1.0"
+dependencies = [
+ "apex-domain",
+ "thiserror",
+]
+
+[[package]]
 name = "apex-security"
 version = "0.1.0"
 dependencies = [

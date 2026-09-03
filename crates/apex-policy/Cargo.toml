@@ -1,0 +1,12 @@
+[package]
+name = "apex-policy"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+apex-domain = { version = "0.1.0", path = "../apex-domain" }
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
