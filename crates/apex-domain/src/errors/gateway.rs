@@ -73,7 +73,7 @@ impl GatewayError {
         Self::new(GatewayErrorCode::IdempotencyConflict)
     }
 
-    pub(crate) fn new(code: GatewayErrorCode) -> Self {
+    pub fn new(code: GatewayErrorCode) -> Self {
         match code {
             GatewayErrorCode::Unauthenticated => Self {
                 code,
@@ -360,7 +360,7 @@ impl GatewayError {
         }
     }
 
-    pub(crate) fn grpc_status_value(&self) -> tonic::Status {
+    pub fn grpc_status_value(&self) -> tonic::Status {
         let code = match self.grpc_status() {
             "ABORTED" => tonic::Code::Aborted,
             "UNAUTHENTICATED" => tonic::Code::Unauthenticated,
@@ -485,3 +485,4 @@ impl GatewayError {
         }
     }
 }
+

@@ -53,3 +53,5 @@ Write-Output 'SAFE'
     }
     String::from_utf8_lossy(&output.stdout).trim() == "SAFE"
 }
+
+

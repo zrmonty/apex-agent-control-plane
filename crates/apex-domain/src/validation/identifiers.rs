@@ -1,4 +1,4 @@
-pub(crate) fn is_lowercase_uuidv7(value: &str) -> bool {
+pub fn is_lowercase_uuidv7(value: &str) -> bool {
     value.len() == 36
         && value.as_bytes().get(8) == Some(&b'-')
         && value.as_bytes().get(13) == Some(&b'-')
@@ -81,7 +81,7 @@ fn four_digits(value: &[u8]) -> u32 {
         + u32::from(value[3] - b'0')
 }
 
-pub(crate) fn is_scope_identifier(value: &str) -> bool {
+pub fn is_scope_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && !value.contains("..")
@@ -89,3 +89,4 @@ pub(crate) fn is_scope_identifier(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
+

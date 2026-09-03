@@ -272,3 +272,5 @@ fn looks_like_encoded_secret(text: &str) -> bool {
     let hexish = compact.bytes().all(|byte| byte.is_ascii_hexdigit());
     base64ish && (hexish || compact.len() >= 48)
 }
+
+

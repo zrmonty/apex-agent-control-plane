@@ -16,4 +16,6 @@ pub use caller::Caller;
 pub use canonical::canonical_event_hash;
 pub use request::IngestRequest;
 
-pub(crate) use identifiers::{is_lowercase_uuidv7, is_scope_identifier};
+pub use identifiers::{is_lowercase_uuidv7, is_scope_identifier};
+
+

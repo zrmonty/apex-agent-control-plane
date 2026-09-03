@@ -71,10 +71,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-domain"
+version = "0.1.0"
+dependencies = [
+ "apex-contract",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "tonic",
+]
+
+[[package]]
 name = "apex-event-ingest"
 version = "0.1.0"
 dependencies = [
  "apex-contract",
+ "apex-domain",
  "async-nats",
  "fs2",
  "getrandom 0.4.3",

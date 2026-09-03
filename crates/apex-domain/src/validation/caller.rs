@@ -17,8 +17,8 @@ impl Caller {
     /// Internal test/seam constructor for callers that do not represent an
     /// agent workload. Production admission rejects unbound callers; external
     /// resolvers must use `authenticated_for_agent`.
-    #[cfg(test)]
-    pub(crate) fn authenticated(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn authenticated(
         subject: impl Into<String>,
         allowed_scopes: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
@@ -73,7 +73,7 @@ impl Caller {
         })
     }
 
-    pub(crate) fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.authenticated
             && self
                 .subject

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 apex-contract = { path = "../../crates/apex-contract" }
+apex-domain = { path = "../../crates/apex-domain" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 prost = "0.14"
 prost-types = "0.14"
@@ -46,7 +47,7 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 
 [features]
 default = []
-test-support = []
+test-support = ["apex-domain/test-support"]
 # Optional Valkey (Redis-protocol) acceleration adapter. The in-memory
 # EphemeralStore remains available without this feature.
 valkey = ["dep:redis"]

@@ -15,11 +15,11 @@ use crate::{GatewayError, GatewayErrorCode, MAX_ENVELOPE_BYTES, proto};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestRequest {
-    pub(crate) event_id: String,
-    pub(crate) workspace_id: String,
-    pub(crate) namespace_id: String,
-    pub(crate) scope_key: String,
-    pub(crate) envelope: Vec<u8>,
+    pub event_id: String,
+    pub workspace_id: String,
+    pub namespace_id: String,
+    pub scope_key: String,
+    pub envelope: Vec<u8>,
 }
 
 impl IngestRequest {
@@ -65,7 +65,7 @@ impl IngestRequest {
         canonical_event_hash(envelope)
     }
 
-    pub(crate) fn scope_key(&self) -> &str {
+    pub fn scope_key(&self) -> &str {
         &self.scope_key
     }
 
@@ -88,7 +88,7 @@ impl IngestRequest {
     /// just to retain access to it on the error path. The public, owned
     /// entry point above simply borrows through to this one so there is a
     /// single implementation of the admission rules.
-    pub(crate) fn from_validated_transport_ref(
+    pub fn from_validated_transport_ref(
         envelope: &proto::EventEnvelope,
     ) -> Result<Self, GatewayError> {
         if envelope.encoded_len() > MAX_ENVELOPE_BYTES {
@@ -191,3 +191,5 @@ impl IngestRequest {
         })
     }
 }
+
+

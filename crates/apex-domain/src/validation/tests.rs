@@ -454,3 +454,5 @@ fn canonical_hash_and_transport_validation_cover_missing_and_invalid_fields() {
         GatewayErrorCode::InvalidEventId
     );
 }
+
+

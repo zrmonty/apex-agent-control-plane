@@ -7,20 +7,25 @@ pub use apex_contract::{RedactedProstCodec, RedactedProstDecoder, RedactedProstE
 mod auth;
 mod backoff;
 mod ephemeral;
-mod errors;
 mod gateway;
 mod http_sinks;
 mod idempotency;
 mod nats;
 mod outbox;
-pub mod permissions;
+pub mod permissions {
+    pub use apex_domain::permissions::private_key_permissions_restricted;
+}
 mod persistence;
 #[cfg(feature = "postgres")]
 mod postgres_transport;
 mod publisher;
 mod security;
 mod sinks;
-mod validation;
+pub mod validation {
+    pub use apex_domain::{Caller, IngestRequest, canonical_event_hash};
+    pub use apex_domain::{is_lowercase_uuidv7, is_scope_identifier};
+}
+
 pub use auth::{
     AuthenticatedGrpcService, BearerTokenResolver, BearerTokenVerifier, CallerVerifier,
     PeerIdentity, bounded_event_ingest_server,
@@ -31,7 +36,7 @@ pub use ephemeral::{
 };
 #[cfg(feature = "valkey")]
 pub use ephemeral::{ValkeyConfig, ValkeyEphemeralStore};
-pub use errors::{
+pub use apex_domain::{
     DiagnosticCorrelation, DiagnosticEvidence, DiagnosticFailure, DiagnosticScope,
     GatewayDiagnosticReport, GatewayError, GatewayErrorCode, RedactionSummary,
 };
@@ -68,8 +73,8 @@ pub use sinks::{
     ArchivePublisher, ClickHousePublisher, DurableEventSink, DurableFanoutPublisher,
     RetryingDurableSink,
 };
-pub use validation::{Caller, IngestRequest, canonical_event_hash};
-pub(crate) use validation::{is_lowercase_uuidv7, is_scope_identifier};
+pub use apex_domain::{Caller, IngestRequest, canonical_event_hash};
+pub(crate) use apex_domain::{is_lowercase_uuidv7, is_scope_identifier};
 
 /// Install the explicitly selected ring provider before any TLS client or
 /// server is constructed. This keeps reqwest/async-nats on the same provider
@@ -80,6 +85,6 @@ pub fn install_rustls_provider() {
 }
 
 /// Maximum admitted serialized event-envelope size: 256 KiB.
-pub const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
+pub use apex_domain::MAX_ENVELOPE_BYTES;
 pub const MAX_JETSTREAM_SUBJECT_BYTES: usize = 256;
 pub const DEFAULT_IDEMPOTENCY_CAPACITY: usize = 50_000;
