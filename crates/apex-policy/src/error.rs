@@ -64,3 +64,48 @@ impl GovernanceInputError {
         }
     }
 }
+
+/// A content-free operational failure returned by a governance adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum GovernanceError {
+    /// The authorization service could not make a decision.
+    #[error("authorization service unavailable")]
+    AuthorizationUnavailable,
+    /// The policy service could not provide policy metadata.
+    #[error("policy service unavailable")]
+    PolicyUnavailable,
+    /// Apex could not durably admit a tool execution event.
+    #[error("durable event admission failed")]
+    EventAdmissionFailed,
+    /// The approval service could not process an approval request.
+    #[error("approval service unavailable")]
+    ApprovalUnavailable,
+    /// The adapter encountered a failure without a safe public classification.
+    #[error("governance service failed")]
+    Internal,
+}
+
+impl GovernanceError {
+    /// Returns the stable machine-readable error code.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorizationUnavailable => "AUTHORIZATION_UNAVAILABLE",
+            Self::PolicyUnavailable => "POLICY_UNAVAILABLE",
+            Self::EventAdmissionFailed => "EVENT_ADMISSION_FAILED",
+            Self::ApprovalUnavailable => "APPROVAL_UNAVAILABLE",
+            Self::Internal => "INTERNAL_FAILURE",
+        }
+    }
+
+    /// Returns whether retrying may succeed without changing the request.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::AuthorizationUnavailable
+                | Self::PolicyUnavailable
+                | Self::EventAdmissionFailed
+                | Self::ApprovalUnavailable
+        )
+    }
+}

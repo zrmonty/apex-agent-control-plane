@@ -5,10 +5,12 @@
 mod error;
 mod types;
 
-pub use error::{GovernanceInputError, IdentifierKind};
+pub use error::{GovernanceError, GovernanceInputError, IdentifierKind};
 pub use types::{
-    ActionName, BackendName, EventId, FieldPath, GovernanceScope, PolicyId, ReasonCode,
-    ResourceName, RunId, SpanId, ToolName, TraceContext, TraceId,
+    ActionName, ApprovalAction, ApprovalDecision, ApprovalOutcome, AuthorizationDecision,
+    AuthorizationOutcome, AuthorizationRequest, BackendName, DataClassification, EventId,
+    FieldPath, GovernanceScope, PolicyId, PolicySnapshot, ReasonCode, ResourceName, RunId, SpanId,
+    ToolName, TraceContext, TraceId,
 };
 
 #[cfg(test)]
