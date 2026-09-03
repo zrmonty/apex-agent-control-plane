@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-apex-domain = { path = "../apex-domain" }
+apex-domain = { version = "0.1.0", path = "../apex-domain" }
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "transport", "tls-ring"] }
@@ -17,7 +17,7 @@ test-support = []
 valkey = ["dep:redis"]
 
 [dev-dependencies]
-apex-domain = { path = "../apex-domain", features = ["test-support"] }
+apex-domain = { version = "0.1.0", path = "../apex-domain", features = ["test-support"] }
 
 [lints.rust]
 unsafe_code = "forbid"

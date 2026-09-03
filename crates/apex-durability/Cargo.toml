@@ -5,9 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-apex-contract = { path = "../apex-contract" }
-apex-domain = { path = "../apex-domain" }
-apex-security = { path = "../apex-security" }
+apex-contract = { version = "0.1.0", path = "../apex-contract" }
+apex-domain = { version = "0.1.0", path = "../apex-domain" }
+apex-security = { version = "0.1.0", path = "../apex-security" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 fs2 = "0.4"
 getrandom = "0.4.3"

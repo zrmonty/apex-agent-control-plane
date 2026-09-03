@@ -11,11 +11,11 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-apex-contract = { path = "../../crates/apex-contract" }
-apex-auth = { path = "../../crates/apex-auth" }
-apex-domain = { path = "../../crates/apex-domain" }
-apex-security = { path = "../../crates/apex-security" }
-apex-durability = { path = "../../crates/apex-durability" }
+apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
+apex-auth = { version = "0.1.0", path = "../../crates/apex-auth" }
+apex-domain = { version = "0.1.0", path = "../../crates/apex-domain" }
+apex-security = { version = "0.1.0", path = "../../crates/apex-security" }
+apex-durability = { version = "0.1.0", path = "../../crates/apex-durability" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 prost = "0.14"
 prost-types = "0.14"

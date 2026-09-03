@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-apex-domain = { path = "../apex-domain" }
+apex-domain = { version = "0.1.0", path = "../apex-domain" }
 getrandom = "0.4.3"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10.9"
