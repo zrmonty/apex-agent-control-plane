@@ -6,9 +6,10 @@
 #   --build-arg CARGO_FEATURES=valkey
 #
 # IMPORTANT: the build context is the REPOSITORY ROOT, not this directory.
-# `build.rs` compiles `../../contracts/proto/apex/v1/event.proto`, which lives
-# outside this crate, so a context rooted at `apps/event-ingest` cannot see it
-# and protoc fails with "Could not make proto path relative".
+# The shared `apex-contract` build.rs compiles
+# `../../contracts/proto/apex/v1/event.proto`, which lives outside that crate,
+# so a context rooted at `apps/event-ingest` cannot see it and protoc fails
+# with "Could not make proto path relative".
 #
 # Both base-image args must be declared in the *global* scope, before the first
 # FROM. An ARG declared after a FROM belongs to that build stage, and a later
@@ -18,9 +19,15 @@ ARG BUILD_IMAGE
 ARG RUNTIME_IMAGE
 FROM ${BUILD_IMAGE} AS build
 WORKDIR /src
-# Copy only what the crate needs, so the image does not carry the whole repo
-# and a host `target/` directory cannot leak into the container build.
+# The Rust workspace manifest must be present because Cargo resolves this
+# package through the repository workspace. Copy every workspace member's
+# source manifest and the shared crates required by the gateway without
+# copying unrelated application trees or host build output.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 COPY apps/event-ingest ./apps/event-ingest
+COPY apps/control-plane-api ./apps/control-plane-api
+COPY apps/agent-supervisor ./apps/agent-supervisor
 COPY contracts ./contracts
 # `--features postgres` compiles deploy/postgres/*.sql into the binary with
 # include_str!. Without this the documented feature build fails outright:

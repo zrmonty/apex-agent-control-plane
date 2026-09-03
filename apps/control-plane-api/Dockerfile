@@ -19,14 +19,18 @@ ARG BUILD_IMAGE
 ARG RUNTIME_IMAGE
 FROM ${BUILD_IMAGE} AS build
 WORKDIR /src
-# Copy only what the crate needs, so the image does not carry the whole repo
-# and a host `target/` directory cannot leak into the container build.
+# The Rust workspace manifest must be present because Cargo resolves this
+# package through the repository workspace. Copy every workspace member's
+# source manifest and the shared crates required by the control gateway
+# without copying unrelated application trees or host build output.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 COPY apps/control-plane-api ./apps/control-plane-api
-# A path dependency, not an optional one: this crate reuses event-ingest's
-# durable outbox, envelope validation, and GatewayError taxonomy rather than
-# forking them (see Cargo.toml). Without it the build cannot resolve
-# `apex-event-ingest` at all.
+# The workspace still declares event-ingest as a member even though this
+# application now depends on shared crates directly. Keep its source present
+# so Cargo can load the complete workspace manifest.
 COPY apps/event-ingest ./apps/event-ingest
+COPY apps/agent-supervisor ./apps/agent-supervisor
 COPY contracts ./contracts
 # `--features postgres` forwards to `apex-event-ingest/postgres`, which
 # compiles deploy/postgres/*.sql into the binary with include_str!. Without
