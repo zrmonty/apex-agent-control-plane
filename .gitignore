@@ -44,6 +44,7 @@ htmlcov/
 
 # Rust
 target/
+.worktrees/
 # Keep generated Rust build trees and per-test secret fixtures out of every
 # workspace crate, including crates added below the current directory.
 **/target/
