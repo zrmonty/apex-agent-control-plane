@@ -43,9 +43,10 @@ Only work that advances the objective below is active.
 ## Current implementation status
 
 - The Rust workspace boundary is implemented for the shared event contract, domain validation/errors, authentication, security findings, and durability/fanout foundations.
+- `crates/apex-policy` now defines the transport-neutral governance boundary: validated scope and identity metadata, authorization/policy/approval decisions, content-free tool evidence, and replaceable async Apex adapters.
 - `event-ingest` and `control-plane-api` now consume shared crates directly; the control-plane application no longer depends on the ingest application.
 - Durable admission remains enqueue-only: the admission call commits the local outbox and returns, while a separate replay worker owns downstream publication and recovery.
-- The remaining active work starts at the Apex governance interfaces, then the thin TypeScript MCP gateway, the single read-only RIA tool, and the live operator-visible vertical slice.
+- The remaining active work starts at the thin TypeScript MCP gateway, then the single read-only RIA tool and the live operator-visible vertical slice. The gateway must consume the governance boundary; it must not recreate it.
 
 The foundation boundary is complete: the dependency-direction check and the durable ACK-before-downstream regression checks are green in the full workspace verification.
 
@@ -75,6 +76,8 @@ The admission path must not wait for every downstream destination. Preserve idem
 **Exit gate:** a downstream outage does not prevent an accepted event from being durably committed and acknowledged; worker, retry, idempotency, and recovery tests prove the behavior.
 
 ### 3. Define Apex governance interfaces
+
+**Status:** Implemented in `crates/apex-policy`; integration begins with the TypeScript MCP gateway.
 
 Define the smallest interfaces needed by the MCP data plane:
 
