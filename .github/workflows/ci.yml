@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -19,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/sdk-python/pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -42,6 +48,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Cache Cargo registry, git sources, and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Test (all feature paths)
         env:
           CARGO_NET_RETRY: "10"
@@ -70,6 +86,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Cache Cargo registry, git sources, and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Test (control gateway)
         env:
           CARGO_NET_RETRY: "10"
@@ -98,6 +124,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Cache Cargo registry, git sources, and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Test
         env:
           CARGO_NET_RETRY: "10"
@@ -143,6 +179,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/sdk-python/pyproject.toml
       - name: Install SAST tools
         run: python -m pip install --upgrade pip bandit pip-audit
       - name: Bandit (static analysis)
@@ -159,6 +197,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/sdk-python/pyproject.toml
       - run: python3 scripts/check_lab_only_settings.py
 
   signed-bundles:
@@ -171,6 +211,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/sdk-python/pyproject.toml
       - run: |
           python -m pip install --upgrade pip
           python -m pip install --editable ".[test]"
