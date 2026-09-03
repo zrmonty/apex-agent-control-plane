@@ -1,0 +1,17 @@
+# CI-only overlay. Do not include this file in normal local Compose commands:
+# the gha cache backend requires GitHub Actions' BuildKit runtime credentials.
+
+x-provider-cache: &provider-cache
+  cache_from:
+    - type=gha,scope=apex-reference-providers
+  cache_to:
+    - type=gha,mode=max,scope=apex-reference-providers
+
+services:
+  clickhouse-projection:
+    build:
+      <<: *provider-cache
+
+  archive-provider:
+    build:
+      <<: *provider-cache

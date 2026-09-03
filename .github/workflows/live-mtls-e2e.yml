@@ -30,9 +30,9 @@ jobs:
           cache-dependency-path: packages/sdk-python/pyproject.toml
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Cache Cargo registry, git sources, and workspace target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -130,23 +130,24 @@ jobs:
         working-directory: deploy/compose/live-mtls
         run: |
           set -eu
+          P="-f compose.yaml -f compose.ci-cache.yaml"
           # Same fingerprint for provider write binding and gateway bearer cert binding.
           FP="$(tr -d '[:space:]' < secrets/ingest-http-client.sha256)"
           export APEX_PROVIDER_CLIENT_CERT_SHA256="$FP"
           export APEX_BEARER_CERT_SHA256="$FP"
           export APEX_LIVE_MTLS_SECRETS="$PWD/secrets"
           echo "Using client cert fingerprint: $FP"
-          docker compose -f compose.yaml down --remove-orphans || true
-          docker compose -f compose.yaml build clickhouse-projection archive-provider
+          docker compose $P down --remove-orphans || true
+          docker compose $P build clickhouse-projection archive-provider
           # Prefer --wait when available; fall back to plain up + TCP waiter.
-          if docker compose -f compose.yaml up -d --force-recreate --remove-orphans --wait --wait-timeout 180; then
+          if docker compose $P up -d --force-recreate --remove-orphans --wait --wait-timeout 180; then
             echo "compose --wait succeeded"
           else
             echo "compose --wait failed; falling back to up + TCP wait"
-            docker compose -f compose.yaml up -d --force-recreate --remove-orphans
+            docker compose $P up -d --force-recreate --remove-orphans
           fi
-          docker compose -f compose.yaml ps -a
-          docker compose -f compose.yaml logs --tail 80
+          docker compose $P ps -a
+          docker compose $P logs --tail 80
           python "${GITHUB_WORKSPACE}/deploy/compose/e2e/wait_live_mtls.py" \
             --secrets "$APEX_LIVE_MTLS_SECRETS" \
             --attempts 60 \
@@ -214,24 +215,50 @@ jobs:
           RUST_TEST_THREADS: "1"
         run: cargo test --lib --features "postgres,test-support" postgres_ -- --nocapture
 
-      - name: Object-Lock acceptance (MinIO)
+      - name: Object-Lock and cloud acceptance (parallel)
         working-directory: deploy/compose
+        timeout-minutes: 10
         env:
           MINIO_ENDPOINT: http://127.0.0.1:19000
           MINIO_ACCESS_KEY: apexminio
           MINIO_SECRET_KEY: apexminio_e2e_local_only
           MINIO_BUCKET: apex-events
-        # Lab MinIO proves GOVERNANCE retention + versioning; legal-hold API
-        # may still be partial depending on botocore/MinIO checksum negotiation.
-        run: python object_lock_acceptance.py --allow-missing-legal-hold
-
-      - name: Azure/GCS acceptance (optional without credentials)
-        working-directory: deploy/compose
-        env:
           APEX_CLOUD_ACCEPTANCE_OPTIONAL: "1"
         run: |
-          python object_lock_acceptance_azure.py
-          python object_lock_acceptance_gcs.py
+          set -uo pipefail
+          log_dir="${RUNNER_TEMP}/apex-acceptance"
+          mkdir -p "$log_dir"
+
+          # These checks use independent services and credentials. Run them
+          # together, but retain separate logs so a failure remains attributable.
+          python object_lock_acceptance.py --allow-missing-legal-hold \
+            >"$log_dir/minio.log" 2>&1 &
+          minio_pid=$!
+          python object_lock_acceptance_azure.py \
+            >"$log_dir/azure.log" 2>&1 &
+          azure_pid=$!
+          python object_lock_acceptance_gcs.py \
+            >"$log_dir/gcs.log" 2>&1 &
+          gcs_pid=$!
+
+          status=0
+          for name_pid in \
+            "MinIO:$minio_pid:$log_dir/minio.log" \
+            "Azure:$azure_pid:$log_dir/azure.log" \
+            "GCS:$gcs_pid:$log_dir/gcs.log"; do
+            name="${name_pid%%:*}"
+            rest="${name_pid#*:}"
+            pid="${rest%%:*}"
+            log="${rest#*:}"
+            if wait "$pid"; then
+              echo "$name acceptance: PASS"
+            else
+              echo "$name acceptance: FAIL" >&2
+              status=1
+            fi
+            cat "$log"
+          done
+          exit "$status"
 
       # `docker compose config` parses YAML. It never builds an image and never
       # starts a process, which is why a Dockerfile that could not build, a
@@ -284,12 +311,9 @@ jobs:
           echo "gateway never began serving" >&2
           exit 1
 
-      # Same reasoning as the gateway step above, for the service that had none
-      # of it: apps/control-plane-api shipped with no Dockerfile and no Compose
-      # entry at all, so nothing anywhere proved its image could build, its
-      # binary could bind, or its container could write its outbox volume.
-      # `docker compose config` in the overlay-validation step below would
-      # happily pass on a Dockerfile that does not compile.
+      # The default control image is warmed by the first parallel image-build
+      # step. This gate keeps the build command at the control service's own
+      # proof boundary: it is a cache-hit assertion followed by a real startup.
       - name: Build and smoke-start the control gateway image
         working-directory: deploy/compose
         timeout-minutes: 30
@@ -298,13 +322,9 @@ jobs:
           P="-p apex-gateway-ref-ci -f compose.gateway-ref.yaml -f compose.ci-cache.yaml"
           docker compose $P build control-plane-api
           # The --features postgres artifact is built and, more importantly,
-          # *run* by the "Postgres-backed control gateway" step below, under
-          # its own image tag. It used to be built here and then thrown away,
-          # which caught a build break (deploy/postgres/*.sql is compiled in
-          # via include_str!, so a narrow build context fails outright) but
-          # could not catch a runtime one -- and there was one: the binary
-          # panicked on start with "Cannot start a runtime from within a
-          # runtime" the first time a real container used that backend.
+          # *run* by the "Postgres-backed control gateway" step below under
+          # its separate image tag. This default-feature build remains the
+          # control gateway's real live startup proof.
           docker compose $P up -d --force-recreate control-plane-api
           for attempt in $(seq 1 90); do
             state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep control-plane-api || true)"
