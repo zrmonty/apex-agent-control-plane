@@ -14,6 +14,7 @@ path = "src/lib.rs"
 apex-contract = { path = "../../crates/apex-contract" }
 apex-auth = { path = "../../crates/apex-auth" }
 apex-domain = { path = "../../crates/apex-domain" }
+apex-security = { path = "../../crates/apex-security" }
 async-nats = { version = "0.50.0", default-features = false, features = ["jetstream", "ring"] }
 prost = "0.14"
 prost-types = "0.14"

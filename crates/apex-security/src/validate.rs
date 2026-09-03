@@ -233,3 +233,5 @@ pub(crate) fn allowed_transition(from: FindingStatus, to: FindingStatus) -> bool
         ) | (FindingStatus::Contained, FindingStatus::Resolved)
     )
 }
+
+

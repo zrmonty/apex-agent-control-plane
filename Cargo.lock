@@ -102,6 +102,7 @@ dependencies = [
  "apex-auth",
  "apex-contract",
  "apex-domain",
+ "apex-security",
  "async-nats",
  "fs2",
  "getrandom 0.4.3",
@@ -120,6 +121,16 @@ dependencies = [
  "tonic",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "apex-security"
+version = "0.1.0"
+dependencies = [
+ "apex-domain",
+ "getrandom 0.4.3",
+ "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]

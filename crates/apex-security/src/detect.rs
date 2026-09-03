@@ -54,7 +54,7 @@ pub fn detect_and_record(
     store.append(detection_finding(input)?)
 }
 
-pub(crate) fn detection_finding(input: DetectionInput) -> Result<SecurityFinding, FindingError> {
+pub fn detection_finding(input: DetectionInput) -> Result<SecurityFinding, FindingError> {
     let (finding_type, severity, policy_decision, detector) = match input.signal {
         SecuritySignal::TelemetryIntegrity => (
             FindingType::TelemetryIntegrity,
@@ -123,3 +123,4 @@ pub(crate) fn detection_finding(input: DetectionInput) -> Result<SecurityFinding
         policy_decision,
     })
 }
+

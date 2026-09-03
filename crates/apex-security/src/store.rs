@@ -72,7 +72,7 @@ impl FindingStore {
 
     /// Internal persistence seam. Public callers must use `detect_and_record`
     /// so finding classification cannot be supplied by an untrusted writer.
-    pub(crate) fn append(&mut self, finding: SecurityFinding) -> Result<bool, FindingError> {
+    pub fn append(&mut self, finding: SecurityFinding) -> Result<bool, FindingError> {
         validate_finding(&finding)?;
         if let Some(index) = self.by_id.get(&finding.finding_id).copied() {
             if self.findings[index] == finding {
@@ -139,7 +139,7 @@ impl FindingStore {
 
     /// Replays an already-authenticated journal record during startup. New
     /// callers must use `transition`, which requires a verified Caller.
-    pub(crate) fn transition_replayed(
+    pub fn transition_replayed(
         &mut self,
         finding_id: &str,
         expected: FindingStatus,
@@ -195,7 +195,7 @@ impl FindingStore {
         Ok(())
     }
 
-    pub(crate) fn current_status(&self, finding_id: &str) -> Result<FindingStatus, FindingError> {
+    pub fn current_status(&self, finding_id: &str) -> Result<FindingStatus, FindingError> {
         if !self.by_id.contains_key(finding_id) {
             return Err(FindingError::not_found());
         }
@@ -254,7 +254,8 @@ impl FindingStore {
             .collect())
     }
 
-    pub(crate) fn updates(&self) -> &[FindingStatusUpdate] {
+    pub fn updates(&self) -> &[FindingStatusUpdate] {
         &self.updates
     }
 }
+

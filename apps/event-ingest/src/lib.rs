@@ -18,7 +18,14 @@ mod persistence;
 #[cfg(feature = "postgres")]
 mod postgres_transport;
 mod publisher;
-mod security;
+pub mod security {
+    pub use apex_security::{
+        ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingError,
+        FindingErrorCode, FindingSeverity, FindingStatus, FindingStatusUpdate, FindingStore,
+        FindingType, PolicyDecision, SecurityFinding, SecuritySignal, detect_and_record,
+        detection_finding,
+    };
+}
 mod sinks;
 pub mod validation {
     pub use apex_domain::{Caller, IngestRequest, canonical_event_hash};
@@ -63,7 +70,7 @@ pub use postgres_transport::{apply_postgres_schema, connect_postgres};
 pub use publisher::{
     InMemoryPublisher, JetStreamPublisher, JetStreamTransport, RetryingJetStreamTransport,
 };
-pub use security::{
+pub use apex_security::{
     ContainmentAction, DetectionInput, EvidenceRef, FindingConfidence, FindingError,
     FindingErrorCode, FindingSeverity, FindingStatus, FindingStatusUpdate, FindingStore,
     FindingType, PolicyDecision, SecurityFinding, SecuritySignal, detect_and_record,

@@ -10,7 +10,8 @@ const EVENT: &str = "018f5c91-2d88-7c00-8000-000000000001";
 const HASH: &str = "2ceaac5b752083018db384977ec25ad50a4dda3bf748ea359c2c1ef9e53e7058";
 
 fn caller() -> crate::Caller {
-    crate::Caller::authenticated("spiffe://apex/security-test", ["acme/prod"])
+    crate::Caller::authenticated_for_agent("spiffe://apex/security-test", "security-agent", ["acme/prod"])
+        .unwrap()
 }
 
 fn scoped_finding(detector: &str, workspace_id: &str, namespace_id: &str) -> SecurityFinding {
@@ -127,7 +128,9 @@ fn transitions_are_append_only_and_scope_checked() {
     let f = finding("transition");
     let id = f.finding_id.clone();
     store.append(f).unwrap();
-    let unauthorized = crate::Caller::authenticated("spiffe://apex/other", ["other/prod"]);
+    let unauthorized =
+        crate::Caller::authenticated_for_agent("spiffe://apex/other", "other-agent", ["other/prod"])
+            .unwrap();
     assert_eq!(
         store
             .transition(
@@ -564,7 +567,9 @@ fn findings_for_scope_filters_without_cross_scope_leakage() {
             .code,
         FindingErrorCode::ScopeDenied
     );
-    let other_caller = crate::Caller::authenticated("spiffe://apex/other", ["other/prod"]);
+    let other_caller =
+        crate::Caller::authenticated_for_agent("spiffe://apex/other", "other-agent", ["other/prod"])
+            .unwrap();
     assert!(
         store
             .findings_for_scope(&other_caller, "other", "prod")
@@ -598,3 +603,4 @@ fn generated_finding_ids_are_uuidv7_and_unique_for_a_burst() {
     assert!(is_lowercase_uuidv7(&second));
     assert_ne!(first, second);
 }
+
