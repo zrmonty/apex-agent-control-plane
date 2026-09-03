@@ -68,6 +68,10 @@ export class LocalPortfolioAdapter implements PortfolioAdapter {
       throw new GatewayError("ADAPTER_FAILED", "portfolio record unavailable");
     }
 
+    if (input.asOf !== undefined && input.asOf !== record.as_of) {
+      throw new GatewayError("ADAPTER_FAILED", "portfolio snapshot unavailable");
+    }
+
     return deepFreeze(cloneRawPortfolioRecord(record));
   }
 }

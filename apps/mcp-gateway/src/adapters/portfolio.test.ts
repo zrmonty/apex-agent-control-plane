@@ -31,3 +31,17 @@ test("fails unknown portfolio reads without echoing requested values", async () 
     },
   );
 });
+
+test("rejects mismatched snapshot requests with a safe adapter error", async () => {
+  const adapter = new LocalPortfolioAdapter();
+
+  await assert.rejects(
+    () => adapter.read({ portfolioId: "northstar-401k", asOf: "2026-09-01" }),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "ADAPTER_FAILED");
+      assert.equal(error.message.includes("2026-09-01"), false);
+      return true;
+    },
+  );
+});

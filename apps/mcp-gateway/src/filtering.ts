@@ -39,6 +39,25 @@ export type FilterResult = {
   readonly filteredBytes: number;
 };
 
+function requireObject(
+  value: unknown,
+  field: string,
+): Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new GatewayError("FILTERING_FAILED", `missing required field ${field}`);
+  }
+
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function requireArray(value: unknown, field: string): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new GatewayError("FILTERING_FAILED", `missing required field ${field}`);
+  }
+
+  return value;
+}
+
 function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new GatewayError("FILTERING_FAILED", `missing required field ${field}`);
@@ -73,19 +92,50 @@ export function filterPortfolioRecord(
 ): FilterResult {
   const restrictions = new Set(decision.fieldRestrictions);
   const removedFields: string[] = [];
+  const rawObject = requireObject(raw, "portfolio");
+  const client = requireObject(rawObject.client, "client");
+  const positions = requireArray(rawObject.positions, "positions");
+
+  requireNonEmptyString(rawObject.portfolio_id, "portfolio_id");
+  requireNonEmptyString(rawObject.as_of, "as_of");
+  requireNonEmptyString(rawObject.base_currency, "base_currency");
+  requireFiniteNumber(rawObject.total_value, "total_value");
+  requireNonEmptyString(client.display_name, "client.display_name");
+  requireNonEmptyString(client.account_number, "client.account_number");
+  requireNonEmptyString(client.tax_id, "client.tax_id");
+
+  const validatedPositions = positions.map((position, index) => {
+    const validatedPosition = requireObject(position, `positions[${index}]`);
+
+    return {
+      symbol: requireNonEmptyString(
+        validatedPosition.symbol,
+        `positions[${index}].symbol`,
+      ),
+      quantity: requireFiniteNumber(
+        validatedPosition.quantity,
+        `positions[${index}].quantity`,
+      ),
+      marketValue: requireFiniteNumber(
+        validatedPosition.market_value,
+        `positions[${index}].market_value`,
+      ),
+      costBasis: requireFiniteNumber(validatedPosition.cost_basis, "positions.cost_basis"),
+    };
+  });
 
   const view: PortfolioPublicView = {
-    portfolioId: requireNonEmptyString(raw.portfolio_id, "portfolio_id"),
-    asOf: requireNonEmptyString(raw.as_of, "as_of"),
-    baseCurrency: requireNonEmptyString(raw.base_currency, "base_currency"),
-    totalValue: requireFiniteNumber(raw.total_value, "total_value"),
+    portfolioId: requireNonEmptyString(rawObject.portfolio_id, "portfolio_id"),
+    asOf: requireNonEmptyString(rawObject.as_of, "as_of"),
+    baseCurrency: requireNonEmptyString(rawObject.base_currency, "base_currency"),
+    totalValue: requireFiniteNumber(rawObject.total_value, "total_value"),
     client: {
-      displayName: requireNonEmptyString(raw.client.display_name, "client.display_name"),
+      displayName: requireNonEmptyString(client.display_name, "client.display_name"),
     },
-    positions: raw.positions.map((position) => ({
-      symbol: requireNonEmptyString(position.symbol, "positions.symbol"),
-      quantity: requireFiniteNumber(position.quantity, "positions.quantity"),
-      marketValue: requireFiniteNumber(position.market_value, "positions.market_value"),
+    positions: validatedPositions.map((position) => ({
+      symbol: position.symbol,
+      quantity: position.quantity,
+      marketValue: position.marketValue,
     })),
   };
 

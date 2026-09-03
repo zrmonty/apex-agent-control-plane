@@ -113,3 +113,79 @@ test("fails closed when a required numeric field is non-finite", () => {
     },
   );
 });
+
+test("fails closed when a hidden required client field is missing", () => {
+  const raw = {
+    ...rawPortfolioFixture,
+    client: {
+      ...rawPortfolioFixture.client,
+      tax_id: "",
+    },
+  } satisfies RawPortfolioRecord;
+
+  assert.throws(
+    () => filterPortfolioRecord(raw, allowedDecision),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "FILTERING_FAILED");
+      assert.equal(error.message.includes("client.tax_id"), true);
+      return true;
+    },
+  );
+});
+
+test("fails closed when a hidden required numeric position field is non-finite", () => {
+  const raw = {
+    ...rawPortfolioFixture,
+    positions: [
+      {
+        ...rawPortfolioFixture.positions[0],
+        cost_basis: Number.POSITIVE_INFINITY,
+      },
+    ],
+  } satisfies RawPortfolioRecord;
+
+  assert.throws(
+    () => filterPortfolioRecord(raw, allowedDecision),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "FILTERING_FAILED");
+      assert.equal(error.message.includes("positions.cost_basis"), true);
+      return true;
+    },
+  );
+});
+
+test("converts malformed client structure into a safe filtering error", () => {
+  const raw = {
+    ...rawPortfolioFixture,
+    client: null,
+  } as unknown as RawPortfolioRecord;
+
+  assert.throws(
+    () => filterPortfolioRecord(raw, allowedDecision),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "FILTERING_FAILED");
+      assert.equal(error instanceof TypeError, false);
+      return true;
+    },
+  );
+});
+
+test("converts malformed positions structure into a safe filtering error", () => {
+  const raw = {
+    ...rawPortfolioFixture,
+    positions: [null],
+  } as unknown as RawPortfolioRecord;
+
+  assert.throws(
+    () => filterPortfolioRecord(raw, allowedDecision),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "FILTERING_FAILED");
+      assert.equal(error instanceof TypeError, false);
+      return true;
+    },
+  );
+});
