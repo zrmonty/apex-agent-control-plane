@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/apex-contract",
     "apps/event-ingest",
     "apps/control-plane-api",
     "apps/agent-supervisor",

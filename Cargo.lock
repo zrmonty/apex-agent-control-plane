@@ -33,6 +33,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-contract"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "apex-control-plane-api"
 version = "0.1.0"
 dependencies = [
@@ -61,14 +74,13 @@ dependencies = [
 name = "apex-event-ingest"
 version = "0.1.0"
 dependencies = [
+ "apex-contract",
  "async-nats",
  "fs2",
  "getrandom 0.4.3",
  "postgres",
  "prost",
- "prost-build",
  "prost-types",
- "protoc-bin-vendored",
  "redis",
  "reqwest",
  "rustls",
@@ -80,8 +92,6 @@ dependencies = [
  "tokio",
  "tokio-postgres-rustls",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "uuid",
  "zeroize",
 ]
