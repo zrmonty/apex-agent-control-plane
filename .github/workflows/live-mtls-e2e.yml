@@ -535,9 +535,20 @@ jobs:
           # An open port is not proof of the backend. Both of these are:
           # the outbox row must be in Postgres, and the file outbox must not
           # exist -- a silent fallback to FileOutbox would satisfy neither.
-          docker compose $P logs --no-color control-plane-api-pg-a \
-            | grep -q 'outbox backend: postgres' \
-            || { echo "replica A did not select the Postgres backend" >&2; exit 1; }
+          for attempt in $(seq 1 30); do
+            startup_logs="$(docker compose $P logs --no-color control-plane-api-pg-a 2>/dev/null || true)"
+            if [[ "$startup_logs" == *"outbox backend: postgres"* ]]; then
+              echo "replica A selected the Postgres backend (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color --tail 120 control-postgres control-plane-api-pg-a control-plane-api-pg-b >&2
+              echo "replica A did not select the Postgres backend" >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Live two-replica Postgres tests
         working-directory: apps/control-plane-api
@@ -641,9 +652,20 @@ jobs:
           # The startup line is the cheap half of the claim: a replica that
           # fell back to the process-local ceiling because its Valkey config
           # was refused would say so here, before any traffic is sent.
-          docker compose $P logs --no-color control-plane-api-pg-a \
-            | grep -q 'admission ceiling: shared (valkey)' \
-            || { echo "replica A did not attach the shared admission store" >&2; exit 1; }
+          for attempt in $(seq 1 30); do
+            startup_logs="$(docker compose $P logs --no-color control-plane-api-pg-a 2>/dev/null || true)"
+            if [[ "$startup_logs" == *"admission ceiling: shared (valkey)"* ]]; then
+              echo "replica A attached the shared admission store (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color --tail 120 control-valkey control-plane-api-pg-a control-plane-api-pg-b >&2
+              echo "replica A did not attach the shared admission store" >&2
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Live cross-replica admission tests
         working-directory: apps/control-plane-api
