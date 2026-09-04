@@ -118,7 +118,7 @@ export class StaticLocalApex implements ApexGovernance, ApexEvents {
         outcome: metadata.policy.outcome,
         policyId: metadata.policy.policyId,
         reasonCode: metadata.policy.reasonCode,
-        revision: metadata.policy.revision,
+        fieldRestrictions: [...metadata.policy.fieldRestrictions],
       },
       trace: {
         traceId: metadata.trace.traceId,

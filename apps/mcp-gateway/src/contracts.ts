@@ -61,12 +61,7 @@ export type ToolExecutionEvent = {
   readonly filtering: {
     readonly removedFields: readonly string[];
   };
-  readonly policy: {
-    readonly outcome: AuthorizationDecision["outcome"];
-    readonly policyId: string;
-    readonly reasonCode: string;
-    readonly revision: number;
-  };
+  readonly policy: AuthorizationDecision;
   readonly trace: AuthorizationRequest["trace"];
 };
 

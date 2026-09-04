@@ -39,12 +39,7 @@ export function createToolExecutionEvent(options: {
   filteredBytes: number;
   outputBytes: number;
   removedFields: readonly string[];
-  policy: {
-    outcome: AuthorizationDecision["outcome"];
-    policyId: string;
-    reasonCode: string;
-    revision: number;
-  };
+  policy: AuthorizationDecision;
 }): ToolExecutionEvent {
   const {
     request,
@@ -86,7 +81,7 @@ export function createToolExecutionEvent(options: {
       outcome: policy.outcome,
       policyId: policy.policyId,
       reasonCode: policy.reasonCode,
-      revision: policy.revision,
+      fieldRestrictions: [...policy.fieldRestrictions],
     },
     trace: request.trace,
   };

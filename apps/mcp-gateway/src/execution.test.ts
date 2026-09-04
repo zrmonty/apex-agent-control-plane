@@ -268,7 +268,16 @@ test("allowed reads filter, emit metadata, and return only the public view", asy
   assert.equal(JSON.stringify(result.structuredContent).includes("account_number"), false);
   assert.equal(JSON.stringify(events.events[0]).includes("client-record-raw"), false);
   assert.equal(events.events[0]?.status, "succeeded");
-  assert.equal(events.events[0]?.policy.revision, 1);
+  assert.deepEqual(events.events[0]?.policy, {
+    outcome: "allowed",
+    policyId: "local-read-v1",
+    reasonCode: "policy.allowed",
+    fieldRestrictions: [
+      "client.account_number",
+      "client.tax_id",
+      "positions.cost_basis",
+    ],
+  });
   assert.equal(events.events[0]?.trace.traceId, "trace-001");
   assert.notEqual(events.events[0]?.trace.spanId, "trace-001");
 });
@@ -306,6 +315,12 @@ test("denials never execute the adapter", async () => {
   assert.equal(governance.policyScopes.length, 0);
   assert.equal(events.events.length, 1);
   assert.equal(events.events[0]?.status, "denied");
+  assert.deepEqual(events.events[0]?.policy, {
+    outcome: "denied",
+    policyId: "local-read-v1",
+    reasonCode: "policy.denied",
+    fieldRestrictions: [],
+  });
   assert.deepEqual(telemetry.codes, []);
 });
 
@@ -323,7 +338,12 @@ test("requires approval returns safely without adapter execution", async () => {
   assert.equal(adapter.readCount, 0);
   assert.equal(events.events.length, 1);
   assert.equal(events.events[0]?.status, "denied");
-  assert.equal(events.events[0]?.policy.outcome, "requires_approval");
+  assert.deepEqual(events.events[0]?.policy, {
+    outcome: "requires_approval",
+    policyId: "local-read-v1",
+    reasonCode: "policy.requires-approval",
+    fieldRestrictions: [],
+  });
 });
 
 test("authorization service failure becomes governance unavailable", async () => {
@@ -592,7 +612,7 @@ test("local event admission rejects non-metadata fields without persisting them"
       outcome: "allowed",
       policyId: "local-read-v1",
       reasonCode: "policy.allowed",
-      revision: 1,
+      fieldRestrictions: ["client.tax_id"],
     },
     trace: { traceId: "trace-001", spanId: "span-001" },
     rawRecord: rawPortfolioFixture,

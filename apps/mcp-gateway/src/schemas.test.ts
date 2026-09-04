@@ -144,10 +144,19 @@ test("bounds metadata identifiers, removed fields, and aggregate event size", ()
       outcome: "allowed",
       policyId: "local-read-v1",
       reasonCode: "policy.allowed",
-      revision: 1,
+      fieldRestrictions: ["client.tax_id"],
     },
     trace: { traceId: "trace-001", spanId: "span-001" },
   };
+
+  assert.equal(ToolExecutionEventSchema.safeParse(baseEvent).success, true);
+  assert.equal(
+    ToolExecutionEventSchema.safeParse({
+      ...baseEvent,
+      policy: { ...baseEvent.policy, revision: 1 },
+    }).success,
+    false,
+  );
 
   assert.equal(
     ToolExecutionEventSchema.safeParse({

@@ -166,12 +166,7 @@ export class GatewayExecutor {
             filteredBytes: 0,
             outputBytes: 0,
             removedFields: [],
-            policy: {
-              outcome: decision.outcome,
-              policyId: decision.policyId,
-              reasonCode: decision.reasonCode,
-              revision: 0,
-            },
+            policy: decision,
           }),
         );
         const receipt = await this.dependencies.events.emit(parsedEvent);
@@ -230,12 +225,7 @@ export class GatewayExecutor {
           filteredBytes: filtered.filteredBytes,
           outputBytes: safeJsonSizeBytes(filtered.view),
           removedFields: filtered.removedFields,
-          policy: {
-            outcome: decision.outcome,
-            policyId: decision.policyId,
-            reasonCode: decision.reasonCode,
-            revision: policy.revision,
-          },
+          policy: decision,
         }),
       );
       const receipt = await this.dependencies.events.emit(parsedEvent);

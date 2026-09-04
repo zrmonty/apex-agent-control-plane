@@ -165,14 +165,7 @@ export const ToolExecutionEventSchema = z
     filtering: z
       .object({ removedFields: fieldPathsSchema })
       .strict(),
-    policy: z
-      .object({
-        outcome: z.enum(["allowed", "denied", "requires_approval"]),
-        policyId: RustIdentifierSchema,
-        reasonCode: RustIdentifierSchema,
-        revision: rustU64Schema,
-      })
-      .strict(),
+    policy: AuthorizationDecisionSchema,
     trace: z
       .object({
         traceId: RustIdentifierSchema,

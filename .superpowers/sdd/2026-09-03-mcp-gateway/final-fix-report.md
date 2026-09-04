@@ -115,3 +115,26 @@ The package-level `pnpm test`, `pnpm typecheck`, and `pnpm build` wrappers were 
 - `apps/mcp-gateway/src/server.test.ts`
 - `apps/mcp-gateway/src/telemetry.ts`
 - `.superpowers/sdd/2026-09-03-mcp-gateway/final-fix-report.md`
+
+## Follow-up: Exact Rust Event Policy Shape
+
+The final re-review identified one remaining mismatch between the gateway event policy and Rust `AuthorizationDecision`. This follow-up makes `ToolExecutionEvent.policy` carry exactly `outcome`, `policyId`, `reasonCode`, and `fieldRestrictions`.
+
+- The TypeScript contract now reuses `AuthorizationDecision` for the event policy.
+- The strict event schema now reuses `AuthorizationDecisionSchema`, preserving the Rust-compatible identifier and restriction bounds while rejecting non-Rust keys such as `revision`.
+- Allowed, denied, and approval events are populated from the already validated authorization decision. No policy-snapshot revision is copied and no synthetic revision is created.
+- Event construction and the local event adapter defensively copy `fieldRestrictions` while retaining opaque resource handling and all existing fail-closed receipt/telemetry behavior.
+- Exact-shape execution regressions cover allowed, denied, and approval events. A schema regression proves the canonical four-field object is accepted and a legacy `revision` key is rejected.
+
+Follow-up TDD evidence:
+
+- Focused red: `node .\scripts\run-tests.mjs src/execution.test.ts src/schemas.test.ts` — 19 passed, 4 failed on the old event shape.
+- Focused green: the same command — 23 passed, 0 failed.
+
+Follow-up verification:
+
+- `node .\scripts\run-tests.mjs` — 42 passed, 0 failed.
+- `node .\node_modules\typescript\bin\tsc --noEmit -p tsconfig.json` — passed.
+- `node .\node_modules\typescript\bin\tsc -p tsconfig.json` — passed.
+- `cargo test -p apex-domain -p apex-policy` — 15 unit tests plus doc tests passed.
+- `cargo clippy -p apex-domain -p apex-policy --all-targets --all-features -- -D warnings` — passed.
