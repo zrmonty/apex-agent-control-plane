@@ -392,6 +392,20 @@ def main() -> None:
         ca_cert=ca_cert,
         server=False,
     )
+    # Dedicated client identity for the thin MCP gateway's service-to-service
+    # governance calls. It is intentionally neither an operator nor an agent
+    # workload identity; the control gateway also requires a separate bearer
+    # token for this RPC surface.
+    _issue(
+        out=out,
+        basename="mcp-gateway-client",
+        common_name="apex-mcp-gateway",
+        san_dns=["apex-mcp-gateway"],
+        san_ips=["127.0.0.1"],
+        ca_key=ca_key,
+        ca_cert=ca_cert,
+        server=False,
+    )
     # The agent workload's client identity for `PollCommands`. Its own leaf,
     # neither the operator's nor the ingest workload's: an operator issues
     # commands, an agent retrieves the ones issued against it, and those are
@@ -539,6 +553,7 @@ def main() -> None:
     except OSError:
         pass
     _write_runtime_secret(out / "control-nats-password")
+    _write_runtime_secret(out / "mcp-gateway-token")
     _write_runtime_secret(out / "valkey-ingest-password")
     # The control gateway's own Valkey ACL credential, never the ingest
     # workload's -- same rule as the separate NATS account above.

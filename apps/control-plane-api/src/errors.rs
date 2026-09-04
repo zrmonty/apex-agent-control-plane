@@ -111,6 +111,13 @@ impl CommandError {
         )
     }
 
+    pub fn governance_unauthenticated() -> Self {
+        Self::new(
+            CommandErrorCode::Unauthenticated,
+            "The governance service rejected the caller.",
+        )
+    }
+
     pub fn scope_denied() -> Self {
         Self::new(
             CommandErrorCode::ScopeDenied,

@@ -2,7 +2,7 @@
 
 Thin TypeScript MCP gateway for governed, read-only `portfolio.read` access over stdio.
 
-The thin stdio gateway and deterministic local `portfolio.read` path are implemented. This package remains local/test-only today: live Apex authorization and event clients plus the operator-visible end-to-end vertical slice are deferred to later active tasks.
+The thin stdio gateway and deterministic local `portfolio.read` path are implemented. Live mode uses a dedicated mTLS/bearer governance client and the existing certificate-bound event-ingest admission client.
 
 ## Behavior
 
@@ -22,4 +22,4 @@ The thin stdio gateway and deterministic local `portfolio.read` path are impleme
 2. Build the package with `pnpm build` or a direct TypeScript runner if policy wrappers block `pnpm`.
 3. Start the gateway with `pnpm start`.
 
-The current wiring is local/test-only: `StaticLocalApex` and `LocalPortfolioAdapter` are the only active execution path today. `StaticLocalApex` provides fixed local governance/event behavior and `LocalPortfolioAdapter` serves the seeded `northstar-401k` portfolio snapshot. Live Apex governance and event clients, plus the operator-visible end-to-end slice, are deferred to later active tasks.
+Local mode uses `StaticLocalApex` and `LocalPortfolioAdapter`. Live mode selects the same seeded read-only portfolio adapter but obtains authorization and policy metadata from `control-plane-api` and admits metadata-only TOOL evidence through `event-ingest`. Live mode fails closed when any required client credential is missing.

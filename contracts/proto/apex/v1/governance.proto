@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package apex.v1;
+
+// Narrow, service-to-service governance boundary used by the thin MCP
+// gateway. This is not an operator command surface: it has its own mTLS
+// client identity and bearer credential, and exposes only decision metadata.
+service GovernanceGateway {
+  rpc Authorize(GovernanceAuthorizationRequest)
+      returns (GovernanceAuthorizationDecision);
+  rpc GetPolicy(GovernancePolicyRequest) returns (GovernancePolicySnapshot);
+}
+
+message GovernanceCaller {
+  string principal = 1;
+  string agent_id = 2;
+}
+
+message GovernanceScope {
+  string workspace_id = 1;
+  string namespace_id = 2;
+}
+
+message GovernanceTrace {
+  string trace_id = 1;
+  string span_id = 2;
+}
+
+message GovernanceAuthorizationRequest {
+  GovernanceCaller caller = 1;
+  GovernanceScope scope = 2;
+  string tool = 3;
+  string action = 4;
+  string resource = 5;
+  string classification = 6;
+  GovernanceTrace trace = 7;
+}
+
+enum GovernanceOutcome {
+  GOVERNANCE_OUTCOME_UNSPECIFIED = 0;
+  ALLOWED = 1;
+  DENIED = 2;
+  REQUIRES_APPROVAL = 3;
+}
+
+message GovernanceAuthorizationDecision {
+  GovernanceOutcome outcome = 1;
+  string policy_id = 2;
+  string reason_code = 3;
+  repeated string field_restrictions = 4;
+}
+
+message GovernancePolicyRequest {
+  GovernanceScope scope = 1;
+}
+
+message GovernancePolicySnapshot {
+  GovernanceScope scope = 1;
+  string policy_id = 2;
+  uint64 revision = 3;
+}

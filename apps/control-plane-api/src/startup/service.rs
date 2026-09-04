@@ -15,14 +15,18 @@ use apex_control_plane_api::{
 };
 use tonic::transport::Server;
 
-use super::env::{admission_limits, command_retention, metrics_bind_addr, required, resolve_bind_addr};
+use super::env::{
+    admission_limits, command_retention, metrics_bind_addr, required, resolve_bind_addr,
+};
 use super::fanout::prepare_control_fanout;
 
 mod resolvers;
 mod storage;
 mod workers;
 
-use resolvers::{build_agent_resolver, build_operator_resolver, load_server_tls};
+use resolvers::{
+    build_agent_resolver, build_governance_service, build_operator_resolver, load_server_tls,
+};
 use storage::{build_ephemeral_store, open_inbox, open_outbox};
 use workers::{
     spawn_health_monitor, spawn_inbox_reconciliation_worker, spawn_inbox_retention_worker,
@@ -63,6 +67,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let resolver = build_operator_resolver(&trusted_base)?;
     let agent_resolver = build_agent_resolver(&trusted_base)?;
+    let governance_service = build_governance_service(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
     // Resolved and validated here, with no runtime entered; spawned below,
     // inside one. No socket is opened either way -- an unreachable broker
@@ -126,6 +131,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )
             .await;
+        health_reporter
+            .set_service_status(
+                "apex.v1.GovernanceGateway",
+                tonic_health::ServingStatus::Serving,
+            )
+            .await;
         let shutdown = GatewayShutdown::default();
         // Bound to a named variable, not `_`, and kept alive until `serve`
         // returns: this is the only thing that turns a durably accepted
@@ -174,6 +185,11 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             .tls_config(tls)?
             .add_service(health_service)
             .add_service(bounded_control_gateway_server(service))
+            .add_service(
+                apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(
+                    governance_service,
+                ),
+            )
             .serve_with_shutdown(bind_addr, async move {
                 wait_for_shutdown_signal().await;
                 signal_reporter

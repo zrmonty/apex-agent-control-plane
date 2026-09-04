@@ -29,6 +29,15 @@ jobs:
           cache: pip
           cache-dependency-path: packages/sdk-python/pyproject.toml
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: apps/mcp-gateway/pnpm-lock.yaml
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: docker/setup-buildx-action@v4
       - name: Cache Cargo registry, git sources, and workspace target
@@ -462,6 +471,49 @@ jobs:
             [ "$committed" = 1 ] \
               || { echo "expected exactly one durable row for $id, found $committed" >&2; exit 1; }
           done
+
+      # The thin TypeScript gateway is the active roadmap's product boundary:
+      # a real MCP stdio client must call it in live mode, the gateway must use
+      # its dedicated governance credential, and its metadata-only TOOL event
+      # must become operator-visible in the server-side projection. The proof
+      # reads that projection rather than trusting the gateway's local receipt.
+      - name: Live proof -- MCP stdio gateway to governed portfolio evidence
+        working-directory: apps/mcp-gateway
+        timeout-minutes: 15
+        env:
+          APEX_MCP_GOVERNANCE_MODE: live
+          APEX_MCP_PRINCIPAL: spiffe://apex/agent/reference
+          APEX_MCP_AGENT_ID: reference-agent
+          APEX_MCP_WORKSPACE_ID: acme
+          APEX_MCP_NAMESPACE_ID: prod
+          APEX_MCP_ALLOWED_PORTFOLIOS: northstar-401k
+          APEX_MCP_TRUSTED_SECRET_BASE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host
+          APEX_MCP_GOVERNANCE_ENDPOINT: 127.0.0.1:18446
+          APEX_MCP_GOVERNANCE_CA_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ca.pem
+          APEX_MCP_GOVERNANCE_CLIENT_CERT_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/mcp-gateway-client.pem
+          APEX_MCP_GOVERNANCE_CLIENT_KEY_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/mcp-gateway-client.key
+          APEX_MCP_GOVERNANCE_TOKEN_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/mcp-gateway-token
+          APEX_MCP_EVENT_ENDPOINT: 127.0.0.1:18445
+          APEX_MCP_EVENT_CA_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ca.pem
+          APEX_MCP_EVENT_CLIENT_CERT_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-http-client.pem
+          APEX_MCP_EVENT_CLIENT_KEY_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-http-client.key
+          APEX_MCP_EVENT_TOKEN_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-bearer-token
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm build
+          trace="mcp-live-proof-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export APEX_MCP_TRACE_ID="$trace"
+          transcript="${RUNNER_TEMP}/mcp-live-proof.txt"
+          node scripts/live_proof.mjs | tee "$transcript"
+          proof_trace="$(sed -n 's/^MCP_LIVE_PROOF trace=\([^ ]*\).*/\1/p' "$transcript")"
+          [ "$proof_trace" = "$trace" ] || { echo "MCP proof did not emit its trace" >&2; exit 1; }
+          P="-p apex-gateway-ref-ci -f ../../deploy/compose/compose.gateway-ref.yaml -f ../../deploy/compose/compose.ci-cache.yaml"
+          docker compose $P exec -T clickhouse-projection \
+            python /app/gateway-ref/verify_mcp_projection.py \
+              --trace-id "$trace" \
+              --workspace acme \
+              --namespace prod
 
       # The gate this pass's central claim lives or dies on.
       #

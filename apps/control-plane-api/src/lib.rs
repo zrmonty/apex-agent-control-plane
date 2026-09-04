@@ -31,11 +31,15 @@ pub mod proto {
     tonic::include_proto!("apex.v1");
 }
 
+#[cfg(test)]
+mod governance_tests;
+
 mod agent_auth;
 mod auth;
 mod dual_approval;
 mod envelope;
 mod errors;
+mod governance;
 mod inbox;
 mod keycloak;
 mod outbox;
@@ -50,15 +54,16 @@ pub use agent_auth::{
     supervisor_agent_id,
 };
 pub use auth::{
-    BoxedOperatorCredentialResolver, OperatorCaller, OperatorCredentialResolver,
-    OperatorTokenAuthenticator, OperatorTokenTableError, StaticOperatorTokenResolver,
-    parse_operator_token_table,
+    BoxedOperatorCredentialResolver, GatewayTokenAuthenticator, OperatorCaller,
+    OperatorCredentialResolver, OperatorTokenAuthenticator, OperatorTokenTableError,
+    StaticOperatorTokenResolver, parse_operator_token_table,
 };
 pub use envelope::{
     AcceptedCommand, ControlCommandInput, build_control_request,
     pending_command_from_ingest_request,
 };
 pub use errors::{CommandError, CommandErrorCode};
+pub use governance::{GovernanceConfig, GovernanceGatewayService};
 pub use inbox::{
     AckResult, CancelResult, CommandInbox, CommandSummary, ControlInboxBackend,
     DEFAULT_INBOX_CAPACITY, DEFAULT_INBOX_SCOPE_QUOTA, DEFAULT_LIST_COMMANDS_PAGE_SIZE,
