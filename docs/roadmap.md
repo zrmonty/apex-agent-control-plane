@@ -1,40 +1,38 @@
 # Apex execution roadmap
 
 **Status:** Active
-**Effective:** 2026-09-03
+**Effective:** 2026-09-04
 **Source decision record:** `apex_architecture_assessment_and_mcp_plan.md` (assessment snapshot: 2026-09-03)
 
 This is the execution source of truth until it is replaced by a new decision. It changes delivery priority. It does not rewrite historical progress or invalidate architecture and contract documents.
 
 ## Current objective
 
-Build one real RIA request from the user to an operator-visible, durable result:
+Build the managed MCP proxy platform: operators must be able to create, configure, govern, deploy, observe, pause, rotate, roll back, and retire multiple MCP proxies, with one hardened isolated container per proxy:
 
 ```text
-User
-  |
-Agent
-  |
-TypeScript MCP gateway
-  |
-Apex authorization
-  |
-Portfolio read-only tool
-  |
-Response filtering
-  |
-Apex event
-  |
-NATS and analytics
-  |
 Operator UI
+  |
+Rust control-plane API
+  |
+Proxy lifecycle controller
+  |
+One isolated OCI container per proxy
+  |
+Approved MCP server, API, or CLI runner
+  |
+Apex authorization and evidence
+  |
+Filtered tool result
+  |
+Operator activity
 ```
 
 The product boundary for this roadmap is:
 
 > Apex is the enforcement and evidence layer between enterprise AI agents and the systems they use.
 
-Apex observes, governs, controls, and proves agent actions. MCP is a thin data plane that calls approved tools. MCP does not become a second policy or audit authority.
+Apex observes, governs, controls, and proves agent actions. MCP remains a thin data plane that calls approved tools, but the managed proxy platform adds isolated runtime and lifecycle controls around that data plane. MCP does not become a second policy or audit authority.
 
 ## Active work, in order
 
@@ -142,11 +140,32 @@ Connect the real path end to end. The operator must be able to see:
 
 The completed gate includes the real gateway image, mTLS, product SDK proof, governed MCP stdio proof, operator command path, Postgres replicas, cross-replica Valkey admission, Keycloak operator credentials, adversarial event corpus, compose validation, and teardown. The controlled hardening pass adds the 600-line readability gate, responsibility-based Rust/TypeScript/Python splits, strict live-target and secret handling, read-only gateway root filesystem, and the equivalent Struct serialization benchmark. No held roadmap feature was started.
 
+### 7. Build the managed MCP proxy platform
+
+**Status:** Active next milestone. The approved design is [`2026-09-04-mcp-proxy-platform-design.md`](superpowers/specs/2026-09-04-mcp-proxy-platform-design.md); the research source ledger is [`report-source.md`](mcp-proxies/report-source.md).
+
+Build the deep MCP proxy capability as one focused product slice:
+
+- Add versioned proxy resources and lifecycle operations to the control-plane contract.
+- Store drafts and publish immutable, content-addressed proxy revisions.
+- Reconcile desired state into one hardened OCI container per logical proxy.
+- Keep each proxy's identity, credentials, sessions, caches, files, network policy, resource budget, and evidence namespace isolated.
+- Add `MCP proxies` to the existing React operator UI with a prominent large `+ New proxy` action.
+- Implement the guided creation flow for identity, ingress, upstreams, tool exposure, CLI profiles, authentication, governance, and deployment review.
+- Support MCP stdio and Streamable HTTP with explicit per-transport security rules.
+- Use separate inbound and outbound credentials; never pass inbound tokens through to upstreams.
+- Route every call through Apex authorization, approval, filtering, and durable evidence.
+- Provide fixed CLI command profiles with typed argument arrays, executable identity, sandbox, egress, timeout, and output limits. Do not provide arbitrary shell execution.
+- Provide deploy, pause, resume, rotate, rollback, retire, health, readiness, revision, and activity workflows.
+- Verify scope isolation, container hardening, protocol safety, SSRF resistance, CLI safety, secret handling, evidence behavior, accessibility, and throughput.
+
+**First acceptance slice:** a read-only `portfolio.read` proxy follows the existing live vertical path through an isolated runtime and appears in the operator UI as server-derived activity. Broader MCP domains and high-impact writes remain queued until the shared proxy patterns pass this gate.
+
 ## Explicit hold
 
 The following work is paused. Do not start it, expand it, or use it to define the next milestone unless it is required to unblock an active step or fix a security defect, regression, or data-integrity issue:
 
-- additional static or illustrative operator dashboards and UI routes;
+- additional static or illustrative operator dashboards and UI routes unrelated to the approved MCP proxy surface;
 - the broader Operator UI feature suite, including unrelated Agent Story, Security Center, compliance, evaluation, and cost surfaces;
 - more archive-provider backends or deployment profiles;
 - identity providers beyond the immediate vertical-slice need;
