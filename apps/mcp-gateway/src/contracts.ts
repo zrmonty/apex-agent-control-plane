@@ -78,6 +78,10 @@ export interface ApexEvents {
   emit(event: ToolExecutionEvent): Promise<{ readonly eventId: string }>;
 }
 
+export interface SafeTelemetry {
+  record(code: GatewayErrorCode): void;
+}
+
 export type GatewayErrorCode =
   | "INVALID_INPUT"
   | "AUTHORIZATION_DENIED"
