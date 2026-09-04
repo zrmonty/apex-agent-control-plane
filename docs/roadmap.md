@@ -142,7 +142,7 @@ The completed gate includes the real gateway image, mTLS, product SDK proof, gov
 
 ### 7. Build the managed MCP proxy platform
 
-**Status:** Active next milestone. The approved design is [`2026-09-04-mcp-proxy-platform-design.md`](superpowers/specs/2026-09-04-mcp-proxy-platform-design.md); the research source ledger is [`report-source.md`](mcp-proxies/report-source.md).
+**Status:** Active next milestone. The approved design is [`2026-09-04-mcp-proxy-platform-design.md`](superpowers/specs/2026-09-04-mcp-proxy-platform-design.md); the research source ledger is [`report-source.md`](mcp-proxies/report-source.md); the execution plan is [`2026-09-04-mcp-proxy-platform.md`](superpowers/plans/2026-09-04-mcp-proxy-platform.md).
 
 Build the deep MCP proxy capability as one focused product slice:
 
