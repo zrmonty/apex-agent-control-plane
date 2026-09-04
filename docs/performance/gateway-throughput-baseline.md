@@ -44,3 +44,21 @@ hashing, metadata-only event shape, and the durable-admission-before-success
 ordering. The live gRPC package definitions are also cached after first load;
 that is a startup allocation reduction and is not included in the microbench
 number above.
+
+## Managed proxy measurement protocol
+
+The managed proxy gate uses
+`deploy/compose/loadtest/mcp_proxy_loadtest.py` to record, without inventing
+targets, cold start, readiness, first-call, warm p50/p95/p99, upstream reuse,
+CLI startup, filtering, evidence admission, and bounded concurrency. Run the
+matrix only against a running disposable proxy profile:
+
+```text
+python deploy/compose/loadtest/mcp_proxy_loadtest.py --proxies 1,2,8 --concurrency 1,8,32
+```
+
+Each report must preserve the environment, image/config revision, container
+limits, sample count, failures, and the exact command. A result with no
+reachable endpoint is a failed measurement, not a zero-latency baseline. The
+first run establishes an engineering baseline; it does not establish a
+production SLO or capacity claim.

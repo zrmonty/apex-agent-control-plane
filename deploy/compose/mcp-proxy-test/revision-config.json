@@ -6,10 +6,31 @@
     "transport": "stdio",
     "allowedOrigins": []
   },
-  "upstreams": [],
-  "exposedTools": [],
+  "upstreams": [
+    {
+      "upstreamId": "portfolio",
+      "transport": "streamable-http",
+      "endpointOrCommandRef": "https://mcp-proxy-test-upstream:8443/mcp",
+      "credentialRef": "secret://mcp-proxy-test/portfolio"
+    }
+  ],
+  "exposedTools": [
+    {
+      "upstreamId": "portfolio",
+      "toolName": "portfolio.read",
+      "alias": "portfolio.read",
+      "classification": "read"
+    }
+  ],
   "cliProfiles": [],
-  "authBindings": [],
+  "authBindings": [
+    {
+      "bindingId": "inbound",
+      "direction": "inbound",
+      "issuer": "https://issuer.example.test",
+      "audience": "apex-mcp-proxy"
+    }
+  ],
   "governance": {
     "policyId": "mcp-proxy-test-read-only",
     "approvalMode": "none",
