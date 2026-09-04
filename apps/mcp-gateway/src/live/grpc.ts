@@ -69,18 +69,10 @@ export async function unaryCall(
       client,
       request,
       metadata,
-        { deadline },
+      { deadline },
       (error, response) => {
         if (error !== null) {
-          if (process.env.APEX_MCP_DEBUG_LIVE_ERRORS === "1") {
-            const detail = error.details.replace(/[\r\n]+/g, " ").slice(0, 256);
-            console.error(`mcp live ${failureCode} grpc-status-${error.code} detail=${detail}`);
-          }
-          const explanation =
-            process.env.APEX_MCP_DEBUG_LIVE_ERRORS === "1"
-              ? `grpc-status-${error.code}`
-              : "request rejected safely";
-          reject(new GatewayError(failureCode, explanation));
+          reject(new GatewayError(failureCode, "request rejected safely"));
           return;
         }
         resolve(response);
