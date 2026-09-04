@@ -498,6 +498,9 @@ jobs:
           APEX_MCP_EVENT_CLIENT_CERT_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-http-client.pem
           APEX_MCP_EVENT_CLIENT_KEY_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-http-client.key
           APEX_MCP_EVENT_TOKEN_FILE: ${{ github.workspace }}/deploy/compose/live-mtls/secrets-host/ingest-bearer-token
+          # Numeric transport status only; this is bounded live-gate diagnosis
+          # and never includes server details or credential material.
+          APEX_MCP_DEBUG_LIVE_ERRORS: "1"
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile --ignore-scripts
