@@ -10,7 +10,8 @@ use super::shared::{
 use super::transitions::LifecycleTransition;
 use super::{
     CreateProxy, ListProxies, ListProxiesPage, McpProxy, ProxyRevisionStore, ProxyStore,
-    PublishRevision, RetireProxy, UpdateProxyDraft,
+    ProxyLifecycleStore, PublishRevision, RetireProxy, TransitionProxyLifecycle,
+    UpdateProxyDraft,
 };
 use crate::ExactScope;
 use crate::proxy::{
@@ -329,6 +330,52 @@ impl ProxyRevisionStore for InMemoryProxyStore {
             proxy_id: key,
             revision_id: None,
             scope: input.scope,
+        });
+        Ok(response)
+    }
+}
+
+impl ProxyLifecycleStore for InMemoryProxyStore {
+    fn transition(&self, input: TransitionProxyLifecycle) -> Result<McpProxy, ProxyError> {
+        super::shared::validate_request_id(&input.request_id)?;
+        super::shared::validate_scope(&input.scope)?;
+        let actor_id = super::super::validation::bounded_required_string(input.actor_id)?;
+        let reason_code = super::super::validation::bounded_required_string(input.reason_code)?;
+        let operation = input.command.operation();
+        let payload_hash = format!(
+            "{}:{}:{}:{}:{}:{}",
+            input.proxy_id, input.revision_id, input.expected_revision_id.as_ref().map(ToString::to_string).unwrap_or_default(),
+            actor_id, reason_code, input.approved
+        );
+        let mut state = self.state.lock().map_err(|_| super::shared::configuration_error())?;
+        if let Some(record) = state.check_idempotency(operation, &input.request_id, &payload_hash, &input.scope)? {
+            return state.replay_proxy(&record);
+        }
+        let key = input.proxy_id.to_string();
+        let current = state.proxies.get(&key).ok_or_else(ProxyError::proxy_not_found)?;
+        super::shared::ensure_scope_match(&current.scope, &input.scope)?;
+        if current.active_revision_id != input.expected_revision_id || current.active_revision_id.as_ref() != Some(&input.revision_id) {
+            return Err(ProxyError::revision_conflict());
+        }
+        let transition = super::super::lifecycle::LifecycleTransition::new(
+            current.lifecycle_state,
+            input.command,
+            input.approved,
+        )?;
+        let revision = state.revisions.get_mut(&super::shared::revision_key(&input.proxy_id, &input.revision_id)).ok_or_else(ProxyError::revision_not_found)?;
+        if !revision.published { return Err(ProxyError::immutable_revision()); }
+        revision.revision.lifecycle_state = transition.next_state;
+        let proxy = state.proxies.get_mut(&key).ok_or_else(ProxyError::proxy_not_found)?;
+        proxy.lifecycle_state = transition.next_state;
+        let response = proxy.clone().to_proxy(&state.revisions, None);
+        state.record_transition(super::transitions::LifecycleTransition::new(
+            operation, input.scope.clone(), input.proxy_id.clone(), Some(input.revision_id.clone()),
+            Some(transition.prior_state), transition.next_state, Some(actor_id),
+            reason_code, "committed",
+        ));
+        state.record_idempotency(IdempotencyRecord {
+            request_id: input.request_id, operation, payload_hash, proxy_id: key,
+            revision_id: None, scope: input.scope,
         });
         Ok(response)
     }

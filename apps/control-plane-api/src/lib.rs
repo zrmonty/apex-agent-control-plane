@@ -86,9 +86,11 @@ pub use proxy::{
     EgressDestination, ExposedTool, GovernanceBinding, InMemoryProxyStore, Ingress,
     ListProxies, ListProxiesPage, McpProxy, McpProxyRevision, McpProxySummary, NetworkPolicy,
     PrivateDestinationAllowance, ProxyDraft, ProxyError, ProxyExposure, ProxyId,
+    ProxyLifecycleStore, ProxyStoreBackend, TransitionProxyLifecycle,
     ProxyLifecycleState, ProxyRedactionStatus, ProxyRevisionId, ProxyRevisionStore, ProxySpec,
     ProxyStore, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
     RuntimeProfile, SecretRef, UpdateProxyDraft, UpstreamBinding, CreateProxy,
+    McpProxyService, ProxyEventSink, ProxyRuntimeProvider, bounded_mcp_proxy_service_server,
     parse_proxy_spec_wire_json, validate_mcp_proxy_revision, validate_proxy_spec,
     validate_proxy_spec_wire_json,
 };

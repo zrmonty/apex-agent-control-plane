@@ -1,6 +1,6 @@
 use super::{
-    McpProxyRevision, ProxyError, ProxyId, ProxyLifecycleState, ProxyRedactionStatus,
-    ProxyRevisionId, ProxySpec,
+    LifecycleCommand, McpProxyRevision, ProxyError, ProxyId, ProxyLifecycleState,
+    ProxyRedactionStatus, ProxyRevisionId, ProxySpec,
 };
 use crate::ExactScope;
 
@@ -81,6 +81,19 @@ pub struct RetireProxy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionProxyLifecycle {
+    pub request_id: String,
+    pub scope: ExactScope,
+    pub proxy_id: ProxyId,
+    pub revision_id: ProxyRevisionId,
+    pub expected_revision_id: Option<ProxyRevisionId>,
+    pub actor_id: String,
+    pub reason_code: String,
+    pub command: LifecycleCommand,
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListProxies {
     pub scope: ExactScope,
     pub page_size: usize,
@@ -111,6 +124,13 @@ pub trait ProxyRevisionStore: Send + Sync {
 
     fn retire(&self, input: RetireProxy) -> Result<McpProxy, ProxyError>;
 }
+
+pub trait ProxyLifecycleStore: Send + Sync {
+    fn transition(&self, input: TransitionProxyLifecycle) -> Result<McpProxy, ProxyError>;
+}
+
+pub trait ProxyStoreBackend: ProxyStore + ProxyRevisionStore + ProxyLifecycleStore {}
+impl<T> ProxyStoreBackend for T where T: ProxyStore + ProxyRevisionStore + ProxyLifecycleStore {}
 
 #[cfg(test)]
 mod tests;

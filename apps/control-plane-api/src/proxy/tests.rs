@@ -380,7 +380,7 @@ fn valid_scope() -> ExactScope {
     }
 }
 
-fn valid_proxy_spec() -> ProxySpec {
+pub(super) fn valid_proxy_spec() -> ProxySpec {
     ProxySpec {
         ingress: Ingress {
             transport: ProxyTransport::StreamableHttp,

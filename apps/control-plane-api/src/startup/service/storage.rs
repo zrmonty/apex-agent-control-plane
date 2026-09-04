@@ -6,7 +6,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use apex_control_plane_api::{
-    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, SharedEphemeralStore,
+    ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, InMemoryProxyStore,
+    ProxyStoreBackend, SharedEphemeralStore,
 };
 #[cfg(feature = "postgres")]
 use apex_control_plane_api::{
@@ -165,17 +166,18 @@ pub(super) fn build_ephemeral_store(
 
 /// Warms the MCP proxy store backend during startup so schema/application
 /// errors fail before the runtime enters its serve loop.
-pub(super) fn warm_proxy_store() -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn open_proxy_store() -> Result<std::sync::Arc<dyn ProxyStoreBackend>, Box<dyn std::error::Error>> {
     #[cfg(feature = "postgres")]
     {
         if let Some(url) = control_postgres_url()? {
-            PostgresProxyStore::connect(&url).map_err(|error| {
+            let store = PostgresProxyStore::connect(&url).map_err(|error| {
                 io::Error::other(format!(
                     "failed to open mcp proxy store: {}",
                     error.code()
                 ))
             })?;
             println!("apex-control-plane-api proxy store backend: postgres");
+            return Ok(std::sync::Arc::new(store));
         }
     }
     #[cfg(not(feature = "postgres"))]
@@ -188,7 +190,8 @@ pub(super) fn warm_proxy_store() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
-    Ok(())
+    println!("apex-control-plane-api proxy store backend: in-memory (development only)");
+    Ok(std::sync::Arc::new(InMemoryProxyStore::default()))
 }
 
 /// Selects the durable outbox backend, mirroring `event-ingest`'s

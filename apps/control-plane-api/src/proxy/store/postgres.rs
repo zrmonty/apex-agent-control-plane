@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use postgres::{Client, GenericClient};
 
 mod idempotency;
+mod lifecycle;
 mod rows;
 mod transitions;
 
@@ -15,7 +16,7 @@ use super::shared::{
 };
 use super::{
     CreateProxy, ListProxies, ListProxiesPage, McpProxy, ProxyRevisionStore, ProxyStore,
-    PublishRevision, RetireProxy, UpdateProxyDraft,
+    ProxyLifecycleStore, PublishRevision, RetireProxy, TransitionProxyLifecycle, UpdateProxyDraft,
 };
 use crate::ExactScope;
 use crate::proxy::{
@@ -29,7 +30,13 @@ use transitions::insert_lifecycle_transition;
 const PROXY_SCHEMA_LOCK: i64 = 0x0A9E_1DE3_0000_0004_u64 as i64;
 
 pub struct PostgresProxyStore {
-    client: Mutex<Client>,
+    pub(super) client: Mutex<Client>,
+}
+
+impl ProxyLifecycleStore for PostgresProxyStore {
+    fn transition(&self, input: TransitionProxyLifecycle) -> Result<McpProxy, ProxyError> {
+        lifecycle::transition(self, input)
+    }
 }
 
 impl PostgresProxyStore {
@@ -483,7 +490,7 @@ impl ProxyRevisionStore for PostgresProxyStore {
     }
 }
 
-fn query_proxy_for_update(
+pub(super) fn query_proxy_for_update(
     client: &mut impl GenericClient,
     proxy_id: &ProxyId,
 ) -> Result<Option<StoreProxy>, ProxyError> {
@@ -502,7 +509,7 @@ fn query_proxy_for_update(
         .transpose()
 }
 
-fn query_revision_row(
+pub(super) fn query_revision_row(
     client: &mut impl GenericClient,
     proxy_id: &ProxyId,
     revision_id: &ProxyRevisionId,
@@ -520,7 +527,7 @@ fn query_revision_row(
         .transpose()
 }
 
-fn load_proxy(
+pub(super) fn load_proxy(
     client: &mut impl GenericClient,
     proxy_id: &str,
     override_revision_id: Option<&str>,

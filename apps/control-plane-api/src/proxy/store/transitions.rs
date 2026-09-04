@@ -4,39 +4,39 @@ use crate::proxy::{ProxyId, ProxyLifecycleState, ProxyRevisionId};
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct LifecycleTransition {
-    pub(super) operation: &'static str,
+    pub(super) operation: String,
     pub(super) scope: ExactScope,
     pub(super) proxy_id: ProxyId,
     pub(super) revision_id: Option<ProxyRevisionId>,
     pub(super) prior_state: Option<ProxyLifecycleState>,
     pub(super) next_state: ProxyLifecycleState,
     pub(super) actor_id: Option<String>,
-    pub(super) reason_code: &'static str,
-    pub(super) status: &'static str,
+    pub(super) reason_code: String,
+    pub(super) status: String,
 }
 
 impl LifecycleTransition {
     pub(super) fn new(
-        operation: &'static str,
+        operation: impl Into<String>,
         scope: ExactScope,
         proxy_id: ProxyId,
         revision_id: Option<ProxyRevisionId>,
         prior_state: Option<ProxyLifecycleState>,
         next_state: ProxyLifecycleState,
         actor_id: Option<String>,
-        reason_code: &'static str,
-        status: &'static str,
+        reason_code: impl Into<String>,
+        status: impl Into<String>,
     ) -> Self {
         Self {
-            operation,
+            operation: operation.into(),
             scope,
             proxy_id,
             revision_id,
             prior_state,
             next_state,
             actor_id,
-            reason_code,
-            status,
+            reason_code: reason_code.into(),
+            status: status.into(),
         }
     }
 

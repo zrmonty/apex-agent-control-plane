@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use apex_control_plane_api::{
     ControlGatewayService, GatewayRuntimeMetrics, GatewayShutdown, OperatorTokenAuthenticator,
-    bounded_control_gateway_server,
+    McpProxyService, bounded_control_gateway_server, bounded_mcp_proxy_service_server,
 };
 use tonic::transport::Server;
 
@@ -27,7 +27,7 @@ mod workers;
 use resolvers::{
     build_agent_resolver, build_governance_service, build_operator_resolver, load_server_tls,
 };
-use storage::{build_ephemeral_store, open_inbox, open_outbox, warm_proxy_store};
+use storage::{build_ephemeral_store, open_inbox, open_outbox, open_proxy_store};
 use workers::{
     spawn_health_monitor, spawn_inbox_reconciliation_worker, spawn_inbox_retention_worker,
     spawn_metrics_server, spawn_status_logger, wait_for_shutdown_signal,
@@ -58,7 +58,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tls = load_server_tls(&trusted_base)?;
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
-    warm_proxy_store()?;
+    let proxy_store = open_proxy_store()?;
     let command_retention = command_retention()?;
     let retention_millis = command_retention.as_millis().try_into().map_err(|_| {
         io::Error::new(
@@ -67,9 +67,11 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
     let resolver = build_operator_resolver(&trusted_base)?;
+    let proxy_resolver = build_operator_resolver(&trusted_base)?;
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let governance_service = build_governance_service(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
+    let proxy_service = McpProxyService::new(OperatorTokenAuthenticator::new(proxy_resolver), proxy_store);
     // Resolved and validated here, with no runtime entered; spawned below,
     // inside one. No socket is opened either way -- an unreachable broker
     // must never stop this gateway from starting (ADR-0006).
@@ -109,6 +111,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         health_reporter
             .set_service_status(
                 "apex.v1.ControlGateway",
+                tonic_health::ServingStatus::Serving,
+            )
+            .await;
+        health_reporter
+            .set_service_status(
+                "apex.v1.McpProxyService",
                 tonic_health::ServingStatus::Serving,
             )
             .await;
@@ -186,6 +194,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             .tls_config(tls)?
             .add_service(health_service)
             .add_service(bounded_control_gateway_server(service))
+            .add_service(bounded_mcp_proxy_service_server(proxy_service))
             .add_service(
                 apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(
                     governance_service,

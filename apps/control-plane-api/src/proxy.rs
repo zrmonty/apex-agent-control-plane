@@ -5,12 +5,19 @@ use uuid::Uuid;
 use crate::{ExactScope, proto};
 
 mod validation;
+mod lifecycle;
+mod service;
 mod store;
 mod wire;
 
+#[allow(unused_imports)]
+pub use lifecycle::{LifecycleCommand, LifecycleTransition, transition_state};
+pub use service::{McpProxyService, ProxyEventSink, ProxyRuntimeProvider, bounded_mcp_proxy_service_server};
+
 pub use store::{
     CreateProxy, InMemoryProxyStore, ListProxies, ListProxiesPage, McpProxy, McpProxySummary,
-    ProxyRevisionStore, ProxyStore, PublishRevision, RetireProxy, UpdateProxyDraft,
+    ProxyLifecycleStore, ProxyRevisionStore, ProxyStore, ProxyStoreBackend, PublishRevision, RetireProxy,
+    TransitionProxyLifecycle, UpdateProxyDraft,
 };
 use validation::{bounded_host, bounded_required_string, is_lowercase_uuidv7, is_scope_identifier};
 pub use validation::{validate_mcp_proxy_revision, validate_proxy_spec};
@@ -532,6 +539,20 @@ impl ProxyError {
         Self::new(
             "INVALID_PROXY_CURSOR",
             "The proxy list cursor is invalid.",
+        )
+    }
+
+    pub fn invalid_lifecycle_transition() -> Self {
+        Self::new(
+            "INVALID_PROXY_LIFECYCLE_TRANSITION",
+            "The requested proxy lifecycle transition is not allowed.",
+        )
+    }
+
+    pub fn approval_required() -> Self {
+        Self::new(
+            "PROXY_APPROVAL_REQUIRED",
+            "Proxy deployment requires an approved immutable revision.",
         )
     }
 }
