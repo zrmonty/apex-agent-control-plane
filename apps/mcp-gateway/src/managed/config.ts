@@ -124,6 +124,7 @@ const authBindingSchema = z
     direction: z.enum(["inbound", "outbound"]),
     credentialRef: secretRef.optional(),
     audience: identifier.optional(),
+    issuer: origin.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -227,6 +228,7 @@ export type ProxyRevisionConfig = Readonly<{
     direction: "inbound" | "outbound";
     credentialRef?: string;
     audience?: string;
+    issuer?: string;
   }>[];
   governance: Readonly<{
     policyId: string;
