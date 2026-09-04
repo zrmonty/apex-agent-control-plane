@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "user": {
+    "uid": 10001,
+    "gid": 10001,
+    "rootless": true
+  },
+  "security": {
+    "privileged": false,
+    "noNewPrivileges": true,
+    "capDrop": ["ALL"],
+    "runtimeSocket": false
+  },
+  "rootfs": {
+    "readOnly": true,
+    "tmpfs": [
+      {
+        "path": "/tmp",
+        "sizeBytes": 67108864,
+        "mode": 448
+      }
+    ]
+  },
+  "resources": {
+    "cpuMillis": 500,
+    "memoryBytes": 268435456,
+    "pidLimit": 128
+  },
+  "network": {
+    "mode": "declared-egress",
+    "hostNetwork": false,
+    "hostPid": false,
+    "hostIpc": false
+  }
+}
