@@ -46,7 +46,9 @@ Only work that advances the objective below is active.
 - `crates/apex-policy` now defines the transport-neutral governance boundary: validated scope and identity metadata, authorization/policy/approval decisions, content-free tool evidence, and replaceable async Apex adapters.
 - `event-ingest` and `control-plane-api` now consume shared crates directly; the control-plane application no longer depends on the ingest application.
 - Durable admission remains enqueue-only: the admission call commits the local outbox and returns, while a separate replay worker owns downstream publication and recovery.
-- The remaining active work starts at the thin TypeScript MCP gateway, then the single read-only RIA tool and the live operator-visible vertical slice. The gateway must consume the governance boundary; it must not recreate it.
+- The thin TypeScript stdio MCP gateway is implemented in `apps/mcp-gateway` and exposes one validated read-only MCP tool over stdio without recreating governance.
+- The deterministic local `portfolio.read` path is implemented with strict input validation, exact-scope local authorization, gateway-side filtering, and metadata-only execution events.
+- The remaining active work is to replace the local Apex authorization/event stubs with live clients and prove the narrow operator-visible vertical slice. The live completion gate is still open.
 
 The foundation boundary is complete: the dependency-direction check and the durable ACK-before-downstream regression checks are green in the full workspace verification.
 
@@ -94,6 +96,8 @@ The interfaces must carry the existing scope, identity, policy, trace, and class
 
 ### 4. Build one thin TypeScript MCP gateway
 
+**Status:** Implemented locally/test-only in `apps/mcp-gateway`.
+
 Create `apps/mcp-gateway` as a small service. It owns:
 
 - MCP transport;
@@ -108,6 +112,8 @@ Use a local adapter first if that shortens the path. Replace it with a live Apex
 
 ### 5. Add one RIA read-only tool
 
+**Status:** Implemented locally/test-only as the deterministic `portfolio.read` path.
+
 Start with `portfolio.read` or an equivalent read-only portfolio tool.
 
 - Return only fields required for the request.
@@ -118,6 +124,8 @@ Start with `portfolio.read` or an equivalent read-only portfolio tool.
 **Exit gate:** allowed and denied requests are both tested, the tool cannot mutate portfolio state, and sensitive fields are removed by the gateway rather than by model instructions.
 
 ### 6. Prove the live vertical slice
+
+**Status:** Not complete. This remains the active completion gate.
 
 Connect the real path end to end. The operator must be able to see:
 

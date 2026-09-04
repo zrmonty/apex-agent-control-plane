@@ -1,6 +1,6 @@
 # Apex MCP vertical slice design
 
-**Status:** Proposed for written-spec review
+**Status:** Approved for implementation
 **Date:** 2026-09-03
 **Decision record:** `C:\Users\zrmon\Downloads\apex_architecture_assessment_and_mcp_plan.md`
 
@@ -122,6 +122,8 @@ Create `apps/mcp-gateway` as a focused TypeScript service. Its responsibilities 
 - structured tool-call telemetry.
 
 Its initial internal boundaries are `transport`, `schemas`, `adapters`, `governance`, `filtering`, and `telemetry`. The gateway does not own policy storage, approvals, audit storage, or broad workflow state.
+
+The initial transport is the official MCP stdio transport. It keeps the first service small and compatible with local MCP clients while the transport boundary remains isolated for a later Streamable HTTP adapter. Authentication context is injected by the service composition layer for this checkpoint; network authentication and live Apex transport are deferred to the live vertical-slice milestone.
 
 The first tool is `portfolio.read`. Its input is limited to a portfolio identifier and bounded optional as-of parameters. Caller identity and scope come from authenticated request context. The caller cannot supply its own scope, policy result, classification, or arbitrary backend query.
 
