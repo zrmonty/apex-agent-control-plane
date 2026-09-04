@@ -58,6 +58,19 @@ enum McpProxyExposure {
   MCP_PROXY_EXPOSURE_EXTERNAL = 2;
 }
 
+enum McpProxyToolClassification {
+  MCP_PROXY_TOOL_CLASSIFICATION_UNSPECIFIED = 0;
+  MCP_PROXY_TOOL_CLASSIFICATION_READ = 1;
+  MCP_PROXY_TOOL_CLASSIFICATION_BUSINESS_WRITE = 2;
+  MCP_PROXY_TOOL_CLASSIFICATION_HIGH_IMPACT = 3;
+}
+
+enum McpProxyPrivateDestinationAllowance {
+  MCP_PROXY_PRIVATE_DESTINATION_ALLOWANCE_UNSPECIFIED = 0;
+  MCP_PROXY_PRIVATE_DESTINATION_ALLOWANCE_DENIED = 1;
+  MCP_PROXY_PRIVATE_DESTINATION_ALLOWANCE_ALLOWED = 2;
+}
+
 message CreateProxyRequest {
   // Required lowercase UUIDv7 idempotency key. The server must reject an
   // empty, missing, or non-UUIDv7 request_id before performing any state
@@ -390,7 +403,7 @@ message ProxyConnectionTest {
 message McpProxySpec {
   McpProxyIngress ingress = 1;
   repeated McpProxyUpstreamBinding upstreams = 2;
-  repeated string exposed_tools = 3;
+  repeated McpProxyToolExposure exposed_tools = 3;
   repeated McpProxyCliProfile cli_profiles = 4;
   repeated McpProxyAuthBinding auth_bindings = 5;
   McpProxyGovernanceBinding governance_binding = 6;
@@ -405,6 +418,13 @@ message McpProxyIngress {
   repeated string allowed_origins = 5;
   string protocol_revision = 6;
   bool inbound_authentication_required = 7;
+}
+
+message McpProxyToolExposure {
+  string upstream_id = 1;
+  string tool_name = 2;
+  string alias = 3;
+  McpProxyToolClassification classification = 4;
 }
 
 message McpProxyUpstreamBinding {
@@ -431,6 +451,7 @@ message McpProxyCliProfile {
   uint32 timeout_ms = 10;
   uint32 max_output_bytes = 11;
   repeated int32 allowed_exit_codes = 12;
+  bool shell = 13;
 }
 
 message McpProxyAuthBinding {
@@ -457,4 +478,11 @@ message McpProxyRuntimeProfile {
   string network_policy = 4;
   string filesystem_policy = 5;
   bool rootless = 6;
+  repeated McpProxyEgressDestination egress_destinations = 7;
+}
+
+message McpProxyEgressDestination {
+  string host = 1;
+  uint32 port = 2;
+  McpProxyPrivateDestinationAllowance private_destination_allowance = 3;
 }

@@ -82,11 +82,12 @@ pub use keycloak::{
 pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
 pub use proxy::{
-    ApprovalMode, ArgSchema, ArgSchemaField, CliProfile, DataClassification, EgressDestination,
-    ExposedTool, GovernanceBinding, McpProxyRevision, NetworkPolicy, PrivateDestinationAllowance,
-    ProxyDraft, ProxyError, ProxyId, ProxyLifecycleState, ProxyRevisionId, ProxySpec,
-    ProxyToolClassification, ProxyTransport, RuntimeProfile, SecretRef, UpstreamBinding,
-    validate_proxy_spec,
+    ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, DataClassification,
+    EgressDestination, ExposedTool, GovernanceBinding, Ingress, McpProxyRevision, NetworkPolicy,
+    PrivateDestinationAllowance, ProxyDraft, ProxyError, ProxyExposure, ProxyId,
+    ProxyLifecycleState, ProxyRevisionId, ProxySpec, ProxyToolClassification, ProxyTransport,
+    RuntimeProfile, SecretRef, UpstreamBinding, parse_proxy_spec_wire_json,
+    validate_mcp_proxy_revision, validate_proxy_spec, validate_proxy_spec_wire_json,
 };
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,

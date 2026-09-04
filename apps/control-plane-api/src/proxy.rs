@@ -5,47 +5,61 @@ use uuid::Uuid;
 use crate::{ExactScope, proto};
 
 mod validation;
+mod wire;
 
-pub use validation::validate_proxy_spec;
-use validation::{
-    bounded_endpoint, bounded_identifier, bounded_required_string, is_lowercase_uuidv7,
-    is_scope_identifier, optional_hash, optional_secret_ref, parse_approval_mode,
-    parse_budget_limit, parse_data_classification, parse_positive_u32, parse_rate_limit,
-    parse_retention_days,
-};
+use validation::{bounded_host, bounded_required_string, is_lowercase_uuidv7, is_scope_identifier};
+pub use validation::{validate_mcp_proxy_revision, validate_proxy_spec};
+pub use wire::{parse_proxy_spec_wire_json, validate_proxy_spec_wire_json};
 
 #[cfg(test)]
 mod tests;
 
 pub(super) const MAX_IDENTIFIER_LEN: usize = 128;
 pub(super) const MAX_ENDPOINT_LEN: usize = 512;
+pub(super) const MAX_STRING_LEN: usize = 512;
+pub(super) const MAX_COLLECTION_LIMIT: u32 = 1_000_000;
+pub(super) const MAX_UPSTREAMS: usize = 64;
+pub(super) const MAX_EXPOSED_TOOLS: usize = 256;
+pub(super) const MAX_CLI_PROFILES: usize = 32;
+pub(super) const MAX_AUTH_BINDINGS: usize = 32;
+pub(super) const MAX_DESTINATIONS: usize = 64;
+pub(super) const MAX_ALLOWED_ORIGINS: usize = 32;
+pub(super) const MAX_SCOPES: usize = 64;
+pub(super) const MAX_SECRET_REFS: usize = 32;
+pub(super) const MAX_ARGV: usize = 64;
+pub(super) const MAX_ARG_SCHEMA_FIELDS: usize = 64;
+pub(super) const MAX_ENVIRONMENT_ENTRIES: usize = 64;
+pub(super) const MAX_EXIT_CODES: usize = 32;
+pub(super) const MAX_TIMEOUT_MS: u32 = 300_000;
+pub(super) const MAX_OUTPUT_BYTES: u32 = 16 * 1024 * 1024;
+pub(super) const MAX_CONFIG_HASH_LEN: usize = 64;
 
-macro_rules! bounded_string {
-    ($name:ident, $max_len:expr, $message:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SecretRef(String);
 
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ProxyError> {
-                let value = value.into();
-                if value.is_empty() || value.len() > $max_len {
-                    return Err(ProxyError::invalid_proxy_spec($message));
-                }
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
+impl SecretRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProxyError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_ENDPOINT_LEN
+            || value.chars().any(char::is_control)
+            || !value.starts_with("secret://")
+        {
+            return Err(ProxyError::invalid_proxy_spec(
+                "Proxy secret references must be bounded SecretRef references.",
+            ));
         }
-    };
-}
+        Ok(Self(value))
+    }
 
-bounded_string!(
-    SecretRef,
-    MAX_ENDPOINT_LEN,
-    "Proxy secret references must be bounded non-empty references."
-);
+    pub fn from_reference(value: impl Into<String>) -> Result<Self, ProxyError> {
+        Self::new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProxyId(Uuid);
@@ -108,10 +122,45 @@ impl TryFrom<i32> for ProxyTransport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyExposure {
+    Private,
+    External,
+}
+
+impl TryFrom<i32> for ProxyExposure {
+    type Error = ProxyError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match proto::McpProxyExposure::try_from(value).ok() {
+            Some(proto::McpProxyExposure::Private) => Ok(Self::Private),
+            Some(proto::McpProxyExposure::External) => Ok(Self::External),
+            _ => Err(ProxyError::invalid_proxy_spec(
+                "Proxy configuration uses an unsupported exposure mode.",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyToolClassification {
     Read,
     BusinessWrite,
     HighImpact,
+}
+
+impl TryFrom<i32> for ProxyToolClassification {
+    type Error = ProxyError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match proto::McpProxyToolClassification::try_from(value).ok() {
+            Some(proto::McpProxyToolClassification::Read) => Ok(Self::Read),
+            Some(proto::McpProxyToolClassification::BusinessWrite) => Ok(Self::BusinessWrite),
+            Some(proto::McpProxyToolClassification::HighImpact) => Ok(Self::HighImpact),
+            _ => Err(ProxyError::invalid_proxy_spec(
+                "Proxy tool exposure uses an unsupported classification.",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +182,20 @@ pub enum DataClassification {
 pub enum PrivateDestinationAllowance {
     Denied,
     Allowed,
+}
+
+impl TryFrom<i32> for PrivateDestinationAllowance {
+    type Error = ProxyError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match proto::McpProxyPrivateDestinationAllowance::try_from(value).ok() {
+            Some(proto::McpProxyPrivateDestinationAllowance::Denied) => Ok(Self::Denied),
+            Some(proto::McpProxyPrivateDestinationAllowance::Allowed) => Ok(Self::Allowed),
+            _ => Err(ProxyError::invalid_proxy_spec(
+                "Proxy egress destinations require an explicit private-destination allowance.",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,14 +223,47 @@ impl EgressDestination {
     }
 }
 
+impl TryFrom<proto::McpProxyEgressDestination> for EgressDestination {
+    type Error = ProxyError;
+
+    fn try_from(value: proto::McpProxyEgressDestination) -> Result<Self, Self::Error> {
+        let port = u16::try_from(value.port).map_err(|_| {
+            ProxyError::invalid_proxy_spec("Proxy egress destinations require a valid port.")
+        })?;
+        Ok(Self::Https {
+            host: bounded_host(value.host)?,
+            port,
+            private_allowance: PrivateDestinationAllowance::try_from(
+                value.private_destination_allowance,
+            )?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkPolicy {
     pub destinations: Vec<EgressDestination>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ingress {
+    pub transport: ProxyTransport,
+    pub exposure: ProxyExposure,
+    pub host: String,
+    pub path: String,
+    pub allowed_origins: Vec<String>,
+    pub protocol_revision: String,
+    pub inbound_authentication_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProfile {
     pub image_digest: String,
+    pub cpu_limit: String,
+    pub memory_limit: String,
+    pub network_policy: String,
+    pub filesystem_policy: String,
+    pub rootless: bool,
     pub network: NetworkPolicy,
 }
 
@@ -212,10 +308,20 @@ pub struct CliProfile {
     pub working_directory: String,
     pub environment_allowlist: Vec<String>,
     pub secret_refs: Vec<SecretRef>,
+    pub filesystem_policy: String,
+    pub network_policy: String,
     pub shell: bool,
     pub timeout_ms: u32,
     pub max_output_bytes: u32,
     pub allowed_exit_codes: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthBinding {
+    pub binding_id: String,
+    pub inbound_subject: String,
+    pub outbound_credential_ref: Option<SecretRef>,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,67 +337,13 @@ pub struct GovernanceBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxySpec {
-    pub ingress_transport: ProxyTransport,
+    pub ingress: Ingress,
     pub upstreams: Vec<UpstreamBinding>,
     pub exposed_tools: Vec<ExposedTool>,
     pub cli_profiles: Vec<CliProfile>,
+    pub auth_bindings: Vec<AuthBinding>,
     pub governance_binding: GovernanceBinding,
     pub runtime_profile: RuntimeProfile,
-}
-
-impl TryFrom<proto::McpProxySpec> for ProxySpec {
-    type Error = ProxyError;
-
-    fn try_from(value: proto::McpProxySpec) -> Result<Self, Self::Error> {
-        let ingress = value.ingress.ok_or_else(|| {
-            ProxyError::invalid_proxy_spec("Proxy configuration requires ingress settings.")
-        })?;
-        let governance = value.governance_binding.ok_or_else(|| {
-            ProxyError::invalid_proxy_spec("Proxy configuration requires a governance binding.")
-        })?;
-        let runtime = value.runtime_profile.ok_or_else(|| {
-            ProxyError::invalid_proxy_spec("Proxy configuration requires a runtime profile.")
-        })?;
-
-        let transport = ProxyTransport::try_from(ingress.transport)?;
-        let upstreams = value
-            .upstreams
-            .into_iter()
-            .map(UpstreamBinding::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        let default_upstream = upstreams
-            .first()
-            .map(|binding| binding.upstream_id.clone())
-            .ok_or_else(|| {
-                ProxyError::invalid_proxy_spec(
-                    "Proxy configuration requires at least one upstream binding.",
-                )
-            })?;
-
-        let exposed_tools = value
-            .exposed_tools
-            .into_iter()
-            .map(|tool_name| ExposedTool {
-                upstream_id: default_upstream.clone(),
-                alias: tool_name.clone(),
-                tool_name,
-                classification: ProxyToolClassification::Read,
-            })
-            .collect();
-
-        Ok(Self {
-            ingress_transport: transport,
-            upstreams,
-            exposed_tools,
-            cli_profiles: value
-                .cli_profiles
-                .into_iter()
-                .map(CliProfile::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
-            governance_binding: GovernanceBinding::try_from(governance)?,
-            runtime_profile: RuntimeProfile::try_from(runtime)?,
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,20 +367,13 @@ impl ProxyDraft {
             return Err(ProxyError::invalid_proxy_scope());
         }
 
-        let display_name = display_name.into();
-        if display_name.is_empty() || display_name.len() > MAX_ENDPOINT_LEN {
-            return Err(ProxyError::invalid_proxy_draft(
-                "Proxy drafts require a non-empty bounded display name.",
-            ));
-        }
-
+        let display_name = bounded_required_string(display_name.into())?;
         let slug = slug.into();
         if !is_valid_slug(&slug) {
             return Err(ProxyError::invalid_proxy_draft(
                 "Proxy drafts require a non-empty bounded slug.",
             ));
         }
-
         validate_proxy_spec(&spec)?;
 
         Ok(Self {
@@ -348,6 +393,26 @@ pub struct McpProxyRevision {
     pub spec: ProxySpec,
     pub config_hash: String,
     pub lifecycle_state: ProxyLifecycleState,
+}
+
+impl McpProxyRevision {
+    pub fn new(
+        proxy_id: ProxyId,
+        revision_id: ProxyRevisionId,
+        spec: ProxySpec,
+        config_hash: impl Into<String>,
+        lifecycle_state: ProxyLifecycleState,
+    ) -> Result<Self, ProxyError> {
+        let revision = Self {
+            proxy_id,
+            revision_id,
+            spec,
+            config_hash: config_hash.into(),
+            lifecycle_state,
+        };
+        validate_mcp_proxy_revision(&revision)?;
+        Ok(revision)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,110 +465,6 @@ impl std::fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
-impl TryFrom<proto::McpProxyUpstreamBinding> for UpstreamBinding {
-    type Error = ProxyError;
-
-    fn try_from(value: proto::McpProxyUpstreamBinding) -> Result<Self, Self::Error> {
-        Ok(Self {
-            upstream_id: bounded_identifier(value.upstream_id)?,
-            display_name: bounded_required_string(value.display_name)?,
-            transport: ProxyTransport::try_from(value.transport)?,
-            endpoint_or_command_ref: bounded_endpoint(value.endpoint_or_command_ref)?,
-            credential_ref: optional_secret_ref(value.credential_ref)?,
-            secret_refs: value
-                .secret_refs
-                .into_iter()
-                .map(SecretRef::new)
-                .collect::<Result<Vec<_>, _>>()?,
-            server_identity: bounded_required_string(value.server_identity)?,
-            tool_catalog_hash: optional_hash(value.tool_catalog_hash)?,
-        })
-    }
-}
-
-impl TryFrom<proto::McpProxyCliProfile> for CliProfile {
-    type Error = ProxyError;
-
-    fn try_from(value: proto::McpProxyCliProfile) -> Result<Self, Self::Error> {
-        let argv_template = value.argv_template;
-        Ok(Self {
-            profile_id: bounded_identifier(value.profile_id)?,
-            executable_ref: bounded_endpoint(value.executable_ref)?,
-            executable_digest: bounded_required_string(value.executable_digest)?,
-            fixed_argv: argv_template
-                .iter()
-                .cloned()
-                .map(bounded_required_string)
-                .collect::<Result<Vec<_>, _>>()?,
-            argv_schema: ArgSchema::from(argv_template),
-            working_directory: bounded_endpoint(value.working_directory)?,
-            environment_allowlist: value
-                .environment_allowlist
-                .into_iter()
-                .map(bounded_identifier)
-                .collect::<Result<Vec<_>, _>>()?,
-            secret_refs: value
-                .secret_refs
-                .into_iter()
-                .map(SecretRef::new)
-                .collect::<Result<Vec<_>, _>>()?,
-            shell: false,
-            timeout_ms: value.timeout_ms,
-            max_output_bytes: value.max_output_bytes,
-            allowed_exit_codes: value.allowed_exit_codes,
-        })
-    }
-}
-
-impl ArgSchema {
-    fn from(argv_template: Vec<String>) -> Self {
-        let fields = argv_template
-            .into_iter()
-            .filter(|value| !value.starts_with('-'))
-            .map(|name| ArgSchemaField {
-                name,
-                required: true,
-            })
-            .collect();
-        Self { fields }
-    }
-}
-
-impl TryFrom<proto::McpProxyGovernanceBinding> for GovernanceBinding {
-    type Error = ProxyError;
-
-    fn try_from(value: proto::McpProxyGovernanceBinding) -> Result<Self, Self::Error> {
-        Ok(Self {
-            policy_id: bounded_identifier(value.policy_id)?,
-            approval_mode: parse_approval_mode(&value.approval_mode)?,
-            data_classification: parse_data_classification(&value.data_classification)?,
-            rate_limit_per_minute: parse_rate_limit(&value.rate_limit)?,
-            concurrency_limit: parse_positive_u32(&value.concurrency_limit)?,
-            budget_limit_per_day: parse_budget_limit(&value.budget)?,
-            retention_days: parse_retention_days(&value.retention)?,
-        })
-    }
-}
-
-impl TryFrom<proto::McpProxyRuntimeProfile> for RuntimeProfile {
-    type Error = ProxyError;
-
-    fn try_from(value: proto::McpProxyRuntimeProfile) -> Result<Self, Self::Error> {
-        if value.image_digest.is_empty() {
-            return Err(ProxyError::invalid_proxy_spec(
-                "Proxy runtime profiles require an immutable image digest.",
-            ));
-        }
-
-        Ok(Self {
-            image_digest: value.image_digest,
-            network: NetworkPolicy {
-                destinations: Vec::new(),
-            },
-        })
-    }
-}
-
 fn parse_uuid_v7(value: &str) -> Result<Uuid, ()> {
     if !is_lowercase_uuidv7(value) {
         return Err(());
@@ -520,7 +481,11 @@ fn is_valid_slug(value: &str) -> bool {
 }
 
 fn is_private_host(value: &str) -> bool {
-    value
+    let normalized = value.trim_matches(['[', ']']);
+    if matches!(normalized, "localhost" | "metadata.google.internal") {
+        return true;
+    }
+    normalized
         .parse::<IpAddr>()
         .map_or(false, |address| match address {
             IpAddr::V4(ipv4) => {
