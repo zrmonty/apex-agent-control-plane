@@ -42,6 +42,13 @@ test("live configuration rejects a half-configured governance client", () => {
   );
 });
 
+test("live configuration rejects surrounding endpoint whitespace", () => {
+  assert.throws(
+    () => loadLiveConfig({ ...liveEnvironment, APEX_MCP_GOVERNANCE_ENDPOINT: " https://control-plane-api:9443" }),
+    /GOVERNANCE_UNAVAILABLE/,
+  );
+});
+
 test("governance request mapping preserves the authenticated scope and trace", () => {
   assert.deepEqual(toGovernanceWireRequest(request), {
     caller: {

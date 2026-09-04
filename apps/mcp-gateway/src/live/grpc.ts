@@ -23,19 +23,26 @@ type DynamicClientConstructor = new (
   credentials: grpc.ChannelCredentials,
 ) => DynamicGrpcClient;
 
+const MAX_RPC_TIMEOUT_MS = 30_000;
+const packageDefinitionCache = new Map<string, protoLoader.PackageDefinition>();
+
 export function createGrpcClient(
   protoFile: string,
   serviceName: string,
   endpoint: string,
   material: ClientMaterial,
 ): DynamicGrpcClient {
-  const packageDefinition = protoLoader.loadSync(protoFile, {
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: false,
-    oneofs: true,
-  });
+  let packageDefinition = packageDefinitionCache.get(protoFile);
+  if (packageDefinition === undefined) {
+    packageDefinition = protoLoader.loadSync(protoFile, {
+      keepCase: true,
+      longs: String,
+      enums: String,
+      defaults: false,
+      oneofs: true,
+    });
+    packageDefinitionCache.set(protoFile, packageDefinition);
+  }
   const loaded = grpc.loadPackageDefinition(packageDefinition) as unknown as {
     apex: { v1: Record<string, unknown> };
   };
@@ -44,7 +51,7 @@ export function createGrpcClient(
     throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
   }
   return new constructor(
-    normalizeTarget(endpoint),
+    normalizeGrpcTarget(endpoint),
     grpc.credentials.createSsl(material.ca, material.clientKey, material.clientCert),
   );
 }
@@ -59,6 +66,9 @@ export async function unaryCall(
 ): Promise<unknown> {
   const method = client[methodName];
   if (typeof method !== "function") {
+    throw new GatewayError(failureCode, "request rejected safely");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_RPC_TIMEOUT_MS) {
     throw new GatewayError(failureCode, "request rejected safely");
   }
   const metadata = new grpc.Metadata();
@@ -86,10 +96,19 @@ export function protoPath(name: "governance.proto" | "event.proto"): string {
   return path.resolve(current, "../../../../contracts/proto/apex/v1", name);
 }
 
-function normalizeTarget(endpoint: string): string {
+export function normalizeGrpcTarget(endpoint: string): string {
   const value = endpoint.trim();
+  if (endpoint !== value) {
+    throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
+  }
   if (!value.includes("://")) {
+    if (value.length === 0 || /\s/.test(value) || value.includes("@") || value.includes("/")) {
+      throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
+    }
     return value;
+  }
+  if (!/^https?:\/\/[^/?#\\\s]+\/?$/i.test(value)) {
+    throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
   }
   let parsed: URL;
   try {
@@ -97,7 +116,15 @@ function normalizeTarget(endpoint: string): string {
   } catch {
     throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
   }
-  if (!/^https?:$/.test(parsed.protocol) || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+  if (
+    !/^https?:$/.test(parsed.protocol)
+    || parsed.hostname.length === 0
+    || parsed.username.length > 0
+    || parsed.password.length > 0
+    || parsed.pathname !== "/"
+    || parsed.search
+    || parsed.hash
+  ) {
     throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
   }
   return parsed.host;

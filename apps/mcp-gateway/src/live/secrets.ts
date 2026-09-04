@@ -21,6 +21,12 @@ export async function loadClientMaterial(
   const base = await realpath(trustedSecretBase).catch(() => {
     throw unavailable();
   });
+  const baseInfo = await stat(base).catch(() => {
+    throw unavailable();
+  });
+  if (!baseInfo.isDirectory()) {
+    throw unavailable();
+  }
   const caPath = await trustedPath(config.caFile, base, false);
   const certPath = await trustedPath(config.clientCertFile, base, false);
   const keyPath = await trustedPath(config.clientKeyFile, base, true);
@@ -52,7 +58,9 @@ async function trustedPath(
   base: string,
   privateMaterial: boolean,
 ): Promise<string> {
-  const candidate = path.resolve(configured);
+  const candidate = path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : path.resolve(base, configured);
   const info = await lstat(candidate).catch(() => {
     throw unavailable();
   });

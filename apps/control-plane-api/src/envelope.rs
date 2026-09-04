@@ -7,8 +7,6 @@
 //! plus caller-authenticated identity, so the payload shape it can never be
 //! attacker-chosen to skip validation.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use apex_durability::{GatewayError, IngestRequest, canonical_event_hash};
 use prost::Message;
 use prost_types::Struct as ProstStruct;
@@ -29,16 +27,6 @@ const GATEWAY_AGENT_CODE: &str = "apex-control-gateway";
 const GATEWAY_PROMPT_REVISION: &str = "control-command-v1";
 const GATEWAY_MODEL: &str = "n-a";
 
-/// How far ahead of the gateway's own clock a caller-supplied `command_id`'s
-/// embedded UUIDv7 timestamp may sit. This only absorbs ordinary clock skew
-/// between an operator console and the gateway.
-const MAX_COMMAND_ID_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
-/// How far behind the gateway's own clock that same embedded timestamp may
-/// sit. Generous enough that an idempotent retry after a long outage still
-/// resolves to `duplicate` rather than a spurious rejection, but bounded so
-/// the emitted `control` event's audit timestamp cannot be set arbitrarily.
-const MAX_COMMAND_ID_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
-
 /// `reason_code` sentinel for a `force_stop` audit event that carried no
 /// operator-supplied reason. See `build_control_request`'s comment on why
 /// `force_stop` is recorded as `action: "stop"` in the shared, ingest-
@@ -53,6 +41,17 @@ const FORCE_STOP_AUDIT_MARKER: &str = "apex.force_stop";
 /// narrow crash-recovery reconciliation path
 /// (`pending_command_from_ingest_request`), never ordinary delivery.
 const FORCE_STOP_AUDIT_PREFIX: &str = "apex.force_stop:";
+
+mod time;
+
+#[cfg(test)]
+pub(crate) use time::{
+    MAX_COMMAND_ID_AGE_MS, MAX_COMMAND_ID_FUTURE_SKEW_MS, civil_from_days, rfc3339_from_uuidv7,
+};
+pub(crate) use time::{
+    command_millis_within_acceptance_window, format_rfc3339_micros, now_unix_millis,
+    uuidv7_unix_millis,
+};
 
 pub struct ControlCommandInput {
     pub command_id: Option<String>,
@@ -422,34 +421,6 @@ fn string_value(value: &str) -> prost_types::Value {
     }
 }
 
-/// Extracts the embedded 48-bit millisecond Unix timestamp from a UUIDv7.
-///
-/// Deliberately stricter than `Uuid::parse_str` alone: the value must already
-/// be in the canonical lowercase hyphenated form the ingest boundary accepts
-/// (`is_lowercase_uuidv7`). `parse_str` also accepts braced, URN, simple, and
-/// uppercase spellings, so without this round-trip check a `command_id` could
-/// derive a timestamp here through one grammar and then be judged by a
-/// different one downstream.
-fn uuidv7_unix_millis(command_id: &str) -> Option<u64> {
-    let uuid = Uuid::parse_str(command_id).ok()?;
-    if uuid.get_version_num() != 7 || uuid.hyphenated().to_string() != command_id {
-        return None;
-    }
-    let (secs, nanos) = uuid.get_timestamp()?.to_unix();
-    u64::try_from((secs as u128) * 1_000 + (nanos as u128) / 1_000_000).ok()
-}
-
-/// True when a `command_id`'s embedded clock is close enough to the
-/// gateway's own clock to be a plausible submission time rather than a
-/// chosen audit timestamp.
-fn command_millis_within_acceptance_window(command_millis: u64, now_millis: u64) -> bool {
-    if command_millis > now_millis {
-        command_millis - now_millis <= MAX_COMMAND_ID_FUTURE_SKEW_MS
-    } else {
-        now_millis - command_millis <= MAX_COMMAND_ID_AGE_MS
-    }
-}
-
 /// Validates a caller-supplied `SubmitBulkCommand.bulk_id`, or mints a fresh
 /// one when omitted, and returns its embedded UUIDv7 millisecond clock
 /// alongside it.
@@ -545,59 +516,6 @@ pub(crate) fn derive_target_command_id(
         .into_uuid()
         .hyphenated()
         .to_string()
-}
-
-/// Wall-clock milliseconds since the Unix epoch.
-///
-/// Shared with [`crate::service`], which needs the same clock for the inbox's
-/// redelivery-window arithmetic. One reader, so a command's issued-at and its
-/// delivery bookkeeping cannot disagree about what "now" means.
-pub(crate) fn now_unix_millis() -> u64 {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(u64::MAX)
-}
-
-/// Derives the RFC 3339 microsecond timestamp a given `command_id` maps to.
-/// Returns `None` for anything that is not a canonical lowercase UUIDv7.
-/// `build_control_request` composes `uuidv7_unix_millis` and
-/// `format_rfc3339_micros` directly so it can bound the value first; this
-/// keeps the end-to-end mapping expressible for the tests that pin it.
-#[cfg(test)]
-fn rfc3339_from_uuidv7(command_id: &str) -> Option<String> {
-    uuidv7_unix_millis(command_id).map(|millis| format_rfc3339_micros(u128::from(millis) * 1_000))
-}
-
-fn format_rfc3339_micros(total_micros: u128) -> String {
-    let secs = (total_micros / 1_000_000) as i64;
-    let micros = (total_micros % 1_000_000) as u32;
-    let days = secs.div_euclid(86_400);
-    let secs_of_day = secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    let second = secs_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z")
-}
-
-/// Howard Hinnant's `civil_from_days`: converts a day count relative to the
-/// Unix epoch into a proleptic-Gregorian (year, month, day).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 #[cfg(test)]

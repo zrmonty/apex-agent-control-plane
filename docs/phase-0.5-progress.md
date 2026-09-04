@@ -20,6 +20,37 @@ A sixth pass closed the remaining four actions one at a time, each committed and
 
 Everything else in this document describes the gateway's accept/durability/auth/transport path accurately and remains true.
 
+## Active roadmap checkpoint: live slice and codebase hardening
+
+The narrow live MCP vertical slice is complete and gated. CI run
+`33834884799` and live run `33834884797` both passed the full reference gate,
+including the real gateway image, mTLS, product SDK proof, governed MCP stdio
+proof, durable/operator paths, Postgres replicas, cross-replica Valkey
+admission, Keycloak operator credentials, adversarial event inputs, compose
+validation, and teardown.
+
+The follow-on hardening pass stayed inside that slice and did not start any
+held roadmap feature:
+
+- The tracked source/test line-limit checker reports no file over 600 lines.
+- Responsibility-based splits cover the Rust auth/startup/policy/durability/
+  control/security modules and the TypeScript/Python test and harness modules.
+- The gateway now rejects raw URL whitespace, backslashes, encoded dot
+  segments, credentials, and discarded URL components before gRPC target
+  normalization; secret loading is confined to a canonical trusted directory.
+- The reference gateway has a read-only root filesystem with only `/tmp` and
+  the data volume writable.
+- The equivalent Struct serialization benchmark measured a median of 70.51 ms
+  for the current loop versus 126.72 ms for the pre-refactor encoder across
+  five 100,000-event samples (44.4% faster in this isolated operation).
+- The dry-run load harness completed 2,000 attempts at 995.6 events/s with
+  p50 5.28 ms, p95 8.53 ms, and zero rejects; this is a harness baseline, not
+  a production capacity claim.
+
+Evidence: [`codebase-hardening-baseline.md`](architecture/codebase-hardening-baseline.md),
+[`codebase-hardening-review.md`](security/codebase-hardening-review.md), and
+[`gateway-throughput-baseline.md`](performance/gateway-throughput-baseline.md).
+
 Phase 0.5 delivered the out-of-band (OOB) control command gateway per [ADR-0006](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/06%20Decisions/ADR-0006%20OOB%20Control%20Gateway%20Moved%20to%20Phase%200.5.md) and [ADR-0005](../../AgentPlaneBrain/Apex%20Agent%20Control%20Plane/06%20Decisions/ADR-0005%20Cooperative%20V1%20Controls.md). The control/durability/auth logic shipped and was pen-tested first; a second pass then made the gateway an actually-deployed service with its own transport boundary, which is what makes ADR-0006's independence claim operational rather than structural; a third pass closed the two gaps that deployment surfaced -- accepted commands were never delivered onward, and `--features postgres` did not actually select the Postgres outbox. A fourth pass closed the last two open items: production operator credentials are now verified against Keycloak, and the per-operator admission ceiling holds across replicas instead of multiplying by the replica count.
 
 Every requirement below is exercised by a live gate in `.github/workflows/live-mtls-e2e.yml` against real containers -- not only in-process. See "Honest final assessment" at the end for the two things that remain true and are *not* claimed, and see the status line above for the one that supersedes everything else in this document.

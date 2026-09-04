@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Fail when a tracked source or test file is larger than the readability limit."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MAX_SOURCE_LINES = 600
+SOURCE_EXTENSIONS = frozenset({
+    ".rs",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".mjs",
+    ".py",
+    ".go",
+    ".java",
+    ".cs",
+})
+EXCLUDED_DIRECTORY_NAMES = frozenset({
+    ".git",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "virtualenv",
+    ".virtualenv",
+})
+
+
+def _tracked_paths(repo_root: Path) -> list[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+    )
+    return [
+        Path(os.fsdecode(raw_path))
+        for raw_path in result.stdout.split(b"\0")
+        if raw_path
+    ]
+
+
+def _is_source_file(relative_path: Path) -> bool:
+    return (
+        relative_path.suffix.lower() in SOURCE_EXTENSIONS
+        and not any(part in EXCLUDED_DIRECTORY_NAMES for part in relative_path.parts)
+    )
+
+
+def _line_count(path: Path) -> int:
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+def find_violations(repo_root: Path = REPO_ROOT) -> list[tuple[str, int]]:
+    """Return ``(relative POSIX path, line count)`` for every oversized file."""
+    violations = []
+    for relative_path in _tracked_paths(repo_root):
+        if not _is_source_file(relative_path):
+            continue
+        line_count = _line_count(repo_root / relative_path)
+        if line_count > MAX_SOURCE_LINES:
+            violations.append((relative_path.as_posix(), line_count))
+    return violations
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=REPO_ROOT,
+        help="repository root to inspect (default: the current repository)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    try:
+        violations = find_violations(args.root.resolve())
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"Unable to inspect tracked source files: {error}", file=sys.stderr)
+        return 2
+
+    if violations:
+        print(f"Tracked source files exceeding {MAX_SOURCE_LINES} lines:")
+        for relative_path, line_count in violations:
+            print(f"{relative_path}: {line_count} lines")
+        return 1
+
+    print(f"No tracked source files exceed {MAX_SOURCE_LINES} lines.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

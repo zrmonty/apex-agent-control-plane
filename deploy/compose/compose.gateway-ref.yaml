@@ -348,6 +348,8 @@ services:
       - gateway-secrets:/var/lib/apex-secrets:ro
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
 
   # Same restaging problem as gateway-secrets-init, different uid: this image
   # runs as 10002, so it cannot reuse the gateway's staged tree even if the

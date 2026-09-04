@@ -48,11 +48,32 @@ export function jsonToStruct(value: JsonValue): StructWire {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("Struct root must be an object");
   }
-  return { fields: Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jsonToValue(item)])) };
+  const fields: Record<string, ValueWire> = {};
+  for (const [key, item] of Object.entries(value)) {
+    setField(fields, key, jsonToValue(item));
+  }
+  return { fields };
 }
 
 export function structToJson(value: StructWire): JsonObject {
-  return Object.fromEntries(Object.entries(value.fields).map(([key, item]) => [key, valueToJson(item)]));
+  const result: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value.fields)) {
+    setField(result, key, valueToJson(item));
+  }
+  return result;
+}
+
+function setField<T>(target: Record<string, T>, key: string, value: T): void {
+  if (key === "__proto__") {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
+    return;
+  }
+  target[key] = value;
 }
 
 export function createToolEventEnvelope(

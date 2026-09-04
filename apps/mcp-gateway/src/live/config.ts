@@ -42,15 +42,18 @@ function loadGrpcConfig(
   env: NodeJS.ProcessEnv,
   fields: readonly [string, string, string, string, string],
 ): LiveGrpcConfig {
-  const values = fields.map((field) => required(env, field));
+  const values = fields.map((field, index) => required(env, field, index !== 0));
   const [endpoint, caFile, clientCertFile, clientKeyFile, tokenFile] = values;
   return { endpoint, caFile, clientCertFile, clientKeyFile, tokenFile };
 }
 
-function required(env: NodeJS.ProcessEnv, field: string): string {
+function required(env: NodeJS.ProcessEnv, field: string, trim = true): string {
   const value = env[field];
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
   }
-  return value.trim();
+  if (!trim && value !== value.trim()) {
+    throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
+  }
+  return trim ? value.trim() : value;
 }
