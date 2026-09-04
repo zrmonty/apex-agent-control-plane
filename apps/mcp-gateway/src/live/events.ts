@@ -10,12 +10,12 @@ type JsonObject = { readonly [key: string]: JsonValue };
 
 export type StructWire = { readonly fields: Record<string, ValueWire> };
 export type ValueWire = {
-  readonly null_value?: number;
-  readonly number_value?: number;
-  readonly string_value?: string;
-  readonly bool_value?: boolean;
-  readonly struct_value?: StructWire;
-  readonly list_value?: { readonly values: readonly ValueWire[] };
+  readonly nullValue?: number;
+  readonly numberValue?: number;
+  readonly stringValue?: string;
+  readonly boolValue?: boolean;
+  readonly structValue?: StructWire;
+  readonly listValue?: { readonly values: readonly ValueWire[] };
 };
 
 export type ToolEventEnvelope = {
@@ -163,30 +163,30 @@ function toEventWireEnvelope(envelope: ToolEventEnvelope): Record<string, unknow
 }
 
 function jsonToValue(value: JsonValue): ValueWire {
-  if (value === null) return { null_value: 0 };
-  if (typeof value === "boolean") return { bool_value: value };
-  if (typeof value === "string") return { string_value: value };
+  if (value === null) return { nullValue: 0 };
+  if (typeof value === "boolean") return { boolValue: value };
+  if (typeof value === "string") return { stringValue: value };
   if (typeof value === "number") {
     if (!Number.isFinite(value) || !Number.isSafeInteger(value)) {
       throw new TypeError("Struct numbers must be finite safe integers");
     }
-    return { number_value: value };
+    return { numberValue: value };
   }
   if (Array.isArray(value)) {
-    return { list_value: { values: value.map(jsonToValue) } };
+    return { listValue: { values: value.map(jsonToValue) } };
   }
-  return { struct_value: jsonToStruct(value) };
+  return { structValue: jsonToStruct(value) };
 }
 
 function valueToJson(value: ValueWire): JsonValue {
-  if (value.null_value !== undefined) return null;
-  if (value.bool_value !== undefined) return value.bool_value;
-  if (value.string_value !== undefined) return value.string_value;
-  if (value.number_value !== undefined) {
-    if (!Number.isFinite(value.number_value)) throw new TypeError("invalid Struct number");
-    return value.number_value;
+  if (value.nullValue !== undefined) return null;
+  if (value.boolValue !== undefined) return value.boolValue;
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.numberValue !== undefined) {
+    if (!Number.isFinite(value.numberValue)) throw new TypeError("invalid Struct number");
+    return value.numberValue;
   }
-  if (value.struct_value !== undefined) return structToJson(value.struct_value);
-  if (value.list_value !== undefined) return value.list_value.values.map(valueToJson);
+  if (value.structValue !== undefined) return structToJson(value.structValue);
+  if (value.listValue !== undefined) return value.listValue.values.map(valueToJson);
   throw new GatewayError("EVENT_ADMISSION_FAILED", "request rejected safely");
 }

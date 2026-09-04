@@ -43,6 +43,17 @@ test("Struct encoding round-trips metadata without raw portfolio fields", () => 
   assert.deepEqual(structToJson(jsonToStruct(payload)), payload);
 });
 
+test("Struct encoding uses proto-loader's camelCase Value oneof members", () => {
+  assert.deepEqual(jsonToStruct({ allowed: true, count: 2, label: "ok", nested: null }), {
+    fields: {
+      allowed: { boolValue: true },
+      count: { numberValue: 2 },
+      label: { stringValue: "ok" },
+      nested: { nullValue: 0 },
+    },
+  });
+});
+
 test("canonical JSON sorts object keys deterministically", () => {
   assert.equal(canonicalizeJson({ z: 1, a: { y: true, x: "ok" } }), '{"a":{"x":"ok","y":true},"z":1}');
 });
