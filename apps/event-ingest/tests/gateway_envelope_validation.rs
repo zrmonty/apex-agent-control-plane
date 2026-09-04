@@ -194,6 +194,160 @@ fn hash_and_identifier_fields_are_not_secret_false_positives() {
     assert!(adapter.ingest_envelope(&caller(), event).is_ok());
 }
 
+fn mcp_string(value: &str) -> prost_types::Value {
+    prost_types::Value {
+        kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
+    }
+}
+
+fn mcp_number(value: f64) -> prost_types::Value {
+    prost_types::Value {
+        kind: Some(prost_types::value::Kind::NumberValue(value)),
+    }
+}
+
+fn mcp_object(fields: Vec<(&str, prost_types::Value)>) -> prost_types::Value {
+    prost_types::Value {
+        kind: Some(prost_types::value::Kind::StructValue(prost_types::Struct {
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        })),
+    }
+}
+
+fn mcp_strings(values: &[&str]) -> prost_types::Value {
+    prost_types::Value {
+        kind: Some(prost_types::value::Kind::ListValue(prost_types::ListValue {
+            values: values.iter().map(|value| mcp_string(value)).collect(),
+        })),
+    }
+}
+
+#[test]
+fn admits_the_typescript_mcp_metadata_envelope_fixture() {
+    let event_id = "01900000-0000-7000-8000-000000000001";
+    let data = prost_types::Struct {
+        fields: [
+            (
+                "caller",
+                mcp_object(vec![
+                    ("principal", mcp_string("spiffe://apex/agent/reference")),
+                    ("agent_id", mcp_string("reference-agent")),
+                ]),
+            ),
+            (
+                "scope",
+                mcp_object(vec![
+                    ("workspace_id", mcp_string("acme")),
+                    ("namespace_id", mcp_string("prod")),
+                ]),
+            ),
+            ("tool", mcp_string("portfolio.read")),
+            ("action", mcp_string("read")),
+            (
+                "resource",
+                mcp_string("portfolio:sha256:8994d7d97baa4a58a0fbc8192815c60605caa16a9106d50af6548810f52eaf31"),
+            ),
+            ("backend", mcp_string("local-portfolio")),
+            ("status", mcp_string("succeeded")),
+            ("latency_ms", mcp_number(12.0)),
+            ("retry_count", mcp_number(0.0)),
+            (
+                "sizes",
+                mcp_object(vec![
+                    ("input_bytes", mcp_number(31.0)),
+                    ("source_bytes", mcp_number(208.0)),
+                    ("filtered_bytes", mcp_number(150.0)),
+                    ("output_bytes", mcp_number(150.0)),
+                ]),
+            ),
+            (
+                "filtering",
+                mcp_object(vec![
+                    (
+                        "removed_fields",
+                        mcp_strings(&[
+                            "client.account_number",
+                            "client.tax_id",
+                            "positions.cost_basis",
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "policy",
+                mcp_object(vec![
+                    ("outcome", mcp_string("allowed")),
+                    ("policy_id", mcp_string("apex-mcp-read-v1")),
+                    ("reason_code", mcp_string("policy.allowed")),
+                    (
+                        "field_restrictions",
+                        mcp_strings(&[
+                            "client.account_number",
+                            "client.tax_id",
+                            "positions.cost_basis",
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "trace",
+                mcp_object(vec![
+                    ("trace_id", mcp_string("mcp-live-proof-1")),
+                    ("span_id", mcp_string("span-001")),
+                ]),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect(),
+    };
+    let event = proto::EventEnvelope {
+        event_id: event_id.to_owned(),
+        timestamp: "2026-09-03T12:00:00.000000Z".to_owned(),
+        r#type: 3,
+        agent_id: "reference-agent".to_owned(),
+        run_id: "mcp-mcp-live-proof-1".to_owned(),
+        parent_run_id: None,
+        trace_id: "mcp-live-proof-1".to_owned(),
+        scope: Some(proto::Scope {
+            workspace_id: "acme".to_owned(),
+            namespace_id: "prod".to_owned(),
+            agent_group_ids: vec![],
+        }),
+        actor: Some(proto::Actor { r#type: 2, id: "reference-agent".to_owned() }),
+        version: Some(proto::Version {
+            agent_code: "apex-mcp-gateway".to_owned(),
+            prompt: "mcp-gateway-v1".to_owned(),
+            model: "n-a".to_owned(),
+        }),
+        data: Some(data),
+        integrity: Some(proto::Integrity {
+            prev_hash: None,
+            event_hash: "737ef250a695dd843471261a88632daa28a539a4389f6796947c7f4b9a33e08e".to_owned(),
+        }),
+        schema_version: 1,
+    };
+
+    let mut adapter =
+        AuthenticatedIngestAdapter::new(IngestGateway::new(InMemoryPublisher::default()));
+    let mcp_caller = Caller::authenticated_for_agent(
+        "spiffe://apex/agent/reference",
+        "reference-agent",
+        ["acme/prod"],
+    )
+    .unwrap();
+    let admission = adapter.ingest_envelope(&mcp_caller, event.clone());
+    assert!(admission.is_ok(), "MCP metadata fixture rejected: {admission:?}");
+
+    assert_eq!(
+        IngestRequest::canonical_hash_for_test(&event).unwrap(),
+        "737ef250a695dd843471261a88632daa28a539a4389f6796947c7f4b9a33e08e"
+    );
+}
+
 #[test]
 fn authenticated_adapter_rejects_excessively_nested_struct_data() {
     let mut nested = prost_types::Value {
