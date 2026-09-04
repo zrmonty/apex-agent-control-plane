@@ -31,6 +31,12 @@ x-provider-cache: &provider-cache
   cache_to:
     - type=gha,mode=max,scope=apex-reference-providers
 
+x-mcp-gateway-cache: &mcp-gateway-cache
+  cache_from:
+    - type=gha,scope=apex-mcp-gateway
+  cache_to:
+    - type=gha,mode=max,scope=apex-mcp-gateway
+
 services:
   ingest-gateway:
     build:
@@ -51,6 +57,10 @@ services:
   archive-provider:
     build:
       <<: *provider-cache
+
+  mcp-proxy-portfolio:
+    build:
+      <<: *mcp-gateway-cache
 
   control-plane-api-pg-a:
     build:

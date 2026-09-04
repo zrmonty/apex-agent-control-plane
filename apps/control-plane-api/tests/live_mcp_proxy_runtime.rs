@@ -35,7 +35,7 @@ fn provisioned_proxy_container_has_the_hardened_runtime_profile() {
     assert_eq!(config["User"], "10001:10001");
     assert_eq!(host["ReadonlyRootfs"], true);
     assert_eq!(host["Privileged"], false);
-    assert_eq!(host["NetworkMode"], "apex-gateway-ref_mcp-proxy-egress");
+    assert!(host["NetworkMode"].as_str().is_some_and(|value| value == "mcp-proxy-egress" || value.ends_with("_mcp-proxy-egress")));
     assert!(host["SecurityOpt"].as_array().is_some_and(|values| values.iter().any(|value| value == "no-new-privileges:true")));
     assert!(host["CapDrop"].as_array().is_some_and(|values| values.iter().any(|value| value == "ALL")));
     assert!(host["Mounts"].as_array().is_some_and(|mounts| mounts.iter().all(|mount| mount["Destination"] != "/var/run/docker.sock")));

@@ -355,6 +355,46 @@ jobs:
           echo "control gateway never began serving" >&2
           exit 1
 
+      # The managed proxy has its own provider-owned network and image cache.
+      # This gate is intentionally separate from the control gateway startup:
+      # a green gRPC port must not be mistaken for a green runtime boundary.
+      - name: Build and inspect the isolated MCP proxy runtime
+        working-directory: deploy/compose
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          P="-p apex-mcp-proxy-ci -f compose.mcp-proxy.yaml -f compose.ci-cache.yaml"
+          docker compose $P down -v --remove-orphans || true
+          docker compose $P build mcp-proxy-portfolio
+          docker compose $P up -d --force-recreate mcp-proxy-portfolio mcp-proxy-test-upstream
+          for attempt in $(seq 1 30); do
+            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep mcp-proxy-portfolio || true)"
+            case "$state" in
+              *exited*)
+                docker compose $P logs --no-color mcp-proxy-portfolio >&2
+                echo "managed MCP proxy exited: $state" >&2
+                exit 1
+                ;;
+            esac
+            container="$(docker compose $P ps -q mcp-proxy-portfolio)"
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+            if [ "$health" = healthy ]; then
+              echo "managed MCP proxy is healthy (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose $P ps -a >&2
+              docker compose $P logs --no-color mcp-proxy-portfolio mcp-proxy-test-upstream >&2
+              echo "managed MCP proxy never became healthy" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          container="$(docker compose $P ps -q mcp-proxy-portfolio)"
+          APEX_CONTROL_LIVE_MCP_PROXY_RUNTIME=1 \
+          APEX_CONTROL_LIVE_MCP_PROXY_CONTAINER="$container" \
+            cargo test -p apex-control-plane-api --test live_mcp_proxy_runtime -- --nocapture
+
       # An open TCP port only proves the process bound one. These drive real
       # gRPC over real mTLS and, critically, prove the negative cases: a client
       # with no certificate and a client holding a certificate from an
@@ -865,3 +905,4 @@ jobs:
           docker compose -f deploy/compose/compose.e2e.yaml down --remove-orphans || true
           docker compose -f deploy/compose/compose.gateway-ref.yaml down --remove-orphans || true
           docker compose -p apex-gateway-ref-ci -f deploy/compose/compose.gateway-ref.yaml -f deploy/compose/compose.control-pg.yaml -f deploy/compose/compose.control-valkey.yaml -f deploy/compose/compose.control-keycloak.yaml down -v --remove-orphans || true
+          docker compose -p apex-mcp-proxy-ci -f deploy/compose/compose.mcp-proxy.yaml -f deploy/compose/compose.ci-cache.yaml down -v --remove-orphans || true
