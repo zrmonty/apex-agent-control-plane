@@ -273,6 +273,16 @@ fn validate_proxy_spec_rejects_an_unbounded_domain_string() {
 }
 
 #[test]
+fn validate_proxy_spec_rejects_a_malformed_direct_ingress_host() {
+    let mut spec = valid_proxy_spec();
+    spec.ingress.host = "https://proxy.apex.test/mcp".to_owned();
+
+    let error = validate_proxy_spec(&spec).unwrap_err();
+
+    assert_eq!(error.code(), "INVALID_PROXY_SPEC");
+}
+
+#[test]
 fn validate_proxy_spec_rejects_an_oversized_collection() {
     let mut spec = valid_proxy_spec();
     spec.exposed_tools = (0..=super::MAX_EXPOSED_TOOLS)
@@ -317,14 +327,15 @@ fn proxy_revision_rejects_an_uppercase_config_hash() {
 #[test]
 fn validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule() {
     let mut spec = valid_proxy_spec();
-    spec.runtime_profile
-        .network
-        .destinations
-        .push(EgressDestination::Https {
-            host: "10.0.0.20".to_owned(),
+    for host in ["10.0.0.20", "api.internal", "api.local", "host.docker.internal"] {
+        let destination = EgressDestination::Https {
+            host: host.to_owned(),
             port: 443,
             private_allowance: PrivateDestinationAllowance::Denied,
-        });
+        };
+        assert!(destination.requires_private_allowance());
+        spec.runtime_profile.network.destinations.push(destination);
+    }
 
     let error = validate_proxy_spec(&spec).unwrap_err();
 

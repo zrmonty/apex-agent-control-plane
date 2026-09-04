@@ -176,3 +176,65 @@ Final touched Rust line counts are `proxy.rs` 502, `proxy/validation.rs` 598, `p
 
 1. The required contract correction changes `McpProxySpec.exposed_tools` from strings to structured entries and adds structured runtime egress destinations; downstream service handlers must adopt the regenerated types before wiring RPC behavior.
 2. `cargo fmt --all --check` remains non-clean because the repository contains unrelated pre-existing formatting drift. The touched files were checked with scoped rustfmt using the 110-column cap needed to remain within the 600-line requirement.
+
+## Round 2 Fix Report
+
+### Review findings addressed
+
+- Direct domain admission now validates ingress hosts with the same strict bounded host validator used by protobuf conversion. Malformed host-shaped values such as `https://proxy.apex.test/mcp` are rejected before `ProxyDraft::new` or `McpProxyRevision::new` can admit their specifications.
+- Egress validation now calls `EgressDestination::requires_private_allowance()` directly. Its shared classifier recognizes private IPs, loopback/link-local/documentation ranges, `localhost`, `host.docker.internal`, and `.internal`/`.local` hostnames, so classification and enforcement cannot diverge.
+- The declarative `GovernanceBinding` and separate Apex policy authority remain unchanged; no storage, lifecycle, runtime, or UI behavior was added.
+
+### RED evidence
+
+The new malformed-direct-ingress regression failed before the implementation change:
+
+```text
+cargo test -p apex-control-plane-api validate_proxy_spec_rejects_a_malformed_direct_ingress_host -- --nocapture
+test proxy::tests::validate_proxy_spec_rejects_a_malformed_direct_ingress_host ... FAILED
+called `Result::unwrap_err()` on an `Ok` value: ()
+```
+
+The expanded private-host regression also failed against the duplicated classifier before unification:
+
+```text
+cargo test -p apex-control-plane-api validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule -- --nocapture
+test proxy::tests::validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule ... FAILED
+assertion failed: destination.requires_private_allowance()
+```
+
+### GREEN/fix evidence
+
+After applying the strict ingress-host validator and shared egress classification:
+
+```text
+cargo test -p apex-control-plane-api proxy::tests --no-default-features -- --nocapture
+running 25 tests
+test result: ok. 25 passed; 0 failed
+```
+
+The focused compile passed:
+
+```text
+cargo check -p apex-control-plane-api --lib --no-default-features
+Finished `dev` profile
+```
+
+The line-limit gate passed:
+
+```text
+python scripts/test_check_source_line_limits.py
+exit code 0
+```
+
+Final touched file lengths are: `contracts/proto/apex/v1/mcp_proxy.proto` 488, `apps/control-plane-api/src/lib.rs` 118, `apps/control-plane-api/src/proxy.rs` 505, `apps/control-plane-api/src/proxy/validation.rs` 576, `apps/control-plane-api/src/proxy/wire.rs` 469, and `apps/control-plane-api/src/proxy/tests.rs` 592.
+
+### Round 2 changed files
+
+- `apps/control-plane-api/src/proxy.rs`
+- `apps/control-plane-api/src/proxy/validation.rs`
+- `apps/control-plane-api/src/proxy/tests.rs`
+
+### Round 2 concerns
+
+`cargo fmt --all --check` remains non-clean because it reports unrelated repository-wide formatting drift. The focused tests, focused library check, line-limit gate, and `git diff --check` passed for this change; the review fix did not modify unrelated files.

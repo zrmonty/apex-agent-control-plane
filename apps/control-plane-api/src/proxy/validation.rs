@@ -87,7 +87,7 @@ pub fn validate_mcp_proxy_revision(revision: &McpProxyRevision) -> Result<(), Pr
     )
 }
 fn validate_ingress(ingress: &Ingress) -> Result<(), ProxyError> {
-    validate_endpoint(&ingress.host, "Proxy ingress host")?;
+    validate_host(&ingress.host)?;
     validate_required_string(&ingress.path, "Proxy ingress path")?;
     validate_collection(
         "allowed origins",
@@ -312,7 +312,9 @@ fn validate_destination(destination: &EgressDestination) -> Result<(), ProxyErro
                     "Proxy egress destinations require a valid port.",
                 ));
             }
-            if is_private_host(host) && *private_allowance != PrivateDestinationAllowance::Allowed {
+            if destination.requires_private_allowance()
+                && *private_allowance != PrivateDestinationAllowance::Allowed
+            {
                 return Err(ProxyError::new(
                     "PRIVATE_DESTINATION_REQUIRES_ALLOW_RULE",
                     "Private network destinations require an explicit server-side allow rule.",
@@ -548,30 +550,6 @@ pub(super) fn is_lowercase_uuidv7(value: &str) -> bool {
         && matches!(value.as_bytes().get(19), Some(b'8' | b'9' | b'a' | b'b'))
         && value.bytes().enumerate().all(|(index, byte)| {
             matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
-        })
-}
-
-fn is_private_host(value: &str) -> bool {
-    let normalized = value.trim_matches(['[', ']']);
-    if matches!(normalized, "localhost" | "host.docker.internal")
-        || normalized.ends_with(".internal")
-        || normalized.ends_with(".local")
-    {
-        return true;
-    }
-    normalized
-        .parse::<std::net::IpAddr>()
-        .map_or(false, |address| match address {
-            std::net::IpAddr::V4(ipv4) => {
-                ipv4.is_private()
-                    || ipv4.is_loopback()
-                    || ipv4.is_link_local()
-                    || ipv4.is_broadcast()
-                    || ipv4.is_documentation()
-            }
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback() || ipv6.is_unique_local() || ipv6.is_unicast_link_local()
-            }
         })
 }
 
