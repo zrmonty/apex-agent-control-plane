@@ -42,8 +42,8 @@ mod errors;
 mod governance;
 mod inbox;
 mod keycloak;
-mod proxy;
 mod outbox;
+mod proxy;
 mod replay;
 mod service;
 mod status;
@@ -81,6 +81,13 @@ pub use keycloak::{
 #[cfg(feature = "postgres")]
 pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
+pub use proxy::{
+    ApprovalMode, ArgSchema, ArgSchemaField, CliProfile, DataClassification, EgressDestination,
+    ExposedTool, GovernanceBinding, McpProxyRevision, NetworkPolicy, PrivateDestinationAllowance,
+    ProxyDraft, ProxyError, ProxyId, ProxyLifecycleState, ProxyRevisionId, ProxySpec,
+    ProxyToolClassification, ProxyTransport, RuntimeProfile, SecretRef, UpstreamBinding,
+    validate_proxy_spec,
+};
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,
