@@ -4,7 +4,7 @@ Apex is a self-hosted control plane for AI agents. It is cloud-agnostic.
 
 Apex helps teams observe, govern, evaluate, secure, and control agent workloads. It runs on local hosts, on-premises systems, and cloud systems. Each agent action is a scoped event. Security, compliance, and cost controls stay near the runtime.
 
-> **Status:** Phase 0, the out-of-band control gateway baseline, the Rust workspace/fanout foundations, and the Apex governance contract boundary are complete. The active roadmap now focuses only on one thin TypeScript MCP gateway, one read-only RIA portfolio tool, and one live operator-visible vertical slice. All other roadmap work is on hold. See the [Apex execution roadmap](docs/roadmap.md).
+> **Status:** Phase 0, the out-of-band control gateway baseline, the Rust workspace/fanout foundations, and the Apex governance contract boundary are complete. The thin TypeScript stdio MCP gateway and deterministic local `portfolio.read` path are now implemented in `apps/mcp-gateway` for local/test-only use. The remaining active roadmap work is live Apex authorization and event clients plus one narrow operator-visible vertical slice. Live completion is not reached yet, and all other roadmap work remains on hold. See the [Apex execution roadmap](docs/roadmap.md).
 
 ## What Apex provides
 
@@ -196,7 +196,7 @@ flowchart LR
 apps/
   control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget); implemented
   event-ingest/            gRPC ingestion and event validation
-  mcp-gateway/             Thin TypeScript MCP data plane; planned by the active roadmap
+  mcp-gateway/             Thin TypeScript MCP data plane; local/test-only `portfolio.read` path implemented, live Apex wiring deferred
   operator-ui/             Operations, compliance, evaluation, Cost Lens GUI
 crates/
   domain/                  Shared domain types and scope model
@@ -276,7 +276,7 @@ It includes usage and token accounting, requested versus effective model attribu
 
 ## Build order
 
-The former build order is superseded. Follow the [Apex execution roadmap](docs/roadmap.md): one thin TypeScript MCP gateway, one read-only RIA tool, and one live operator-visible vertical slice. The Rust workspace, durable admission/fanout separation, and Apex governance contract boundary are foundations already in place; everything else is paused until that slice passes its completion gate.
+The former build order is superseded. Follow the [Apex execution roadmap](docs/roadmap.md): the thin TypeScript MCP gateway and read-only RIA path are implemented locally, and the remaining active work is the live Apex authorization/event integration plus one live operator-visible vertical slice. The Rust workspace, durable admission/fanout separation, and Apex governance contract boundary are foundations already in place; everything else remains paused until that slice passes its completion gate.
 
 ## Contributing
 
