@@ -27,7 +27,7 @@ mod workers;
 use resolvers::{
     build_agent_resolver, build_governance_service, build_operator_resolver, load_server_tls,
 };
-use storage::{build_ephemeral_store, open_inbox, open_outbox};
+use storage::{build_ephemeral_store, open_inbox, open_outbox, warm_proxy_store};
 use workers::{
     spawn_health_monitor, spawn_inbox_reconciliation_worker, spawn_inbox_retention_worker,
     spawn_metrics_server, spawn_status_logger, wait_for_shutdown_signal,
@@ -58,6 +58,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tls = load_server_tls(&trusted_base)?;
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
+    warm_proxy_store()?;
     let command_retention = command_retention()?;
     let retention_millis = command_retention.as_millis().try_into().map_err(|_| {
         io::Error::new(

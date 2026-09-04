@@ -5,11 +5,18 @@ use uuid::Uuid;
 use crate::{ExactScope, proto};
 
 mod validation;
+mod store;
 mod wire;
 
+pub use store::{
+    CreateProxy, InMemoryProxyStore, ListProxies, ListProxiesPage, McpProxy, McpProxySummary,
+    ProxyRevisionStore, ProxyStore, PublishRevision, RetireProxy, UpdateProxyDraft,
+};
 use validation::{bounded_host, bounded_required_string, is_lowercase_uuidv7, is_scope_identifier};
 pub use validation::{validate_mcp_proxy_revision, validate_proxy_spec};
 pub use wire::{parse_proxy_spec_wire_json, validate_proxy_spec_wire_json};
+#[cfg(feature = "postgres")]
+pub use store::PostgresProxyStore;
 
 #[cfg(test)]
 mod tests;
@@ -87,6 +94,10 @@ impl ProxyRevisionId {
             )
         })
     }
+
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +112,12 @@ pub enum ProxyLifecycleState {
     Failed,
     Retiring,
     Retired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyRedactionStatus {
+    Redacted,
+    PartiallyRedacted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +410,9 @@ pub struct McpProxyRevision {
     pub spec: ProxySpec,
     pub config_hash: String,
     pub lifecycle_state: ProxyLifecycleState,
+    pub redaction_status: ProxyRedactionStatus,
+    pub created_by: String,
+    pub created_at: String,
 }
 
 impl McpProxyRevision {
@@ -409,6 +429,9 @@ impl McpProxyRevision {
             spec,
             config_hash: config_hash.into(),
             lifecycle_state,
+            redaction_status: ProxyRedactionStatus::Redacted,
+            created_by: String::new(),
+            created_at: String::new(),
         };
         validate_mcp_proxy_revision(&revision)?;
         Ok(revision)
@@ -455,6 +478,62 @@ impl ProxyError {
             "Proxy configuration uses an unsupported transport.",
         )
     }
+
+    pub fn invalid_request_id() -> Self {
+        Self::new(
+            "INVALID_PROXY_REQUEST_ID",
+            "Proxy mutations require a lowercase UUIDv7 request_id.",
+        )
+    }
+
+    pub fn idempotency_conflict() -> Self {
+        Self::new(
+            "PROXY_IDEMPOTENCY_CONFLICT",
+            "request_id was already used for a different proxy mutation payload.",
+        )
+    }
+
+    pub fn identity_conflict() -> Self {
+        Self::new(
+            "PROXY_IDENTITY_CONFLICT",
+            "A proxy with this identity already exists in the requested scope.",
+        )
+    }
+
+    pub fn revision_conflict() -> Self {
+        Self::new(
+            "PROXY_REVISION_CONFLICT",
+            "The proxy changed since the caller's expected revision.",
+        )
+    }
+
+    pub fn proxy_not_found() -> Self {
+        Self::new(
+            "PROXY_NOT_FOUND",
+            "No proxy with that identity exists in the requested scope.",
+        )
+    }
+
+    pub fn revision_not_found() -> Self {
+        Self::new(
+            "PROXY_REVISION_NOT_FOUND",
+            "No proxy revision with that identity exists in the requested scope.",
+        )
+    }
+
+    pub fn immutable_revision() -> Self {
+        Self::new(
+            "IMMUTABLE_PROXY_REVISION",
+            "Published proxy revisions are immutable and cannot be edited in place.",
+        )
+    }
+
+    pub fn invalid_cursor() -> Self {
+        Self::new(
+            "INVALID_PROXY_CURSOR",
+            "The proxy list cursor is invalid.",
+        )
+    }
 }
 
 impl std::fmt::Display for ProxyError {
@@ -465,6 +544,18 @@ impl std::fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
+impl std::fmt::Display for ProxyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.hyphenated().fmt(f)
+    }
+}
+
+impl std::fmt::Display for ProxyRevisionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.hyphenated().fmt(f)
+    }
+}
+
 fn parse_uuid_v7(value: &str) -> Result<Uuid, ()> {
     if !is_lowercase_uuidv7(value) {
         return Err(());
@@ -472,7 +563,7 @@ fn parse_uuid_v7(value: &str) -> Result<Uuid, ()> {
     Uuid::parse_str(value).map_err(|_| ())
 }
 
-fn is_valid_slug(value: &str) -> bool {
+pub(super) fn is_valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_LEN
         && value

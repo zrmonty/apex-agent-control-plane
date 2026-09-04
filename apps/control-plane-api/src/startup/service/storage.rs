@@ -9,7 +9,9 @@ use apex_control_plane_api::{
     ControlInboxBackend, ControlOutboxBackend, FileCommandInbox, SharedEphemeralStore,
 };
 #[cfg(feature = "postgres")]
-use apex_control_plane_api::{RecoveringPostgresCommandInbox, RecoveringPostgresOutbox};
+use apex_control_plane_api::{
+    PostgresProxyStore, RecoveringPostgresCommandInbox, RecoveringPostgresOutbox,
+};
 
 #[cfg(feature = "postgres")]
 use super::super::env::postgres_pool_size;
@@ -159,6 +161,34 @@ pub(super) fn build_ephemeral_store(
     }
     println!("apex-control-plane-api admission ceiling: process-local only");
     Ok(None)
+}
+
+/// Warms the MCP proxy store backend during startup so schema/application
+/// errors fail before the runtime enters its serve loop.
+pub(super) fn warm_proxy_store() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(url) = control_postgres_url()? {
+            PostgresProxyStore::connect(&url).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to open mcp proxy store: {}",
+                    error.code()
+                ))
+            })?;
+            println!("apex-control-plane-api proxy store backend: postgres");
+        }
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        if control_postgres_url()?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "APEX_CONTROL_POSTGRES_URL is set but this binary was not built with --features postgres",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Selects the durable outbox backend, mirroring `event-ingest`'s

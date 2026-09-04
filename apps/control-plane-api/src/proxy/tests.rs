@@ -587,7 +587,7 @@ fn request_id_is_valid(request_id: &str) -> Result<(), &'static str> {
     if request_id.is_empty() {
         return Err("request_id is required");
     }
-
+    // Store contract tests live under `proxy/store/tests.rs` to keep this file within the line limit.
     let uuid = Uuid::parse_str(request_id).map_err(|_| "request_id must be a uuid")?;
     if uuid.get_version_num() != 7 {
         return Err("request_id must be uuidv7");

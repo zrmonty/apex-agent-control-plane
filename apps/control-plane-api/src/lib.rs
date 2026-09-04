@@ -83,12 +83,17 @@ pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
 pub use proxy::{
     ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, DataClassification,
-    EgressDestination, ExposedTool, GovernanceBinding, Ingress, McpProxyRevision, NetworkPolicy,
+    EgressDestination, ExposedTool, GovernanceBinding, InMemoryProxyStore, Ingress,
+    ListProxies, ListProxiesPage, McpProxy, McpProxyRevision, McpProxySummary, NetworkPolicy,
     PrivateDestinationAllowance, ProxyDraft, ProxyError, ProxyExposure, ProxyId,
-    ProxyLifecycleState, ProxyRevisionId, ProxySpec, ProxyToolClassification, ProxyTransport,
-    RuntimeProfile, SecretRef, UpstreamBinding, parse_proxy_spec_wire_json,
-    validate_mcp_proxy_revision, validate_proxy_spec, validate_proxy_spec_wire_json,
+    ProxyLifecycleState, ProxyRedactionStatus, ProxyRevisionId, ProxyRevisionStore, ProxySpec,
+    ProxyStore, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
+    RuntimeProfile, SecretRef, UpdateProxyDraft, UpstreamBinding, CreateProxy,
+    parse_proxy_spec_wire_json, validate_mcp_proxy_revision, validate_proxy_spec,
+    validate_proxy_spec_wire_json,
 };
+#[cfg(feature = "postgres")]
+pub use proxy::PostgresProxyStore;
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,
