@@ -1,0 +1,65 @@
+{
+  "revisionId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+  "proxyId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+  "configHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lifecycleState": "MCP_PROXY_LIFECYCLE_STATE_READY",
+  "redactionStatus": "MCP_PROXY_REDACTION_STATUS_REDACTED",
+  "spec": {
+    "ingress": {
+      "transport": "MCP_PROXY_TRANSPORT_STREAMABLE_HTTP",
+      "exposure": "MCP_PROXY_EXPOSURE_PRIVATE",
+      "host": "proxy.apex.test",
+      "path": "/mcp",
+      "allowedOrigins": [
+        "https://console.apex.test"
+      ],
+      "protocolRevision": "2025-11-25",
+      "inboundAuthenticationRequired": true
+    },
+    "upstreams": [
+      {
+        "upstreamId": "portfolio-upstream",
+        "displayName": "Portfolio upstream",
+        "transport": "MCP_PROXY_TRANSPORT_STREAMABLE_HTTP",
+        "endpointOrCommandRef": "https://portfolio-api.apex.test/mcp",
+        "credentialRef": "secret://vault/upstreams/portfolio-reader",
+        "serverIdentity": "portfolio-api.apex.test",
+        "toolCatalogHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    ],
+    "exposedTools": [
+      {
+        "upstreamId": "portfolio-upstream",
+        "toolName": "portfolio.read",
+        "alias": "portfolio.read",
+        "classification": "MCP_PROXY_TOOL_CLASSIFICATION_READ"
+      }
+    ],
+    "governanceBinding": {
+      "policyId": "ria-read-v1",
+      "approvalMode": "none",
+      "dataClassification": "confidential",
+      "rateLimit": "60/m",
+      "concurrencyLimit": "4",
+      "budget": "5000/d",
+      "retention": "30d"
+    },
+    "runtimeProfile": {
+      "imageDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "cpuLimit": "500m",
+      "memoryLimit": "256Mi",
+      "networkPolicy": "default-deny",
+      "filesystemPolicy": "read-only-rootfs",
+      "rootless": true,
+      "egressDestinations": [
+        {
+          "host": "portfolio-api.apex.test",
+          "port": 443,
+          "privateDestinationAllowance": "MCP_PROXY_PRIVATE_DESTINATION_ALLOWANCE_DENIED"
+        }
+      ]
+    }
+  },
+  "createdBy": "operator-fixture",
+  "createdAt": "2026-09-04T00:00:00.123456Z"
+}

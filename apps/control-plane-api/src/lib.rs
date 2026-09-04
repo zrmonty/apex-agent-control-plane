@@ -29,6 +29,7 @@
 
 pub mod proto {
     tonic::include_proto!("apex.v1");
+    include!(concat!(env!("OUT_DIR"), "/apex.v1.serde.rs"));
 }
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod governance_tests;
 
 mod agent_auth;
 mod auth;
+pub mod contract_json;
 mod dual_approval;
 mod envelope;
 mod errors;

@@ -13,6 +13,31 @@ permissions:
   contents: read
 
 jobs:
+  gateway-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: |
+            contracts/pnpm-lock.yaml
+            packages/apex-contracts-ts/pnpm-lock.yaml
+      - name: Install pinned contract tooling
+        run: |
+          pnpm --dir contracts install --frozen-lockfile --ignore-scripts
+          pnpm --dir packages/apex-contracts-ts install --frozen-lockfile --ignore-scripts
+      - name: Verify generated contracts and compatibility
+        run: |
+          pnpm --dir contracts verify
+          pnpm --dir contracts test
+          node --test scripts/tests/verify-working-mcp-gateway.test.mjs
+          node scripts/verify-working-mcp-gateway.mjs --list
+
   source-line-limits:
     runs-on: ubuntu-latest
     steps:

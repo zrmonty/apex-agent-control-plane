@@ -37,6 +37,7 @@ fs2 = "0.4"
 jsonwebtoken = "9.3.1"
 prost = "0.14"
 prost-types = "0.14"
+pbjson = "=0.9.0"
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
 # JWKS retrieval for the Keycloak resolver. Same client, same TLS stack, and
 # the same "trust only the configured CA, never a platform root store"
@@ -54,6 +55,9 @@ tonic-prost = "0.14"
 uuid = { version = "1", features = ["v7"] }
 
 [build-dependencies]
+pbjson-build = "=0.9.0"
+prost = "0.14"
+prost-types = "0.14"
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }

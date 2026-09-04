@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package apex.v1;
 
+import "apex/v1/proxy_approval.proto";
+
 // Narrow, service-to-service governance boundary used by the thin MCP
 // gateway. This is not an operator command surface: it has its own mTLS
 // client identity and bearer credential, and exposes only decision metadata.
@@ -58,4 +60,32 @@ message GovernancePolicySnapshot {
   GovernanceScope scope = 1;
   string policy_id = 2;
   uint64 revision = 3;
+}
+
+// Independent managed-call boundary preserves the original narrow service.
+// An admission binds identity, revision, generation and canonical arguments.
+service ManagedProxyGovernance {
+  rpc AuthorizeManagedCall(ManagedCallAuthorizationRequest) returns (ManagedCallAuthorizationDecision);
+}
+message ManagedCallAuthorizationRequest {
+  GovernanceCaller caller = 1;
+  GovernanceScope scope = 2;
+  string proxy_id = 3;
+  string revision_id = 4;
+  uint64 generation = 5;
+  string call_id = 6;
+  string tool_alias = 7;
+  string action = 8;
+  string resource = 9;
+  string classification = 10;
+  string arguments_hash = 11;
+  GovernanceTrace trace = 12;
+  string approval_id = 13;
+}
+message ManagedCallAuthorizationDecision {
+  GovernanceAuthorizationDecision decision = 1;
+  ProxyApproval approval = 2;
+  string admission_id = 3;
+  uint64 expires_at_unix_us = 4;
+  uint64 policy_revision = 5;
 }

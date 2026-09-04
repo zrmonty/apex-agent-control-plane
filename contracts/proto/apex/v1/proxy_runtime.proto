@@ -1,0 +1,105 @@
+syntax = "proto3";
+package apex.v1;
+import "apex/v1/mcp_proxy.proto";
+import "apex/v1/proxy_trace.proto";
+import "apex/v1/proxy_approval.proto";
+
+// Workload mTLS-only host boundary. No arbitrary exec, mount or image pull RPC.
+service ProxyRuntimeAgent {
+  rpc EnsureRuntime(EnsureRuntimeRequest) returns (RuntimeObservation);
+  rpc InspectRuntime(RuntimeTarget) returns (RuntimeObservation);
+  rpc SetAdmission(SetRuntimeAdmissionRequest) returns (RuntimeObservation);
+  rpc DrainRuntime(DrainRuntimeRequest) returns (RuntimeObservation);
+  rpc RemoveRuntime(RuntimeTarget) returns (RuntimeObservation);
+  rpc ProbeUpstream(ProbeUpstreamRequest) returns (UpstreamProbeObservation);
+}
+message RuntimeTarget {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string proxy_id = 3;
+  string revision_id = 4;
+  uint64 generation = 5;
+  uint64 fencing_token = 6;
+}
+message RuntimeToolSchema {
+  string upstream_id = 1;
+  string tool_name = 2;
+  string input_schema_json = 3;
+  string output_schema_json = 4;
+  string output_profile_id = 5;
+  string schema_hash = 6;
+}
+message RuntimeNetworkGrant {
+  string grant_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  repeated string approved_cidrs = 4;
+  bool private_destination = 5;
+}
+message RuntimeAuthentication {
+  string issuer = 1;
+  string audience = 2;
+  string jwks_uri = 3;
+  repeated string required_scopes = 4;
+  string workload_identity_ref = 5;
+}
+message RuntimeConfiguration {
+  uint32 schema_version = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string config_hash = 6;
+  uint64 generation = 7;
+  string resource_url = 8;
+  McpProxySpec spec = 9;
+  repeated RuntimeToolSchema tool_schemas = 10;
+  repeated RuntimeNetworkGrant network_grants = 11;
+  RuntimeAuthentication auth = 12;
+  ProxyTelemetryPolicy telemetry = 13;
+  ProxyApprovalMode approval_mode = 14;
+  string runtime_manifest_hash = 15;
+  string image_ref = 16;
+  uint32 cpu_millis = 17;
+  uint64 memory_bytes = 18;
+  uint32 pid_limit = 19;
+  repeated string secret_refs = 20;
+}
+message EnsureRuntimeRequest {
+  RuntimeTarget target = 1;
+  RuntimeConfiguration configuration = 2;
+}
+message SetRuntimeAdmissionRequest {
+  RuntimeTarget target = 1;
+  bool admit = 2;
+}
+message DrainRuntimeRequest {
+  RuntimeTarget target = 1;
+  uint64 timeout_us = 2;
+}
+message ProbeUpstreamRequest {
+  RuntimeTarget target = 1;
+  string upstream_id = 2;
+  // Uses only a previously installed immutable configuration; no caller URL.
+}
+message RuntimeObservation {
+  RuntimeTarget target = 1;
+  string runtime_id = 2;
+  string state = 3;
+  bool ready = 4;
+  bool admitting = 5;
+  uint64 active_calls = 6;
+  uint64 observed_at_unix_us = 7;
+  string error_code = 8;
+  string resource_url = 9;
+  repeated ProxyStageTiming stages = 10;
+}
+message UpstreamProbeObservation {
+  RuntimeTarget target = 1;
+  string upstream_id = 2;
+  bool connected = 3;
+  string error_code = 4;
+  string server_identity = 5;
+  string catalog_hash = 6;
+  uint64 observed_at_unix_us = 7;
+}

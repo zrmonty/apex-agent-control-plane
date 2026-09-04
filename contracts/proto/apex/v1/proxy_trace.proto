@@ -1,0 +1,38 @@
+syntax = "proto3";
+package apex.v1;
+
+// Durations are measured within one process using its monotonic clock.
+// Unix times are presentation anchors, NOT a cross-host accuracy guarantee.
+// All uint64 fields use canonical decimal strings at JSON boundaries.
+message ProxyStageTiming {
+  string name = 1;
+  uint64 started_at_unix_us = 2;
+  uint64 duration_us = 3;
+  optional uint64 duration_ns = 4;
+  string otel_trace_id = 5;
+  string span_id = 6;
+  string parent_span_id = 7;
+  string process_instance_id = 8;
+  string clock_source = 9;
+  uint64 clock_resolution_ns = 10;
+  optional uint64 clock_uncertainty_us = 11;
+}
+message ProxyTraceSummary {
+  string call_id = 1;
+  string otel_trace_id = 2;
+  repeated ProxyStageTiming stages = 3;
+  bool partial = 4;
+  repeated string missing_stages = 5;
+  uint64 dropped_spans = 6;
+  // The completion event is distinct from the pre-response audit event.
+  string event_id = 7;
+  string completion_event_id = 8;
+}
+message ProxyTelemetryPolicy {
+  uint32 full_trace_sample_per_million = 1;
+  uint32 max_stages = 2;
+  uint32 max_summary_bytes = 3;
+  uint32 max_spans = 4;
+  uint32 max_attributes_per_span = 5;
+  uint64 max_export_queue_bytes = 6;
+}

@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package apex.v1;
 
+import "apex/v1/proxy_management.proto";
+import "apex/v1/proxy_approval.proto";
+
 // Managed MCP proxy control-plane contract.
 //
 // This is the operator-facing lifecycle surface for proxy resources. It is
@@ -24,6 +27,13 @@ service McpProxyService {
   rpc RollbackProxy(RollbackProxyRequest) returns (RollbackProxyResponse);
   rpc RetireProxy(RetireProxyRequest) returns (RetireProxyResponse);
   rpc ListProxyActivity(ListProxyActivityRequest) returns (ListProxyActivityResponse);
+  rpc GetProxyCapabilities(GetProxyCapabilitiesRequest) returns (GetProxyCapabilitiesResponse);
+  rpc ListProxyRevisions(ListProxyRevisionsRequest) returns (ListProxyRevisionsResponse);
+  rpc GetProxyOperation(GetProxyOperationRequest) returns (GetProxyOperationResponse);
+  rpc ListProxyBindings(ListProxyBindingsRequest) returns (ListProxyBindingsResponse);
+  rpc ListProxyApprovals(ListProxyApprovalsRequest) returns (ListProxyApprovalsResponse);
+  rpc DecideProxyApproval(DecideProxyApprovalRequest) returns (DecideProxyApprovalResponse);
+  rpc GetProxyTrace(GetProxyTraceRequest) returns (GetProxyTraceResponse);
 }
 
 enum McpProxyLifecycleState {
@@ -321,6 +331,12 @@ message ListProxyActivityRequest {
 
 message ListProxyActivityResponse {
   repeated McpProxyActivityEntry activity = 1;
+  // Opaque stable cursor; scoped to proxy and filter, not an array offset.
+  string next_page_token = 2;
+}
+
+message ListProxyRevisionsResponse {
+  repeated McpProxyRevision revisions = 1;
   string next_page_token = 2;
 }
 
@@ -372,6 +388,7 @@ message McpProxyActivityEntry {
   McpProxyLifecycleState lifecycle_state = 8;
   McpProxyRedactionStatus redaction_status = 9;
   string summary = 10;
+  ProxyActivitySummary detail = 11;
 }
 
 message ProxyValidationReport {

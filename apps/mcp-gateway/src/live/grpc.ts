@@ -35,6 +35,8 @@ export function createGrpcClient(
   let packageDefinition = packageDefinitionCache.get(protoFile);
   if (packageDefinition === undefined) {
     packageDefinition = protoLoader.loadSync(protoFile, {
+      // Entry protos live in contracts/proto/apex/v1; imports start at contracts/proto.
+      includeDirs: [path.resolve(path.dirname(protoFile), "../..")],
       keepCase: true,
       longs: String,
       enums: String,
