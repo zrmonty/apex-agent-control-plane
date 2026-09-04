@@ -5,6 +5,8 @@ use super::rows;
 use crate::ExactScope;
 use crate::proxy::{ProxyError, ProxyId, ProxyLifecycleState, ProxyRevisionId};
 
+// This adapter mirrors the lifecycle transition SQL columns and keeps the query explicit.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_lifecycle_transition(
     client: &mut impl GenericClient,
     operation: &str,

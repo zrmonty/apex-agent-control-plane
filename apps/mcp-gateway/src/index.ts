@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { GatewayError } from "./contracts.js";
@@ -7,7 +8,7 @@ import { createMcpServer } from "./server.js";
 import { buildGatewayDependencies } from "./wiring.js";
 
 async function main(): Promise<void> {
-  const revisionConfig = loadRevisionConfig(process.env);
+  const revisionConfig = await loadRevisionConfig(process.env);
   if (revisionConfig?.ingress.transport === "streamable-http") {
     throw new GatewayError(
       "GOVERNANCE_UNAVAILABLE",
@@ -21,14 +22,24 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-function loadRevisionConfig(env: NodeJS.ProcessEnv) {
+async function loadRevisionConfig(env: NodeJS.ProcessEnv) {
+  const file = env.APEX_MCP_PROXY_REVISION_CONFIG_FILE?.trim();
   const serialized = env.APEX_MCP_PROXY_REVISION_CONFIG?.trim();
-  if (serialized === undefined || serialized.length === 0) {
+  if (file !== undefined && file.length > 0 && serialized !== undefined && serialized.length > 0) {
+    throw new GatewayError(
+      "INVALID_INPUT",
+      "managed proxy configuration rejected safely",
+    );
+  }
+  if ((file === undefined || file.length === 0) && (serialized === undefined || serialized.length === 0)) {
     return undefined;
   }
 
   try {
-    return parseProxyRevisionConfig(JSON.parse(serialized));
+    const payload = file !== undefined && file.length > 0
+      ? await readFile(file, "utf8")
+      : serialized ?? "";
+    return parseProxyRevisionConfig(JSON.parse(payload));
   } catch (error: unknown) {
     if (error instanceof GatewayError) {
       throw error;

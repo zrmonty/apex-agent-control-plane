@@ -369,7 +369,7 @@ fn validate_host(value: &str) -> Result<(), ProxyError> {
         || normalized.contains("://")
         || normalized.contains('/')
         || normalized.chars().any(char::is_whitespace)
-        || (!normalized.parse::<std::net::IpAddr>().is_ok() && !is_dns_hostname(normalized))
+        || (normalized.parse::<std::net::IpAddr>().is_err() && !is_dns_hostname(normalized))
     {
         return Err(ProxyError::invalid_proxy_spec(
             "Proxy hosts require a bounded host reference.",

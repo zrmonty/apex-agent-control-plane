@@ -496,7 +496,7 @@ fn is_private_host(value: &str) -> bool {
     }
     normalized
         .parse::<IpAddr>()
-        .map_or(false, |address| match address {
+        .is_ok_and(|address| match address {
             IpAddr::V4(ipv4) => {
                 ipv4.is_private()
                     || ipv4.is_loopback()

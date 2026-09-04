@@ -19,6 +19,8 @@ pub(super) struct LifecycleTransition {
 }
 
 impl LifecycleTransition {
+    // The constructor mirrors the immutable lifecycle audit record columns.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         operation: impl Into<String>,
         scope: ExactScope,

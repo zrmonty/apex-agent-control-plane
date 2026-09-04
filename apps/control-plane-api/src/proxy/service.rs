@@ -191,7 +191,7 @@ fn redaction_to_proto(status: super::ProxyRedactionStatus) -> i32 {
 fn proxy_status(error: impl std::fmt::Display) -> Status {
     let message = error.to_string();
     let code = message.split(':').next().unwrap_or_default();
-    let status = match code {
+    match code {
         "PROXY_NOT_FOUND" | "PROXY_REVISION_NOT_FOUND" => {
             Status::not_found("PROXY_NOT_FOUND: request rejected safely")
         }
@@ -215,8 +215,7 @@ fn proxy_status(error: impl std::fmt::Display) -> Status {
             Status::unavailable("PROXY_PROVIDER_FAILED: request rejected safely")
         }
         _ => Status::invalid_argument("INVALID_PROXY_REQUEST: request rejected safely"),
-    };
-    status
+    }
 }
 
 pub fn bounded_mcp_proxy_service_server<R: OperatorCredentialResolver>(

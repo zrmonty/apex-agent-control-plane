@@ -31,10 +31,10 @@ impl<P: RuntimeOperations> ProxyRuntimeReconciler<P> {
 
     pub fn reconcile(&self, revision: &McpProxyRevision) -> Result<RuntimeHandle, ProxyError> {
         let key = RuntimeKey { proxy_id: revision.proxy_id.clone(), revision_id: revision.revision_id.clone() };
-        if let Some(handle) = self.active.lock().map_err(|_| ProxyError::provider_failed())?.get(&key).cloned() {
-            if self.provider.readiness(&handle)? == Readiness::Ready {
-                return Ok(handle);
-            }
+        if let Some(handle) = self.active.lock().map_err(|_| ProxyError::provider_failed())?.get(&key).cloned()
+            && self.provider.readiness(&handle)? == Readiness::Ready
+        {
+            return Ok(handle);
         }
         let handle = self.provider.provision(revision)?;
         if self.provider.readiness(&handle)? != Readiness::Ready {

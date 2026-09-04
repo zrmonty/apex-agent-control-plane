@@ -88,11 +88,11 @@ impl DockerProxyProvider {
     pub fn provision(&self, revision: &McpProxyRevision) -> Result<RuntimeHandle, ProxyError> {
         let (container_name, proxy_id, revision_id) = identity(revision);
         let inspect = self.run(["container", "inspect", &container_name]);
-        if let Ok(output) = inspect {
-            if output.status == 0 {
-                let container_id = bounded_id(&output.stdout)?;
-                return Ok(RuntimeHandle { container_name, container_id, proxy_id, revision_id });
-            }
+        if let Ok(output) = inspect
+            && output.status == 0
+        {
+            let container_id = bounded_id(&output.stdout)?;
+            return Ok(RuntimeHandle { container_name, container_id, proxy_id, revision_id });
         }
 
         let args = self.run_args(revision, &container_name);

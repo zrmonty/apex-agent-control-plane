@@ -9,11 +9,17 @@ services:
   mcp-proxy-portfolio:
     image: apex-mcp-gateway:runtime-baseline
     build:
-      context: ../..
-      dockerfile: apps/mcp-gateway/Dockerfile
+      context: ../../apps/mcp-gateway
+      dockerfile: Dockerfile
     environment:
-      APEX_MCP_PROXY_REVISION_CONFIG: /run/secrets/proxy_revision_config
+      APEX_MCP_PROXY_REVISION_CONFIG_FILE: /run/secrets/proxy_revision_config
+      APEX_MCP_PRINCIPAL: spiffe://apex/agent/mcp-proxy-runtime
+      APEX_MCP_AGENT_ID: mcp-proxy-runtime
+      APEX_MCP_WORKSPACE_ID: apex
+      APEX_MCP_NAMESPACE_ID: mcp-proxy
+      APEX_MCP_TRACE_ID: mcp-proxy-runtime
     user: "10001:10001"
+    stdin_open: true
     read_only: true
     security_opt:
       - no-new-privileges:true

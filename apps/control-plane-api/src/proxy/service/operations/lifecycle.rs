@@ -1,6 +1,8 @@
 use super::super::*;
 
 impl<R: OperatorCredentialResolver> McpProxyService<R> {
+    // This operation mirrors the complete lifecycle RPC boundary and its audit fields.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn lifecycle(
         &self,
         scope: ExactScope,
