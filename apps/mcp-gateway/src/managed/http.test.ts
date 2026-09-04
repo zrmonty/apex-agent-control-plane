@@ -50,6 +50,7 @@ test("rejects invalid origin, host, scheme, duplicate headers, and oversized bod
   assertRejected({ ...request, headers: { ...request.headers, origin: ["https://evil.example.test"] } });
   assertRejected({ ...request, headers: { ...request.headers, host: ["other.example.test"] } });
   assertRejected({ ...request, url: "http://proxy.example.test/mcp" });
+  assertRejected({ ...request, url: "https://proxy.example.test/other" });
   assertRejected({ ...request, headers: { ...request.headers, host: ["proxy.example.test", "proxy.example.test"] } });
   assertRejected({ ...request, bodyBytes: 1_048_577 });
 });

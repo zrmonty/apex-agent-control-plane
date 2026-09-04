@@ -1,4 +1,4 @@
-//! Downstream durable sinks and ordered fanout.
+//! Downstream durable sinks and bounded fanout.
 
 mod fanout;
 mod retry;

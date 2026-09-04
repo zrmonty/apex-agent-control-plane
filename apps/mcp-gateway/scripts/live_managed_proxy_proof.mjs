@@ -22,6 +22,7 @@ const config = parseProxyRevisionConfig({
 const claims = { issuer: "https://issuer.example.test", audience: "apex-mcp-proxy", subject: "proof-agent", expiresAt: Math.floor(Date.now() / 1000) + 300, scope: "mcp:proxy:invoke", proxyId };
 const evidence = [];
 let calls = 0;
+const session = { async discover() { return { upstreamId: "portfolio", schemaHash: "proof", tools: ["portfolio.read"] }; }, async call() { calls += 1; return { value: "safe", secret: "never-print-this-canary" }; }, async close() {} };
 const executor = new ManagedExecutor({
   config,
   caller: { principal: "spiffe://apex/proof", agentId: "proof-agent", workspaceId: "northstar", namespaceId: "research", traceId: "proof-trace" },
@@ -32,7 +33,7 @@ const executor = new ManagedExecutor({
   checkEgress: async () => undefined,
   validateInput: (input) => input,
   filterOutput: (output) => ({ output: { value: output.value }, removedFields: ["secret"], sourceBytes: 64, filteredBytes: 18 }),
-  session: { async discover() { return { upstreamId: "portfolio", schemaHash: "proof", tools: ["portfolio.read"] }; }, async call() { calls += 1; return { value: "safe", secret: "never-print-this-canary" }; }, async close() {} },
+  sessions: new Map([["portfolio", session]]),
   emitEvidence: async (event) => evidence.push(event),
 });
 

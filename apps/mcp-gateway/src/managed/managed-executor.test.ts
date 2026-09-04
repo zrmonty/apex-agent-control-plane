@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AuthenticatedContext } from "../contracts.js";
+import { portfolioResourceReference } from "../context.js";
 import type { ProxyRevisionConfig } from "./config.js";
 import { ManagedExecutor, type ManagedAuthorizationRequest, type ManagedEvidenceEvent, type ManagedGovernance } from "./managed-executor.js";
 import type { InboundTokenClaims } from "./auth.js";
@@ -47,13 +48,15 @@ class Session implements UpstreamSession {
 }
 
 class Governance implements ManagedGovernance {
+  lastRequest: ManagedAuthorizationRequest | undefined;
   constructor(public outcome: "allowed" | "denied" | "requires_approval" = "allowed") {}
-  async authorize(_request: ManagedAuthorizationRequest) { return { outcome: this.outcome, policyId: "policy-read", reasonCode: "policy.allow", fieldRestrictions: [] } as const; }
+  async authorize(request: ManagedAuthorizationRequest) { this.lastRequest = request; return { outcome: this.outcome, policyId: "policy-read", reasonCode: "policy.allow", fieldRestrictions: [] } as const; }
   async getPolicy(_scope: Readonly<{ workspaceId: string; namespaceId: string }>) { return { policyId: "policy-read", revision: 1 } as const; }
 }
 
 function executor(overrides: Partial<ConstructorParameters<typeof ManagedExecutor>[0]> = {}) {
   const session = new Session();
+  const sessions = new Map<string, UpstreamSession>([["portfolio", session]]);
   const evidence: ManagedEvidenceEvent[] = [];
   const order: string[] = [];
   const governance = new Governance();
@@ -70,7 +73,7 @@ function executor(overrides: Partial<ConstructorParameters<typeof ManagedExecuto
     checkEgress: async () => { order.push("egress"); },
     validateInput: (input) => { order.push("schema"); return input; },
     filterOutput: (output) => { order.push("filter"); return { output, removedFields: ["secret"], sourceBytes: 20, filteredBytes: 10 }; },
-    session,
+    sessions,
     emitEvidence: async (event) => { order.push("evidence"); evidence.push(event); },
     ...overrides,
   });
@@ -80,14 +83,27 @@ function executor(overrides: Partial<ConstructorParameters<typeof ManagedExecuto
 const headers = { authorization: ["Bearer signed-token"] } as const;
 
 test("executes managed calls in the governed order and emits metadata only", async () => {
-  const { instance, order, evidence, session } = executor();
+  const { instance, order, evidence, session, governance } = executor();
   const result = await instance.execute("portfolio.read", { portfolioId: "northstar-401k" }, headers);
 
   assert.deepEqual(result, { value: "safe" });
   assert.deepEqual(order, ["authenticate", "schema", "authorize", "policy", "rate-budget", "egress", "filter", "evidence"]);
   assert.equal(session.calls, 1);
+  assert.equal(governance.lastRequest?.action, "read");
+  assert.equal(governance.lastRequest?.resource, portfolioResourceReference("northstar-401k"));
   assert.equal("output" in evidence[0], false);
   assert.equal(evidence[0].status, "succeeded");
+  assert.deepEqual(evidence[0].fieldRestrictions, []);
+});
+
+test("uses the filter's measured output size without serializing the output again", async () => {
+  const { instance, evidence } = executor({
+    filterOutput: (output) => ({ output, removedFields: [], sourceBytes: 20, filteredBytes: 10, outputBytes: 10 }),
+  });
+
+  await instance.execute("portfolio.read", { portfolioId: "northstar-401k" }, headers);
+
+  assert.equal(evidence[0].outputBytes, 10);
 });
 
 test("denials and approval failures never call the upstream", async () => {
@@ -114,4 +130,47 @@ test("evidence admission failure prevents an allowed result", async () => {
   const { instance, session } = executor({ emitEvidence: async () => { throw new Error("sink detail"); } });
   await assert.rejects(() => instance.execute("portfolio.read", {}, headers), /EVENT_ADMISSION_FAILED/);
   assert.equal(session.calls, 1);
+});
+
+test("routes each exposed alias to its configured upstream session", async () => {
+  const primary = new Session();
+  const secondary = new Session();
+  const multiConfig = {
+    ...config,
+    upstreams: [
+      ...config.upstreams,
+      { upstreamId: "secondary", transport: "streamable-http", endpointOrCommandRef: "https://secondary.example.test/mcp" },
+    ],
+    exposedTools: [
+      ...config.exposedTools,
+      { upstreamId: "secondary", toolName: "portfolio.read", alias: "secondary.read", classification: "read" },
+    ],
+  } as unknown as ProxyRevisionConfig;
+  const evidence: ManagedEvidenceEvent[] = [];
+  const instance = new ManagedExecutor({
+    config: multiConfig,
+    caller,
+    verifier: { async verify() { return claims; } },
+    governance: new Governance(),
+    approve: async () => true,
+    admit: async () => true,
+    checkEgress: async () => {},
+    validateInput: (input) => input,
+    filterOutput: (output) => ({ output, removedFields: [], sourceBytes: 1, filteredBytes: 1 }),
+    sessions: new Map([["portfolio", primary], ["secondary", secondary]]),
+    emitEvidence: async (event) => { evidence.push(event); },
+  });
+
+  await instance.execute("secondary.read", {}, headers);
+
+  assert.equal(primary.calls, 0);
+  assert.equal(secondary.calls, 1);
+  assert.equal(evidence[0].upstreamId, "secondary");
+});
+
+test("a missing upstream session fails closed without fallback", async () => {
+  const { instance, session } = executor({ sessions: new Map() });
+
+  await assert.rejects(() => instance.execute("portfolio.read", {}, headers), /ADAPTER_FAILED/);
+  assert.equal(session.calls, 0);
 });

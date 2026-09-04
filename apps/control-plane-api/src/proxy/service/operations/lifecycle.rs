@@ -15,9 +15,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         command: super::LifecycleCommand,
         approved: bool,
     ) -> Result<McpProxy, Status> {
-        let Some(events) = &self.events else {
-            return Err(proxy_status(ProxyError::event_sink_unavailable()));
-        };
+        self.require_event_sink()?;
         let event = ProxyLifecycleEvent {
             request_id: request_id.clone(),
             operation: command.operation().to_owned(),
@@ -44,7 +42,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         .await
         .map_err(internal_status)?
         .map_err(proxy_status)?;
-        events.emit(event).map_err(proxy_status)?;
+        self.emit_event(event).await?;
         Ok(proxy)
     }
 

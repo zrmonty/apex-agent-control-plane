@@ -1,8 +1,14 @@
 # Apex MCP Gateway
 
-Thin TypeScript MCP gateway for governed, read-only `portfolio.read` access over stdio.
+Thin TypeScript MCP gateway for governed, read-only `portfolio.read` access
+over stdio or a managed Streamable HTTP revision.
 
-The thin stdio gateway and deterministic local `portfolio.read` path are implemented. Live mode uses a dedicated mTLS/bearer governance client and the existing certificate-bound event-ingest admission client.
+The thin stdio gateway and deterministic local `portfolio.read` path are
+implemented. Managed Streamable HTTP mode uses the official MCP server/client
+transports, dedicated inbound verification, outbound credentials, live Apex
+governance, and the existing certificate-bound event-ingest admission client.
+See [`docs/operations/mcp-proxy-live-integrations.md`](../../docs/operations/mcp-proxy-live-integrations.md)
+for the deployment contract and recovery guidance.
 
 ## Behavior
 
@@ -22,4 +28,13 @@ The thin stdio gateway and deterministic local `portfolio.read` path are impleme
 2. Build the package with `pnpm build` or a direct TypeScript runner if policy wrappers block `pnpm`.
 3. Start the gateway with `pnpm start`.
 
-Local mode uses `StaticLocalApex` and `LocalPortfolioAdapter`. Live mode selects the same seeded read-only portfolio adapter but obtains authorization and policy metadata from `control-plane-api` and admits metadata-only TOOL evidence through `event-ingest`. Live mode fails closed when any required client credential is missing.
+Local mode uses `StaticLocalApex` and `LocalPortfolioAdapter`. Live mode
+selects the same seeded read-only portfolio adapter but obtains authorization
+and policy metadata from `control-plane-api` and admits metadata-only TOOL
+evidence through `event-ingest`. Live mode fails closed when any required
+client credential is missing.
+
+When a validated revision sets `ingress.transport` to `streamable-http`, the
+entrypoint requires live dependencies, discovers every declared HTTP upstream
+before binding, and starts the managed listener only after those checks pass.
+Stdio upstreams remain unavailable in this production slice.

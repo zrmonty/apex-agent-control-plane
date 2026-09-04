@@ -13,6 +13,12 @@ use apex_event_ingest::{
     RetryingDurableSink, proto,
 };
 use prost::Message;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::thread;
+use std::time::Duration;
 
 const FIXTURE_EVENT_HASH: &str = "2ceaac5b752083018db384977ec25ad50a4dda3bf748ea359c2c1ef9e53e7058";
 
@@ -74,6 +80,54 @@ impl DurableEventSink for NonRetrySink {
 }
 
 struct PanickingTransport;
+
+#[derive(Clone)]
+struct OverlapProbe {
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl OverlapProbe {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn wait(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(20));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct SlowTransport(OverlapProbe);
+
+struct SlowSink(OverlapProbe);
+
+impl JetStreamTransport for SlowTransport {
+    fn publish_event(
+        &mut self,
+        _subject: &str,
+        _message_id: &str,
+        _payload: &[u8],
+    ) -> Result<(), GatewayError> {
+        self.0.wait();
+        Ok(())
+    }
+}
+
+impl DurableEventSink for SlowSink {
+    fn write_event(&mut self, _event: &IngestRequest) -> Result<(), GatewayError> {
+        self.0.wait();
+        Ok(())
+    }
+}
+
+impl ClickHousePublisher for SlowSink {}
+impl ArchivePublisher for SlowSink {}
 
 impl JetStreamTransport for PanickingTransport {
     fn publish_event(
@@ -148,6 +202,42 @@ fn durable_fanout_orders_jetstream_clickhouse_and_archive_writes() {
     assert_eq!(fanout.clickhouse().writes, 1);
     assert_eq!(fanout.archive().writes, 1);
     let _ = fanout.jetstream();
+}
+
+#[test]
+fn parallel_fanout_overlaps_independent_sinks() {
+    let probe = OverlapProbe::new();
+    let mut fanout = DurableFanoutPublisher::with_parallel_sinks(
+        SlowTransport(probe.clone()),
+        SlowSink(probe.clone()),
+        SlowSink(probe.clone()),
+    );
+
+    fanout
+        .publish(&event("018f5c91-2d88-7c00-8000-000000000001"))
+        .expect("parallel sinks acknowledge");
+
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn parallel_fanout_returns_sink_failure_after_joining_peer_sinks() {
+    let mut fanout = DurableFanoutPublisher::with_parallel_sinks(
+        RecordingTransport::default(),
+        RecordingSink {
+            writes: 0,
+            fail: true,
+            panic: false,
+        },
+        RecordingSink::default(),
+    );
+
+    let error = fanout
+        .publish(&event("018f5c91-2d88-7c00-8000-000000000001"))
+        .expect_err("a failed required sink must fail the fanout");
+
+    assert_eq!(error.code, GatewayErrorCode::PublishFailed);
+    assert_eq!(fanout.archive().writes, 1);
 }
 
 #[test]

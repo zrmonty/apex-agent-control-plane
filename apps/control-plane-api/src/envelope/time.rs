@@ -38,7 +38,6 @@ pub(crate) fn now_unix_millis() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
 pub(crate) fn rfc3339_from_uuidv7(command_id: &str) -> Option<String> {
     uuidv7_unix_millis(command_id).map(|millis| format_rfc3339_micros(u128::from(millis) * 1_000))
 }

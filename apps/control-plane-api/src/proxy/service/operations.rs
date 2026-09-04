@@ -7,8 +7,12 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             .ok_or_else(|| proxy_status(ProxyError::event_sink_unavailable()))
     }
 
-    pub(super) fn emit_event(&self, event: ProxyLifecycleEvent) -> Result<(), Status> {
-        self.require_event_sink()?.emit(event).map_err(proxy_status)
+    pub(super) async fn emit_event(&self, event: ProxyLifecycleEvent) -> Result<(), Status> {
+        let events = self.require_event_sink()?;
+        tokio::task::spawn_blocking(move || events.emit(event))
+            .await
+            .map_err(internal_status)?
+            .map_err(proxy_status)
     }
 
     pub fn new(auth: OperatorTokenAuthenticator<R>, store: Arc<dyn ProxyStoreBackend>) -> Self {
@@ -97,7 +101,8 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             revision_id: None,
             actor_id,
             reason_code: "proxy.created".to_owned(),
-        })?;
+        })
+        .await?;
         Ok(Response::new(proto::CreateProxyResponse {
             proxy: Some(proxy_to_proto(outcome.proxy)),
             duplicate: outcome.duplicate,
@@ -201,7 +206,8 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             revision_id: Some(revision.revision_id.clone()),
             actor_id,
             reason_code: "proxy.draft_updated".to_owned(),
-        })?;
+        })
+        .await?;
         Ok(Response::new(proto::UpdateProxyDraftResponse {
             proxy: Some(proxy_to_proto(proxy)),
             revision: Some(revision_to_proto(revision)),
@@ -246,7 +252,8 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             revision_id: Some(revision.revision_id.clone()),
             actor_id,
             reason_code: "proxy.revision_published".to_owned(),
-        })?;
+        })
+        .await?;
         Ok(Response::new(proto::PublishProxyRevisionResponse {
             revision: Some(revision_to_proto(revision)),
         }))

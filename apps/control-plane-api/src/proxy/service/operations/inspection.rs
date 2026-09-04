@@ -123,10 +123,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         .map_err(internal_status)?
         .map_err(proxy_status)?;
         self.reconciled(revision.clone()).await?;
-        self.events
-            .as_ref()
-            .expect("checked above")
-            .emit(ProxyLifecycleEvent {
+        self.emit_event(ProxyLifecycleEvent {
                 request_id: input.request_id.clone(),
                 operation: "rotate_proxy_credentials".to_owned(),
                 scope,
@@ -135,7 +132,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
                 actor_id: actor,
                 reason_code: reason,
             })
-            .map_err(proxy_status)?;
+            .await?;
         Ok(Response::new(proto::RotateProxyCredentialsResponse {
             revision: Some(revision_to_proto(revision)),
         }))
@@ -201,10 +198,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         .await
         .map_err(internal_status)?
         .map_err(proxy_status)?;
-        self.events
-            .as_ref()
-            .expect("checked above")
-            .emit(ProxyLifecycleEvent {
+        self.emit_event(ProxyLifecycleEvent {
                 request_id: input.request_id.clone(),
                 operation: "rollback_proxy".to_owned(),
                 scope,
@@ -213,7 +207,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
                 actor_id: actor,
                 reason_code: reason,
             })
-            .map_err(proxy_status)?;
+            .await?;
         Ok(Response::new(proto::RollbackProxyResponse {
             proxy: Some(proxy_to_proto(proxy)),
         }))

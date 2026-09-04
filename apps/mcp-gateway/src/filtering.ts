@@ -96,47 +96,46 @@ export function filterPortfolioRecord(
   const client = requireObject(rawObject.client, "client");
   const positions = requireArray(rawObject.positions, "positions");
 
-  requireNonEmptyString(rawObject.portfolio_id, "portfolio_id");
-  requireNonEmptyString(rawObject.as_of, "as_of");
-  requireNonEmptyString(rawObject.base_currency, "base_currency");
-  requireFiniteNumber(rawObject.total_value, "total_value");
-  requireNonEmptyString(client.display_name, "client.display_name");
+  const portfolioId = requireNonEmptyString(rawObject.portfolio_id, "portfolio_id");
+  const asOf = requireNonEmptyString(rawObject.as_of, "as_of");
+  const baseCurrency = requireNonEmptyString(rawObject.base_currency, "base_currency");
+  const totalValue = requireFiniteNumber(rawObject.total_value, "total_value");
+  const displayName = requireNonEmptyString(client.display_name, "client.display_name");
   requireNonEmptyString(client.account_number, "client.account_number");
   requireNonEmptyString(client.tax_id, "client.tax_id");
 
-  const validatedPositions = positions.map((position, index) => {
+  const publicPositions = positions.map((position, index) => {
     const validatedPosition = requireObject(position, `positions[${index}]`);
+    const symbol = requireNonEmptyString(
+      validatedPosition.symbol,
+      `positions[${index}].symbol`,
+    );
+    const quantity = requireFiniteNumber(
+      validatedPosition.quantity,
+      `positions[${index}].quantity`,
+    );
+    const marketValue = requireFiniteNumber(
+      validatedPosition.market_value,
+      `positions[${index}].market_value`,
+    );
+    requireFiniteNumber(validatedPosition.cost_basis, "positions.cost_basis");
 
     return {
-      symbol: requireNonEmptyString(
-        validatedPosition.symbol,
-        `positions[${index}].symbol`,
-      ),
-      quantity: requireFiniteNumber(
-        validatedPosition.quantity,
-        `positions[${index}].quantity`,
-      ),
-      marketValue: requireFiniteNumber(
-        validatedPosition.market_value,
-        `positions[${index}].market_value`,
-      ),
-      costBasis: requireFiniteNumber(validatedPosition.cost_basis, "positions.cost_basis"),
+      symbol,
+      quantity,
+      marketValue,
     };
   });
 
   const view: PortfolioPublicView = {
-    portfolioId: requireNonEmptyString(rawObject.portfolio_id, "portfolio_id"),
-    asOf: requireNonEmptyString(rawObject.as_of, "as_of"),
-    baseCurrency: requireNonEmptyString(rawObject.base_currency, "base_currency"),
-    totalValue: requireFiniteNumber(rawObject.total_value, "total_value"),
+    portfolioId,
+    asOf,
+    baseCurrency,
+    totalValue,
     client: {
-      displayName: requireNonEmptyString(client.display_name, "client.display_name"),
+      displayName,
     },
-    positions: validatedPositions.map((position) => ({
-      symbol: position.symbol,
-      quantity: position.quantity,
-      marketValue: position.marketValue,
-    })),
+    positions: publicPositions,
   };
 
   for (const field of decision.fieldRestrictions) {

@@ -55,6 +55,7 @@ test("rejects private, metadata, link-local, and multicast DNS answers", () => {
   ]) {
     assertRejected(() => validateResolvedAddresses("portfolio.example.test", [address]));
   }
+  assertRejected(() => validateResolvedAddresses("portfolio.example.test", ["93.184.216.999"]));
 });
 
 test("revalidates redirects against the declared destination policy", () => {

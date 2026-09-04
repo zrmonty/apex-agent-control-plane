@@ -7,6 +7,7 @@ import {
   authenticateInbound,
   buildBearerChallenge,
   createOutboundCredentialProvider,
+  normalizeHeaderValues,
   validatePkceState,
   type InboundTokenClaims,
 } from "./auth.js";
@@ -93,4 +94,16 @@ test("normalizes verifier and credential failures without exposing their message
     () => authenticateInbound({ authorization: ["Bearer signed-token"] }, config, new FakeVerifier(new Error("private verifier detail"))),
     (error: unknown) => error instanceof GatewayError && !error.message.includes("private verifier detail"),
   );
+});
+
+test("normalizes header names once and preserves duplicate values", () => {
+  const headers = normalizeHeaderValues({
+    Authorization: "Bearer signed-token",
+    authorization: ["Bearer duplicate-token"],
+    Origin: "https://console.example.test",
+  });
+
+  assert.deepEqual(headers.authorization, ["Bearer signed-token", "Bearer duplicate-token"]);
+  assert.deepEqual(headers.origin, ["https://console.example.test"]);
+  assert.equal(Object.hasOwn(headers, "Authorization"), false);
 });

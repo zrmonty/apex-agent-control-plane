@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ProxyRevisionConfig, UpstreamConfig } from "./config.js";
-import { createUpstreamSessions, type UpstreamTransport } from "./upstream.js";
+import { compileExposedToolIndexes, createUpstreamSessions, type UpstreamTransport } from "./upstream.js";
 
 const config = (proxyId: string, credentialRef: string): ProxyRevisionConfig => ({
   proxyId,
@@ -78,6 +78,19 @@ test("creates isolated sessions, catalogs, and credential inputs per proxy", asy
   await sessionB.discover();
   assert.deepEqual(transportA.discoveries, ["secret://a"]);
   assert.deepEqual(transportB.discoveries, ["secret://b"]);
+});
+
+test("compiles alias and upstream tool indexes without changing configured order", () => {
+  const exposedTools = [
+    ...config("018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84", "secret://a").exposedTools,
+    { upstreamId: "secondary", toolName: "portfolio.read", alias: "secondary.read", classification: "read" as const },
+  ];
+  const indexes = compileExposedToolIndexes({ exposedTools });
+
+  assert.equal(indexes.byAlias.get("portfolio.read")?.upstreamId, "portfolio");
+  assert.equal(indexes.byAlias.get("secondary.read")?.upstreamId, "secondary");
+  assert.deepEqual(indexes.byUpstream.get("portfolio")?.map((tool) => tool.alias), ["portfolio.read"]);
+  assert.deepEqual(indexes.byUpstream.get("secondary")?.map((tool) => tool.alias), ["secondary.read"]);
 });
 
 test("quarantines discovery and refuses tools that are not explicitly exposed", async () => {

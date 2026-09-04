@@ -5,7 +5,11 @@ import path from "node:path";
 import test from "node:test";
 
 import type { LiveGrpcConfig } from "./config.js";
-import { loadClientMaterial } from "./secrets.js";
+import {
+  createFileSecretCredentialResolver,
+  loadClientMaterial,
+  loadTrustedJson,
+} from "./secrets.js";
 
 const config: LiveGrpcConfig = {
   endpoint: "https://gateway:8443",
@@ -46,6 +50,22 @@ test("rejects a non-directory base and paths outside the trusted directory", asy
       loadClientMaterial({ ...config, tokenFile: "../outside-token" }, root),
       /GOVERNANCE_UNAVAILABLE/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loads trusted JSON and outbound credentials without escaping the secret base", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "apex-gateway-secrets-"));
+  try {
+    await writeMaterial(root);
+    await writeFile(path.join(root, "inbound-jwks.json"), JSON.stringify({ keys: [] }));
+    await writeFile(path.join(root, "outbound-token"), "outbound-token\n", { mode: 0o600 });
+
+    assert.deepEqual(await loadTrustedJson("inbound-jwks.json", root), { keys: [] });
+    const resolver = createFileSecretCredentialResolver(root);
+    assert.equal(await resolver.resolve("secret://outbound-token"), "outbound-token");
+    await assert.rejects(resolver.resolve("secret://../outside"), /GOVERNANCE_UNAVAILABLE/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -2,6 +2,7 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { GatewayError } from "../contracts.js";
+import type { SecretCredentialResolver } from "../managed/auth.js";
 import type { LiveGrpcConfig } from "./config.js";
 
 const MAX_SECRET_BYTES = 1024 * 1024;
@@ -51,6 +52,59 @@ export async function loadClientMaterial(
     throw unavailable();
   }
   return { ca, clientCert, clientKey, token };
+}
+
+export async function loadTrustedJson(
+  configured: string,
+  trustedSecretBase: string,
+): Promise<unknown> {
+  const base = await realpath(trustedSecretBase).catch(() => {
+    throw unavailable();
+  });
+  const baseInfo = await stat(base).catch(() => {
+    throw unavailable();
+  });
+  if (!baseInfo.isDirectory()) {
+    throw unavailable();
+  }
+  const file = await trustedPath(configured, base, false);
+  const bytes = await boundedRead(file, MAX_SECRET_BYTES);
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw unavailable();
+  }
+}
+
+export function createFileSecretCredentialResolver(
+  trustedSecretBase: string,
+): SecretCredentialResolver {
+  return {
+    async resolve(reference: string): Promise<string> {
+      if (!/^secret:\/\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/.test(reference)) {
+        throw unavailable();
+      }
+      const base = await realpath(trustedSecretBase).catch(() => {
+        throw unavailable();
+      });
+      const relative = reference.slice("secret://".length);
+      const file = await trustedPath(relative, base, true);
+      const bytes = await boundedRead(file, MAX_TOKEN_BYTES);
+      let value: string;
+      try {
+        value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw unavailable();
+      }
+      if (value.endsWith("\n")) {
+        value = value.slice(0, -1);
+      }
+      if (value.length === 0 || value.length > MAX_TOKEN_BYTES || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw unavailable();
+      }
+      return value;
+    },
+  };
 }
 
 async function trustedPath(

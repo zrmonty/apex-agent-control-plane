@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::{ExactScope, proto};
 
 mod error;
+mod events;
 mod lifecycle;
 mod provider;
 mod reconciler;
@@ -14,6 +15,7 @@ mod validation;
 mod wire;
 
 pub use error::ProxyError;
+pub use events::DurableProxyEventSink;
 pub use provider::{DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput, RuntimeCommandRunner, RuntimeHandle};
 pub use reconciler::{ProxyRuntimeReconciler, RuntimeOperations};
 

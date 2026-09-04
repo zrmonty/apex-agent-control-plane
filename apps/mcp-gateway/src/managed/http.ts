@@ -1,5 +1,5 @@
 import { GatewayError } from "../contracts.js";
-import type { HeaderValues } from "./auth.js";
+import { readHeaderValues, type HeaderValues } from "./auth.js";
 import type { ProxyRevisionConfig } from "./config.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -49,6 +49,11 @@ export function validateHttpIngressRequest(
     !config.ingress.allowedOrigins.includes(origin) ||
     (target.protocol !== "https:" && !isLocalhost(host)) ||
     target.host.toLowerCase() !== endpoint.host.toLowerCase() ||
+    target.pathname !== endpoint.pathname ||
+    target.search !== endpoint.search ||
+    target.username !== "" ||
+    target.password !== "" ||
+    target.hash !== "" ||
     !["GET", "POST"].includes(request.method)
   ) {
     throw rejected();
@@ -98,9 +103,7 @@ function parseHttpsUrl(value: string | undefined): URL {
 }
 
 function singleHeader(headers: HeaderValues, name: string): string | undefined {
-  const values = Object.entries(headers)
-    .filter(([key]) => key.toLowerCase() === name)
-    .flatMap(([, value]) => value ?? []);
+  const values = readHeaderValues(headers, name);
   return values.length === 1 && values[0].length > 0 ? values[0] : undefined;
 }
 

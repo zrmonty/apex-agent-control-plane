@@ -42,7 +42,7 @@ const FORCE_STOP_AUDIT_MARKER: &str = "apex.force_stop";
 /// (`pending_command_from_ingest_request`), never ordinary delivery.
 const FORCE_STOP_AUDIT_PREFIX: &str = "apex.force_stop:";
 
-mod time;
+pub(crate) mod time;
 
 #[cfg(test)]
 pub(crate) use time::{

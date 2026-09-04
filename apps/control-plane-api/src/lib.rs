@@ -91,7 +91,7 @@ pub use proxy::{
     NetworkPolicy, PrivateDestinationAllowance, ProxyActivity, ProxyApprovalAuthority,
     ProxyApprovalRequest, ProxyDraft, ProxyError, ProxyEventSink, ProxyExposure, ProxyId,
     ProxyLifecycleEvent, ProxyLifecycleState, ProxyLifecycleStore, ProxyRedactionStatus,
-    ProxyRevisionId, ProxyRevisionStore, ProxyRuntimeProvider, ProxySpec, ProxyStore,
+    DurableProxyEventSink, ProxyRevisionId, ProxyRevisionStore, ProxyRuntimeProvider, ProxySpec, ProxyStore,
     ProxyStoreBackend, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
     RollbackProxy, RotateProxyCredentials, RuntimeProfile, SecretRef, TransitionProxyLifecycle,
     DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput,

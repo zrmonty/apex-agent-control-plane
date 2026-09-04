@@ -10,6 +10,19 @@ const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]{1,8192}$/;
 
 export type HeaderValues = Readonly<Record<string, readonly string[] | undefined>>;
 
+export function normalizeHeaderValues(
+  headers: Readonly<Record<string, string | readonly string[] | undefined>>,
+): HeaderValues {
+  const normalized: Record<string, readonly string[] | undefined> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    const values = value === undefined ? [] : Array.isArray(value) ? value : [value];
+    const previous = normalized[key];
+    normalized[key] = previous === undefined ? [...values] : [...previous, ...values];
+  }
+  return normalized;
+}
+
 export type InboundTokenClaims = Readonly<{
   issuer: string;
   audience: string | readonly string[];
@@ -125,13 +138,21 @@ function extractBearerToken(headers: HeaderValues): string {
 }
 
 function readHeader(headers: HeaderValues, name: string): string | undefined {
-  const values = Object.entries(headers)
-    .filter(([key]) => key.toLowerCase() === name)
-    .flatMap(([, value]) => value ?? []);
+  const values = readHeaderValues(headers, name);
   if (values.length !== 1 || values[0].length === 0) {
     return undefined;
   }
   return values[0];
+}
+
+export function readHeaderValues(headers: HeaderValues, name: string): readonly string[] {
+  const direct = headers[name];
+  if (direct !== undefined) {
+    return direct;
+  }
+  return Object.entries(headers)
+    .filter(([key]) => key.toLowerCase() === name)
+    .flatMap(([, value]) => value ?? []);
 }
 
 function audienceMatches(audience: string | readonly string[], expected: string): boolean {

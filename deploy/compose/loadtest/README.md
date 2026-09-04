@@ -161,6 +161,38 @@ python loadtest.py --endpoint 127.0.0.1:18445 --secrets ../live-mtls/secrets \
 Exits `0` on PASS, `1` on FAIL — wire this into CI or a pre-merge check the
 same way `run_gates.py`'s gates are used.
 
+## Managed MCP proxy latency and throughput
+
+`mcp_proxy_loadtest.py` exercises the actual Streamable HTTP protocol rather
+than a health probe. Each worker creates an MCP session, measures
+`initialize`, `tools/list`, and then reuses that session for bounded
+`tools/call` samples. The harness reports cold-start latency, warm p50/p95/p99,
+throughput, and failures without printing response bodies.
+
+Run it against a configured test proxy with a test-only bearer token:
+
+```bash
+python mcp_proxy_loadtest.py \
+  --url http://127.0.0.1:18460/mcp \
+  --bearer-token "$APEX_MCP_LOADTEST_TOKEN" \
+  --origin https://console.example.test \
+  --tool portfolio.read \
+  --input-json '{"portfolioId":"fixture"}' \
+  --proxies 1,2,8 --concurrency 1,8,32 --samples 64
+```
+
+`--proxies` controls the number of independent MCP sessions multiplied by
+`--concurrency`; it is a scenario multiplier for a target routing several
+proxy instances behind the supplied URL. The harness does not provision
+tokens, infer SLOs, or claim that one URL represents multiple deployments.
+Pass the revision's configured allowed origin with `--origin`; managed HTTP
+ingress rejects MCP requests without it.
+Use the output's `initialize_latency_ms`, `list_tools_latency_ms`, and
+`cold_start_latency_ms` to evaluate startup, and `latency_ms` plus
+`throughput_per_second` for warm calls. Capture CPU, memory, upstream DNS
+lookups, governance calls, and outbox backlog alongside the JSON output when
+comparing refactors.
+
 ## Phase 0.6 exit gate (item 7): the decoupled + concurrent gateway
 
 The baseline above (`~80 ev/s` on the reference stack) was measured against the

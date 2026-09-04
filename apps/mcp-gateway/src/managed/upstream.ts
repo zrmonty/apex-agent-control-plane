@@ -26,13 +26,39 @@ export interface UpstreamTransport {
   close(upstream: UpstreamConfig): Promise<void>;
 }
 
+export type ExposedToolIndexes = Readonly<{
+  byAlias: ReadonlyMap<string, ExposedTool>;
+  byUpstream: ReadonlyMap<string, readonly ExposedTool[]>;
+}>;
+
+export function compileExposedToolIndexes(config: Pick<ProxyRevisionConfig, "exposedTools">): ExposedToolIndexes {
+  const byAlias = new Map<string, ExposedTool>();
+  const byUpstream = new Map<string, ExposedTool[]>();
+  for (const tool of config.exposedTools) {
+    byAlias.set(tool.alias, tool);
+    const tools = byUpstream.get(tool.upstreamId);
+    if (tools === undefined) {
+      byUpstream.set(tool.upstreamId, [tool]);
+    } else {
+      tools.push(tool);
+    }
+  }
+  return {
+    byAlias,
+    byUpstream: new Map(
+      [...byUpstream.entries()].map(([upstreamId, tools]) => [upstreamId, Object.freeze(tools.slice())]),
+    ),
+  };
+}
+
 export function createUpstreamSessions(
   config: ProxyRevisionConfig,
   transport: UpstreamTransport,
 ): ReadonlyMap<string, UpstreamSession> {
   const sessions = new Map<string, UpstreamSession>();
+  const indexes = compileExposedToolIndexes(config);
   for (const upstream of config.upstreams) {
-    const exposedTools = config.exposedTools.filter((tool) => tool.upstreamId === upstream.upstreamId);
+    const exposedTools = indexes.byUpstream.get(upstream.upstreamId) ?? [];
     sessions.set(upstream.upstreamId, new ManagedUpstreamSession(upstream, exposedTools, transport));
   }
   return sessions;
@@ -42,12 +68,15 @@ class ManagedUpstreamSession implements UpstreamSession {
   private readonly sessionId = randomUUID();
   private discoveredNames: ReadonlySet<string> | undefined;
   private closed = false;
+  private readonly exposedToolNamesByAlias: ReadonlyMap<string, string>;
 
   constructor(
     private readonly upstream: UpstreamConfig,
-    private readonly exposedTools: readonly ExposedTool[],
+    exposedTools: readonly ExposedTool[],
     private readonly transport: UpstreamTransport,
-  ) {}
+  ) {
+    this.exposedToolNamesByAlias = new Map(exposedTools.map((tool) => [tool.alias, tool.toolName]));
+  }
 
   async discover(): Promise<QuarantinedToolCatalog> {
     this.ensureOpen();
@@ -60,10 +89,8 @@ class ManagedUpstreamSession implements UpstreamSession {
 
   async call(tool: ExposedTool, input: unknown): Promise<unknown> {
     this.ensureOpen();
-    const allowed = this.exposedTools.some(
-      (candidate) => candidate.alias === tool.alias && candidate.toolName === tool.toolName,
-    );
-    if (!allowed || tool.upstreamId !== this.upstream.upstreamId) {
+    const exposedToolName = this.exposedToolNamesByAlias.get(tool.alias);
+    if (exposedToolName !== tool.toolName || tool.upstreamId !== this.upstream.upstreamId) {
       throw new GatewayError("INVALID_INPUT", "upstream tool is not explicitly exposed");
     }
     if (this.discoveredNames === undefined || !this.discoveredNames.has(tool.toolName)) {

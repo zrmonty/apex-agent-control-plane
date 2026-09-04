@@ -76,7 +76,9 @@ pub(super) fn build_fanout_publisher(
     let archive =
         RetryingDurableSink::new(archive, retry_attempts).map_err(startup_gateway_error)?;
 
-    Ok(DurableFanoutPublisher::new(nats, clickhouse, archive))
+    Ok(DurableFanoutPublisher::with_parallel_sinks(
+        nats, clickhouse, archive,
+    ))
 }
 
 /// Opens the durable outbox+idempotency pairs for the admission pool

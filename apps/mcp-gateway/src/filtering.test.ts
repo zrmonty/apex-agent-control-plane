@@ -79,6 +79,23 @@ test("constructs the public portfolio view from the allowlist only", () => {
   assert.equal(Object.isFrozen(result.view.positions[0]), true);
 });
 
+test("reads validated portfolio scalars once before freezing the public view", () => {
+  let reads = 0;
+  const raw = { ...rawPortfolioFixture } as RawPortfolioRecord;
+  Object.defineProperty(raw, "portfolio_id", {
+    configurable: true,
+    enumerable: false,
+    get() {
+      reads += 1;
+      return rawPortfolioFixture.portfolio_id;
+    },
+  });
+
+  filterPortfolioRecord(raw, allowedDecision);
+
+  assert.equal(reads, 1);
+});
+
 test("fails closed when a required raw field is missing", () => {
   const raw = {
     ...rawPortfolioFixture,
