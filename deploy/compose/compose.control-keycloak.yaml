@@ -108,6 +108,9 @@ services:
       APEX_CONTROL_SERVER_CERT_FILE: /var/lib/apex-control-secrets/control_server_cert
       APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
       APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
+      # This overlay replaces the base control environment, so retain the
+      # required dedicated MCP credential even though the gate targets OIDC.
+      APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE: /var/lib/apex-control-secrets/mcp_gateway_token
       # The production credential path, and deliberately the *only* one set
       # here: configuring a static table alongside it is a hard startup error,
       # which is what makes this container prove the Keycloak resolver rather
