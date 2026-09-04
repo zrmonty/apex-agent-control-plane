@@ -188,6 +188,7 @@ services:
       ]
     volumes:
       - ../../apps/reference-providers/apex_reference_providers:/app/apex_reference_providers:ro
+      - ./gateway-ref:/app/gateway-ref:ro
     tmpfs: [/var/lib/apex]
     networks: [gateway-ref]
     secrets:
@@ -361,6 +362,7 @@ services:
         umask 077
         for name in ca control_server_cert control_server_key \
                     control_operator_tokens control_agent_tokens \
+                    mcp_gateway_token \
                     control_nats_client_cert \
                     control_nats_client_key control_nats_username \
                     control_nats_password control_valkey_client_cert \
@@ -390,6 +392,8 @@ services:
         target: control_server_key
       - source: control_operator_tokens
         target: control_operator_tokens
+      - source: mcp_gateway_token
+        target: mcp_gateway_token
       # The agent workload credential table, a separate file from the operator
       # one on purpose: they authorize different principals to do different
       # things, and one file holding both would be one mount away from an
@@ -433,6 +437,9 @@ services:
       APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
       APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
       APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
+      APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE: /var/lib/apex-control-secrets/mcp_gateway_token
+      APEX_CONTROL_MCP_ALLOWED_PORTFOLIOS: ${APEX_CONTROL_MCP_ALLOWED_PORTFOLIOS:-northstar-401k}
+      APEX_CONTROL_MCP_ALLOWED_SCOPES: ${APEX_CONTROL_MCP_ALLOWED_SCOPES:-acme/prod}
       # Agent workload credentials for PollCommands. Without this the gateway
       # accepts commands that no agent can ever retrieve, which is exactly the
       # state this profile used to be in.
@@ -526,6 +533,8 @@ secrets:
     file: ./live-mtls/secrets/control-plane-server.key
   control_operator_tokens:
     file: ./live-mtls/secrets/control-operator-tokens
+  mcp_gateway_token:
+    file: ./live-mtls/secrets/mcp-gateway-token
   # The agent workload credential table: `token|cert_sha256|agent_id|scopes`,
   # with the fingerprint of agent-workload-client.pem baked in by
   # generate_pki.py so the credential and the leaf cannot drift apart.

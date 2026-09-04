@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::errors::CommandError;
 
@@ -383,7 +384,61 @@ impl<R: OperatorCredentialResolver> OperatorTokenAuthenticator<R> {
     }
 }
 
-fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, CommandError> {
+/// Authenticates the MCP gateway's service credential. This is deliberately a
+/// separate type from [`OperatorTokenAuthenticator`]: a gateway may ask Apex
+/// for a policy decision, but it is not an operator and must never gain the
+/// operator command authority by reusing that credential space.
+pub struct GatewayTokenAuthenticator {
+    expected_digest: [u8; 32],
+    failures: Mutex<FailureBucket>,
+}
+
+impl GatewayTokenAuthenticator {
+    pub fn new(token: &str) -> Result<Self, CommandError> {
+        if token.is_empty() || token.len() > MAX_OPERATOR_TOKEN_BYTES {
+            return Err(CommandError::invalid_authorization());
+        }
+        if token.len() < MIN_OPERATOR_TOKEN_BYTES || token.contains(char::is_whitespace) {
+            return Err(CommandError::invalid_authorization());
+        }
+        Ok(Self {
+            expected_digest: Sha256::digest(token.as_bytes()).into(),
+            failures: Mutex::new(FailureBucket {
+                window_started: Instant::now(),
+                failures: 0,
+            }),
+        })
+    }
+
+    pub fn authenticate(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<(), CommandError> {
+        let token = extract_bearer_token(metadata)
+            .map_err(|_| CommandError::governance_unauthenticated())?;
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if digest.ct_eq(&self.expected_digest).into() {
+            return Ok(());
+        }
+        let mut failures = self.failures.lock().map_err(|_| CommandError::internal())?;
+        let now = Instant::now();
+        if failures.window_started.elapsed() >= AUTH_WINDOW {
+            *failures = FailureBucket {
+                window_started: now,
+                failures: 0,
+            };
+        }
+        if failures.failures >= AUTH_FAILURES_PER_WINDOW {
+            return Err(CommandError::rate_limited());
+        }
+        failures.failures = failures.failures.saturating_add(1);
+        Err(CommandError::governance_unauthenticated())
+    }
+}
+
+pub(crate) fn extract_bearer_token(
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<String, CommandError> {
     let mut values = metadata.get_all("authorization").iter();
     let Some(value) = values.next() else {
         return Err(CommandError::unauthenticated());

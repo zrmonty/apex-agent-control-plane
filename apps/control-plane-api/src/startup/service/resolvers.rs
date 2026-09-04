@@ -6,7 +6,8 @@ use std::path::Path;
 
 use apex_control_plane_api::{
     AgentRevocationList, BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver,
-    KeycloakConfig, KeycloakOperatorCredentialResolver, MAX_AGENT_REVOCATION_FILE_BYTES,
+    GatewayTokenAuthenticator, GovernanceConfig, GovernanceGatewayService, KeycloakConfig,
+    KeycloakOperatorCredentialResolver, MAX_AGENT_REVOCATION_FILE_BYTES,
     RevocationAwareAgentResolver, StaticAgentWorkloadResolver, parse_agent_token_table,
     parse_operator_token_table,
 };
@@ -14,7 +15,7 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
 use super::super::env::{
     AgentTokenSource, OperatorTokenSource, agent_revocation_env, agent_token_source, keycloak_env,
-    operator_token_source, path,
+    operator_token_source, optional, path,
 };
 use super::super::secrets::{read_bounded, read_credential_table, trusted_secret_path};
 
@@ -26,6 +27,54 @@ const MAX_TLS_MATERIAL_BYTES: usize = 1024 * 1024;
 /// `MAX_OPERATOR_TOKEN_BYTES`), so 64 KiB is generous headroom while still
 /// bounding what a mounted file can make this process allocate.
 const MAX_OPERATOR_TABLE_BYTES: usize = 64 * 1024;
+
+/// Builds the live MCP governance service when its dedicated service token is
+/// configured. The operator and agent tables are intentionally not accepted
+/// as a fallback: a credential-space crossover would turn a protocol adapter
+/// into an operator or workload authority.
+pub(super) fn build_governance_service(
+    trusted_base: &Path,
+) -> Result<GovernanceGatewayService, Box<dyn std::error::Error>> {
+    let token_path = trusted_secret_path(
+        &path("APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE")?,
+        trusted_base,
+        4096,
+        true,
+        "APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE",
+    )?;
+    let token = read_credential_table(&token_path, 4096, "APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE")?;
+    let auth = GatewayTokenAuthenticator::new(token.trim())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid MCP gateway token"))?;
+    let portfolios = csv_values(
+        optional("APEX_CONTROL_MCP_ALLOWED_PORTFOLIOS").as_deref(),
+        "northstar-401k",
+    );
+    let scopes = csv_values(
+        optional("APEX_CONTROL_MCP_ALLOWED_SCOPES").as_deref(),
+        "acme/prod",
+    );
+    let config = GovernanceConfig::new(
+        portfolios,
+        scopes,
+        "apex-mcp-read-v1",
+        1,
+        [
+            "client.account_number",
+            "client.tax_id",
+            "positions.cost_basis",
+        ],
+    )?;
+    Ok(GovernanceGatewayService::new(config, auth))
+}
+
+fn csv_values(raw: Option<&str>, default: &str) -> Vec<String> {
+    raw.unwrap_or(default)
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
 
 /// Loads the mTLS server identity and the CA that operator client
 /// certificates must chain to.

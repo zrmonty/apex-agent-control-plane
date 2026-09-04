@@ -7,9 +7,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_transport(true)
         .compile_with_config(
             config,
-            &["../../contracts/proto/apex/v1/control.proto"],
+            &[
+                "../../contracts/proto/apex/v1/control.proto",
+                "../../contracts/proto/apex/v1/governance.proto",
+            ],
             &["../../contracts/proto"],
         )?;
     println!("cargo:rerun-if-changed=../../contracts/proto/apex/v1/control.proto");
+    println!("cargo:rerun-if-changed=../../contracts/proto/apex/v1/governance.proto");
     Ok(())
 }
