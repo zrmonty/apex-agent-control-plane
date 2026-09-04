@@ -59,7 +59,10 @@ enum McpProxyExposure {
 }
 
 message CreateProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
@@ -98,7 +101,10 @@ message ListProxiesResponse {
 }
 
 message UpdateProxyDraftRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
@@ -112,7 +118,10 @@ message UpdateProxyDraftResponse {
 }
 
 message ValidateProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
@@ -125,7 +134,10 @@ message ValidateProxyResponse {
 }
 
 message DiscoverUpstreamRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
@@ -138,7 +150,10 @@ message DiscoverUpstreamResponse {
 }
 
 message TestProxyConnectionRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
@@ -151,12 +166,18 @@ message TestProxyConnectionResponse {
 }
 
 message PublishProxyRevisionRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
+  // Server must resolve this to an already stored draft revision; inline
+  // draft content is intentionally not accepted on this RPC.
+  string draft_revision_id = 6;
+  // Optimistic concurrency guard for the proxy's current revision state.
   optional string expected_revision_id = 5;
-  McpProxySpec draft = 6;
 }
 
 message PublishProxyRevisionResponse {
@@ -164,11 +185,17 @@ message PublishProxyRevisionResponse {
 }
 
 message DeployProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 6;
 }
 
 message DeployProxyResponse {
@@ -176,12 +203,18 @@ message DeployProxyResponse {
 }
 
 message PauseProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
-  optional string reason_code = 6;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 6;
+  optional string reason_code = 7;
 }
 
 message PauseProxyResponse {
@@ -189,11 +222,17 @@ message PauseProxyResponse {
 }
 
 message ResumeProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 6;
 }
 
 message ResumeProxyResponse {
@@ -201,13 +240,19 @@ message ResumeProxyResponse {
 }
 
 message RotateProxyCredentialsRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
-  optional string reason_code = 6;
-  repeated string secret_refs = 7;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 6;
+  optional string reason_code = 7;
+  repeated string secret_refs = 8;
 }
 
 message RotateProxyCredentialsResponse {
@@ -215,13 +260,19 @@ message RotateProxyCredentialsResponse {
 }
 
 message RollbackProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
   string target_revision_id = 6;
-  optional string reason_code = 7;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 7;
+  optional string reason_code = 8;
 }
 
 message RollbackProxyResponse {
@@ -229,12 +280,18 @@ message RollbackProxyResponse {
 }
 
 message RetireProxyRequest {
-  optional string request_id = 1;
+  // Required lowercase UUIDv7 idempotency key. The server must reject an
+  // empty, missing, or non-UUIDv7 request_id before performing any state
+  // change.
+  string request_id = 1;
   string workspace_id = 2;
   string namespace_id = 3;
   string proxy_id = 4;
   string revision_id = 5;
-  optional string reason_code = 6;
+  // Server must compare this against the current active revision before
+  // applying the lifecycle transition.
+  optional string expected_revision_id = 6;
+  optional string reason_code = 7;
 }
 
 message RetireProxyResponse {
