@@ -6,6 +6,7 @@ use crate::ExactScope;
 
 mod memory;
 mod shared;
+mod transitions;
 
 #[cfg(feature = "postgres")]
 mod postgres;

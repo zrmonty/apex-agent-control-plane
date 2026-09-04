@@ -2,28 +2,29 @@ use std::sync::Mutex;
 
 use postgres::{Client, GenericClient};
 
+mod idempotency;
 mod rows;
+mod transitions;
 
 use super::shared::{
     CREATE_OPERATION, IdempotencyRecord, PUBLISH_OPERATION, RETIRE_OPERATION, StoreProxy,
     StoredRevision, UPDATE_DRAFT_OPERATION, build_revision, configuration_error,
     create_payload_hash, encode_cursor, ensure_scope_match, parse_cursor, publish_payload_hash,
-    retire_payload_hash, revision_key, spec_json, validate_create, validate_publish,
-    validate_request_id, validate_retire, validate_scope, validate_update,
-    update_payload_hash,
+    retire_payload_hash, revision_key, spec_json, update_payload_hash, validate_create,
+    validate_publish, validate_request_id, validate_retire, validate_scope, validate_update,
 };
 use super::{
     CreateProxy, ListProxies, ListProxiesPage, McpProxy, ProxyRevisionStore, ProxyStore,
     PublishRevision, RetireProxy, UpdateProxyDraft,
 };
-use rows::{
-    redaction_to_text, state_to_text, stored_revision_from_row, store_proxy_from_row,
-};
 use crate::ExactScope;
 use crate::proxy::{
-    McpProxyRevision, ProxyError, ProxyLifecycleState, ProxyRedactionStatus, ProxyId,
+    McpProxyRevision, ProxyError, ProxyId, ProxyLifecycleState, ProxyRedactionStatus,
     ProxyRevisionId,
 };
+use idempotency::{insert_idempotency, query_idempotency};
+use rows::{redaction_to_text, state_to_text, store_proxy_from_row, stored_revision_from_row};
+use transitions::insert_lifecycle_transition;
 
 const PROXY_SCHEMA_LOCK: i64 = 0x0A9E_1DE3_0000_0004_u64 as i64;
 
@@ -33,8 +34,8 @@ pub struct PostgresProxyStore {
 
 impl PostgresProxyStore {
     pub fn connect(connection_string: &str) -> Result<Self, ProxyError> {
-        let mut client =
-            apex_durability::connect_postgres(connection_string).map_err(|_| configuration_error())?;
+        let mut client = apex_durability::connect_postgres(connection_string)
+            .map_err(|_| configuration_error())?;
         apex_durability::apply_postgres_schema(
             &mut client,
             PROXY_SCHEMA_LOCK,
@@ -50,7 +51,7 @@ impl PostgresProxyStore {
 impl ProxyStore for PostgresProxyStore {
     fn create(&self, input: CreateProxy) -> Result<McpProxy, ProxyError> {
         let (display_name, description, owner) = validate_create(&input)?;
-        let created_at_millis = validate_request_id(&input.request_id)?;
+        let created_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = create_payload_hash(
             &input,
             &display_name,
@@ -59,9 +60,19 @@ impl ProxyStore for PostgresProxyStore {
         );
         let mut client = self.client.lock().map_err(|_| configuration_error())?;
         let mut tx = client.transaction().map_err(|_| configuration_error())?;
-        if let Some(record) = query_idempotency(&mut tx, &input.request_id, CREATE_OPERATION)? {
+        if let Some(record) = query_idempotency(
+            &mut tx,
+            &input.request_id,
+            CREATE_OPERATION,
+            &payload_hash,
+            &input.scope,
+        )? {
             tx.commit().map_err(|_| configuration_error())?;
-            return load_proxy(&mut *client, &record.proxy_id, record.revision_id.as_deref());
+            return load_proxy(
+                &mut *client,
+                &record.proxy_id,
+                record.revision_id.as_deref(),
+            );
         }
         let conflict = tx
             .query_opt(
@@ -94,10 +105,23 @@ impl ProxyStore for PostgresProxyStore {
                 &input.slug,
                 &description,
                 &owner,
-                &i64::try_from(created_at_millis).map_err(|_| configuration_error())?,
+                &i64::try_from(created_at_micros).map_err(|_| configuration_error())?,
             ],
         )
         .map_err(map_identity_error)?;
+        insert_lifecycle_transition(
+            &mut tx,
+            CREATE_OPERATION,
+            &input.scope,
+            &input.proxy_id,
+            None,
+            None,
+            ProxyLifecycleState::Draft,
+            None,
+            "proxy.created",
+            "committed",
+            created_at_micros,
+        )?;
         insert_idempotency(
             &mut tx,
             IdempotencyRecord {
@@ -115,16 +139,28 @@ impl ProxyStore for PostgresProxyStore {
 
     fn update_draft(&self, input: UpdateProxyDraft) -> Result<McpProxy, ProxyError> {
         let (actor_id, draft_json) = validate_update(&input)?;
-        let created_at_millis = validate_request_id(&input.request_id)?;
+        let created_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = update_payload_hash(&input, &actor_id, &draft_json);
         let mut client = self.client.lock().map_err(|_| configuration_error())?;
         let mut tx = client.transaction().map_err(|_| configuration_error())?;
-        if let Some(record) = query_idempotency(&mut tx, &input.request_id, UPDATE_DRAFT_OPERATION)? {
+        if let Some(record) = query_idempotency(
+            &mut tx,
+            &input.request_id,
+            UPDATE_DRAFT_OPERATION,
+            &payload_hash,
+            &input.scope,
+        )? {
             tx.commit().map_err(|_| configuration_error())?;
-            return load_proxy(&mut *client, &record.proxy_id, record.revision_id.as_deref());
+            return load_proxy(
+                &mut *client,
+                &record.proxy_id,
+                record.revision_id.as_deref(),
+            );
         }
-        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?.ok_or_else(ProxyError::proxy_not_found)?;
+        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?
+            .ok_or_else(ProxyError::proxy_not_found)?;
         ensure_scope_match(&proxy.scope, &input.scope)?;
+        let prior_state = proxy.lifecycle_state;
         if proxy.draft_revision_id != input.expected_revision_id {
             return Err(ProxyError::revision_conflict());
         }
@@ -136,12 +172,12 @@ impl ProxyStore for PostgresProxyStore {
             actor_id,
             ProxyLifecycleState::Draft,
             ProxyRedactionStatus::Redacted,
-            created_at_millis,
+            created_at_micros,
         )?;
         tx.execute(
             "INSERT INTO mcp_proxy_revisions
              (proxy_id, revision_id, spec_json, config_hash, lifecycle_state, redaction_status,
-              created_by, created_at_millis, created_at, is_published)
+              created_by, created_at_micros, created_at, is_published)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE)",
             &[
                 input.proxy_id.as_uuid(),
@@ -151,7 +187,7 @@ impl ProxyStore for PostgresProxyStore {
                 &state_to_text(revision.lifecycle_state),
                 &redaction_to_text(revision.redaction_status),
                 &revision.created_by,
-                &i64::try_from(created_at_millis).map_err(|_| configuration_error())?,
+                &i64::try_from(created_at_micros).map_err(|_| configuration_error())?,
                 &revision.created_at,
             ],
         )
@@ -161,6 +197,19 @@ impl ProxyStore for PostgresProxyStore {
             &[revision_id.as_uuid(), input.proxy_id.as_uuid()],
         )
         .map_err(|_| configuration_error())?;
+        insert_lifecycle_transition(
+            &mut tx,
+            UPDATE_DRAFT_OPERATION,
+            &input.scope,
+            &input.proxy_id,
+            Some(&revision_id),
+            Some(prior_state),
+            ProxyLifecycleState::Draft,
+            Some(&revision.created_by),
+            "proxy.draft_updated",
+            "committed",
+            created_at_micros,
+        )?;
         insert_idempotency(
             &mut tx,
             IdempotencyRecord {
@@ -182,20 +231,31 @@ impl ProxyStore for PostgresProxyStore {
 
     fn publish_revision(&self, input: PublishRevision) -> Result<McpProxyRevision, ProxyError> {
         let actor_id = validate_publish(&input)?;
-        let created_at_millis = validate_request_id(&input.request_id)?;
+        let created_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = publish_payload_hash(&input, &actor_id);
         let mut client = self.client.lock().map_err(|_| configuration_error())?;
         let mut tx = client.transaction().map_err(|_| configuration_error())?;
-        if let Some(record) = query_idempotency(&mut tx, &input.request_id, PUBLISH_OPERATION)? {
+        if let Some(record) = query_idempotency(
+            &mut tx,
+            &input.request_id,
+            PUBLISH_OPERATION,
+            &payload_hash,
+            &input.scope,
+        )? {
             tx.commit().map_err(|_| configuration_error())?;
             return load_revision(
                 &mut *client,
                 &record.proxy_id,
-                record.revision_id.as_deref().ok_or_else(configuration_error)?,
+                record
+                    .revision_id
+                    .as_deref()
+                    .ok_or_else(configuration_error)?,
             );
         }
-        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?.ok_or_else(ProxyError::proxy_not_found)?;
+        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?
+            .ok_or_else(ProxyError::proxy_not_found)?;
         ensure_scope_match(&proxy.scope, &input.scope)?;
+        let prior_state = proxy.lifecycle_state;
         if proxy.active_revision_id != input.expected_revision_id {
             return Err(ProxyError::revision_conflict());
         }
@@ -215,12 +275,12 @@ impl ProxyStore for PostgresProxyStore {
             actor_id,
             ProxyLifecycleState::Draft,
             ProxyRedactionStatus::Redacted,
-            created_at_millis,
+            created_at_micros,
         )?;
         tx.execute(
             "INSERT INTO mcp_proxy_revisions
              (proxy_id, revision_id, spec_json, config_hash, lifecycle_state, redaction_status,
-              created_by, created_at_millis, created_at, is_published)
+              created_by, created_at_micros, created_at, is_published)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)",
             &[
                 input.proxy_id.as_uuid(),
@@ -230,7 +290,7 @@ impl ProxyStore for PostgresProxyStore {
                 &state_to_text(revision.lifecycle_state),
                 &redaction_to_text(revision.redaction_status),
                 &revision.created_by,
-                &i64::try_from(created_at_millis).map_err(|_| configuration_error())?,
+                &i64::try_from(created_at_micros).map_err(|_| configuration_error())?,
                 &revision.created_at,
             ],
         )
@@ -240,6 +300,19 @@ impl ProxyStore for PostgresProxyStore {
             &[revision_id.as_uuid(), input.proxy_id.as_uuid()],
         )
         .map_err(|_| configuration_error())?;
+        insert_lifecycle_transition(
+            &mut tx,
+            PUBLISH_OPERATION,
+            &input.scope,
+            &input.proxy_id,
+            Some(&revision_id),
+            Some(prior_state),
+            ProxyLifecycleState::Draft,
+            Some(&revision.created_by),
+            "proxy.revision_published",
+            "committed",
+            created_at_micros,
+        )?;
         insert_idempotency(
             &mut tx,
             IdempotencyRecord {
@@ -276,7 +349,10 @@ impl ProxyStore for PostgresProxyStore {
             .as_ref()
             .map(|(micros, _)| i64::try_from(*micros).map_err(|_| configuration_error()))
             .transpose()?;
-        let cursor_proxy = cursor.as_ref().map(|(_, proxy_id)| proxy_id.as_str()).unwrap_or("");
+        let cursor_proxy = cursor
+            .as_ref()
+            .map(|(_, proxy_id)| proxy_id.as_str())
+            .unwrap_or("");
         let rows = client
             .query(
                 "SELECT proxy_id, workspace_id, namespace_id, display_name, slug, description, owner,
@@ -301,7 +377,10 @@ impl ProxyStore for PostgresProxyStore {
                 ],
             )
             .map_err(|_| configuration_error())?;
-        let mut proxies: Vec<_> = rows.into_iter().map(store_proxy_from_row).collect::<Result<_, _>>()?;
+        let mut proxies: Vec<_> = rows
+            .into_iter()
+            .map(store_proxy_from_row)
+            .collect::<Result<_, _>>()?;
         let has_more = proxies.len() > query.page_size.max(1);
         proxies.truncate(query.page_size.max(1));
         let next_page_token = if has_more {
@@ -311,7 +390,10 @@ impl ProxyStore for PostgresProxyStore {
             String::new()
         };
         Ok(ListProxiesPage {
-            proxies: proxies.into_iter().map(|proxy| proxy.to_summary()).collect(),
+            proxies: proxies
+                .into_iter()
+                .map(|proxy| proxy.to_summary())
+                .collect(),
             next_page_token,
         })
     }
@@ -328,30 +410,63 @@ impl ProxyRevisionStore for PostgresProxyStore {
         let mut client = self.client.lock().map_err(|_| configuration_error())?;
         let proxy = load_proxy(&mut *client, &proxy_id.to_string(), None)?;
         ensure_scope_match(&proxy.scope, &scope)?;
-        load_revision(&mut *client, &proxy_id.to_string(), &revision_id.to_string())
+        load_revision(
+            &mut *client,
+            &proxy_id.to_string(),
+            &revision_id.to_string(),
+        )
     }
 
     fn retire(&self, input: RetireProxy) -> Result<McpProxy, ProxyError> {
         validate_retire(&input)?;
+        let occurred_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = retire_payload_hash(&input);
         let mut client = self.client.lock().map_err(|_| configuration_error())?;
         let mut tx = client.transaction().map_err(|_| configuration_error())?;
-        if let Some(record) = query_idempotency(&mut tx, &input.request_id, RETIRE_OPERATION)? {
+        if let Some(record) = query_idempotency(
+            &mut tx,
+            &input.request_id,
+            RETIRE_OPERATION,
+            &payload_hash,
+            &input.scope,
+        )? {
             tx.commit().map_err(|_| configuration_error())?;
-            return load_proxy(&mut *client, &record.proxy_id, record.revision_id.as_deref());
+            return load_proxy(
+                &mut *client,
+                &record.proxy_id,
+                record.revision_id.as_deref(),
+            );
         }
-        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?.ok_or_else(ProxyError::proxy_not_found)?;
+        let proxy = query_proxy_for_update(&mut tx, &input.proxy_id)?
+            .ok_or_else(ProxyError::proxy_not_found)?;
         ensure_scope_match(&proxy.scope, &input.scope)?;
         if proxy.active_revision_id != input.expected_revision_id {
             return Err(ProxyError::revision_conflict());
         }
+        let prior_state = proxy.lifecycle_state;
         tx.execute(
             "UPDATE mcp_proxies
-             SET lifecycle_state = 'retired', desired_state = 'retired'
+             SET lifecycle_state = 'retired', desired_state = 'retired', retired_at_micros = $2
              WHERE proxy_id = $1",
-            &[input.proxy_id.as_uuid()],
+            &[
+                input.proxy_id.as_uuid(),
+                &i64::try_from(occurred_at_micros).map_err(|_| configuration_error())?,
+            ],
         )
         .map_err(|_| configuration_error())?;
+        insert_lifecycle_transition(
+            &mut tx,
+            RETIRE_OPERATION,
+            &input.scope,
+            &input.proxy_id,
+            input.expected_revision_id.as_ref(),
+            Some(prior_state),
+            ProxyLifecycleState::Retired,
+            None,
+            "proxy.retired",
+            "committed",
+            occurred_at_micros,
+        )?;
         insert_idempotency(
             &mut tx,
             IdempotencyRecord {
@@ -366,69 +481,6 @@ impl ProxyRevisionStore for PostgresProxyStore {
         tx.commit().map_err(|_| configuration_error())?;
         load_proxy(&mut *client, &input.proxy_id.to_string(), None)
     }
-}
-
-fn query_idempotency(
-    client: &mut impl GenericClient,
-    request_id: &str,
-    operation: &'static str,
-) -> Result<Option<IdempotencyRecord>, ProxyError> {
-    let request_uuid = uuid::Uuid::parse_str(request_id).map_err(|_| ProxyError::invalid_request_id())?;
-    let row = client
-        .query_opt(
-            "SELECT payload_hash, workspace_id, namespace_id, proxy_id, revision_id
-             FROM mcp_proxy_idempotency
-             WHERE request_id = $1 AND operation = $2
-             FOR UPDATE",
-            &[&request_uuid, &operation],
-        )
-        .map_err(|_| configuration_error())?;
-    row.map(|row| {
-        Ok(IdempotencyRecord {
-            request_id: request_id.to_owned(),
-            operation,
-            payload_hash: row.get(0),
-            scope: ExactScope {
-                workspace_id: row.get(1),
-                namespace_id: row.get(2),
-            },
-            proxy_id: row.get::<_, uuid::Uuid>(3).hyphenated().to_string(),
-            revision_id: row
-                .get::<_, Option<uuid::Uuid>>(4)
-                .map(|value| value.hyphenated().to_string()),
-        })
-    })
-    .transpose()
-}
-
-fn insert_idempotency(
-    client: &mut impl GenericClient,
-    record: IdempotencyRecord,
-) -> Result<(), ProxyError> {
-    let request_uuid = uuid::Uuid::parse_str(&record.request_id).map_err(|_| ProxyError::invalid_request_id())?;
-    let revision_uuid = record
-        .revision_id
-        .as_deref()
-        .map(uuid::Uuid::parse_str)
-        .transpose()
-        .map_err(|_| configuration_error())?;
-    client
-        .execute(
-            "INSERT INTO mcp_proxy_idempotency
-             (request_id, operation, payload_hash, workspace_id, namespace_id, proxy_id, revision_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            &[
-                &request_uuid,
-                &record.operation,
-                &record.payload_hash,
-                &record.scope.workspace_id,
-                &record.scope.namespace_id,
-                &uuid::Uuid::parse_str(&record.proxy_id).map_err(|_| configuration_error())?,
-                &revision_uuid,
-            ],
-        )
-        .map_err(|_| configuration_error())?;
-    Ok(())
 }
 
 fn query_proxy_for_update(

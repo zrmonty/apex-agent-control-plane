@@ -135,11 +135,16 @@ impl TryFrom<proto::McpProxyCliProfile> for CliProfile {
             .into_iter()
             .map(bounded_required_string)
             .collect::<Result<Vec<_>, _>>()?;
+        let argv_schema = value
+            .argv_schema
+            .map(ArgSchema::try_from)
+            .transpose()?
+            .unwrap_or_else(|| ArgSchema::from(&fixed_argv));
         Ok(Self {
             profile_id: bounded_identifier(value.profile_id)?,
             executable_ref: bounded_endpoint(value.executable_ref)?,
             executable_digest: bounded_required_string(value.executable_digest)?,
-            argv_schema: ArgSchema::from(&fixed_argv),
+            argv_schema,
             fixed_argv,
             working_directory: bounded_endpoint(value.working_directory)?,
             environment_allowlist: value
@@ -158,6 +163,25 @@ impl TryFrom<proto::McpProxyCliProfile> for CliProfile {
             timeout_ms: value.timeout_ms,
             max_output_bytes: value.max_output_bytes,
             allowed_exit_codes: value.allowed_exit_codes,
+        })
+    }
+}
+
+impl TryFrom<proto::McpProxyArgSchema> for ArgSchema {
+    type Error = ProxyError;
+
+    fn try_from(value: proto::McpProxyArgSchema) -> Result<Self, Self::Error> {
+        Ok(Self {
+            fields: value
+                .fields
+                .into_iter()
+                .map(|field| {
+                    Ok(ArgSchemaField {
+                        name: bounded_identifier(field.name)?,
+                        required: field.required,
+                    })
+                })
+                .collect::<Result<Vec<_>, ProxyError>>()?,
         })
     }
 }
@@ -289,6 +313,8 @@ struct WireCliProfile {
     executable_ref: String,
     executable_digest: String,
     argv_template: Vec<String>,
+    #[serde(default)]
+    argv_schema: Option<WireArgSchema>,
     environment_allowlist: Vec<String>,
     secret_refs: Vec<String>,
     working_directory: String,
@@ -298,6 +324,19 @@ struct WireCliProfile {
     timeout_ms: u32,
     max_output_bytes: u32,
     allowed_exit_codes: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct WireArgSchema {
+    fields: Vec<WireArgSchemaField>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct WireArgSchemaField {
+    name: String,
+    required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +441,7 @@ impl From<WireCliProfile> for proto::McpProxyCliProfile {
             executable_ref: value.executable_ref,
             executable_digest: value.executable_digest,
             argv_template: value.argv_template,
+            argv_schema: value.argv_schema.map(Into::into),
             environment_allowlist: value.environment_allowlist,
             secret_refs: value.secret_refs,
             working_directory: value.working_directory,
@@ -411,6 +451,23 @@ impl From<WireCliProfile> for proto::McpProxyCliProfile {
             max_output_bytes: value.max_output_bytes,
             allowed_exit_codes: value.allowed_exit_codes,
             shell: value.shell,
+        }
+    }
+}
+
+impl From<WireArgSchema> for proto::McpProxyArgSchema {
+    fn from(value: WireArgSchema) -> Self {
+        Self {
+            fields: value.fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<WireArgSchemaField> for proto::McpProxyArgSchemaField {
+    fn from(value: WireArgSchemaField) -> Self {
+        Self {
+            name: value.name,
+            required: value.required,
         }
     }
 }

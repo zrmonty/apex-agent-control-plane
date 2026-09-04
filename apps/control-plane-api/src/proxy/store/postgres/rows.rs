@@ -6,7 +6,7 @@ use crate::proxy::{
     ProxyRevisionId,
 };
 
-use super::super::shared::{StoredRevision, StoreProxy, configuration_error, parse_spec_json};
+use super::super::shared::{StoreProxy, StoredRevision, configuration_error, parse_spec_json};
 
 pub(super) fn store_proxy_from_row(row: Row) -> Result<StoreProxy, ProxyError> {
     Ok(StoreProxy {
@@ -32,7 +32,8 @@ pub(super) fn store_proxy_from_row(row: Row) -> Result<StoreProxy, ProxyError> {
             .map(|value| ProxyRevisionId::new(value.hyphenated().to_string()))
             .transpose()
             .map_err(|_| configuration_error())?,
-        created_at_micros: u128::try_from(row.get::<_, i64>(11)).map_err(|_| configuration_error())?,
+        created_at_micros: u128::try_from(row.get::<_, i64>(11))
+            .map_err(|_| configuration_error())?,
     })
 }
 

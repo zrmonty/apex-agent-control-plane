@@ -452,6 +452,16 @@ message McpProxyCliProfile {
   uint32 max_output_bytes = 11;
   repeated int32 allowed_exit_codes = 12;
   bool shell = 13;
+  McpProxyArgSchema argv_schema = 14;
+}
+
+message McpProxyArgSchema {
+  repeated McpProxyArgSchemaField fields = 1;
+}
+
+message McpProxyArgSchemaField {
+  string name = 1;
+  bool required = 2;
 }
 
 message McpProxyAuthBinding {

@@ -8,12 +8,11 @@ use super::{
     UpdateProxyDraft,
 };
 use crate::ExactScope;
+use crate::proxy::parse_proxy_spec_wire_json;
 use crate::proxy::{
     McpProxyRevision, ProxyError, ProxyId, ProxyLifecycleState, ProxyRedactionStatus,
     ProxyRevisionId, ProxySpec, SecretRef, is_valid_slug, validate_proxy_spec,
 };
-#[cfg(feature = "postgres")]
-use crate::proxy::parse_proxy_spec_wire_json;
 
 pub(super) const CREATE_OPERATION: &str = "create";
 pub(super) const UPDATE_DRAFT_OPERATION: &str = "update_draft";
@@ -25,6 +24,7 @@ pub(super) struct StoreState {
     pub(super) proxies: HashMap<String, StoreProxy>,
     pub(super) revisions: HashMap<String, StoredRevision>,
     pub(super) idempotency: HashMap<(String, &'static str), IdempotencyRecord>,
+    pub(super) transitions: Vec<super::transitions::LifecycleTransition>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,11 +69,15 @@ impl StoreState {
         let Some(record) = self.idempotency.get(&(request_id.to_owned(), operation)) else {
             return Ok(None);
         };
-        if record.payload_hash != payload_hash {
-            return Err(ProxyError::idempotency_conflict());
-        }
-        ensure_scope_match(&record.scope, scope)?;
+        check_idempotency_record(record, payload_hash, scope)?;
         Ok(Some(record.clone()))
+    }
+
+    pub(super) fn record_transition(
+        &mut self,
+        transition: super::transitions::LifecycleTransition,
+    ) {
+        self.transitions.push(transition);
     }
 
     pub(super) fn ensure_identity_available(
@@ -190,7 +194,7 @@ impl StoredRevision {
     }
 }
 
-pub(super) fn validate_request_id(request_id: &str) -> Result<u64, ProxyError> {
+pub(super) fn validate_request_id(request_id: &str) -> Result<u128, ProxyError> {
     let uuid = uuid::Uuid::parse_str(request_id).map_err(|_| ProxyError::invalid_request_id())?;
     if uuid.get_version_num() != 7 || uuid.hyphenated().to_string() != request_id {
         return Err(ProxyError::invalid_request_id());
@@ -199,8 +203,7 @@ pub(super) fn validate_request_id(request_id: &str) -> Result<u64, ProxyError> {
         .get_timestamp()
         .ok_or_else(ProxyError::invalid_request_id)?
         .to_unix();
-    u64::try_from((secs as u128) * 1_000 + (nanos as u128) / 1_000_000)
-        .map_err(|_| ProxyError::invalid_request_id())
+    Ok((secs as u128) * 1_000_000 + (nanos as u128) / 1_000)
 }
 
 pub(super) fn validate_scope(scope: &ExactScope) -> Result<(), ProxyError> {
@@ -212,10 +215,13 @@ pub(super) fn validate_scope(scope: &ExactScope) -> Result<(), ProxyError> {
     Ok(())
 }
 
-pub(super) fn validate_create(input: &CreateProxy) -> Result<(String, Option<String>, Option<String>), ProxyError> {
+pub(super) fn validate_create(
+    input: &CreateProxy,
+) -> Result<(String, Option<String>, Option<String>), ProxyError> {
     validate_request_id(&input.request_id)?;
     validate_scope(&input.scope)?;
-    let display_name = super::super::validation::bounded_required_string(input.display_name.clone())?;
+    let display_name =
+        super::super::validation::bounded_required_string(input.display_name.clone())?;
     let description = optional_bounded(input.description.clone())?;
     let owner = optional_bounded(input.owner.clone())?;
     if !is_valid_slug(&input.slug) {
@@ -264,7 +270,11 @@ pub(super) fn create_payload_hash(
     }))
 }
 
-pub(super) fn update_payload_hash(input: &UpdateProxyDraft, actor_id: &str, spec_json: &str) -> String {
+pub(super) fn update_payload_hash(
+    input: &UpdateProxyDraft,
+    actor_id: &str,
+    spec_json: &str,
+) -> String {
     hash_json(&json!({
         "request_id": input.request_id,
         "workspace_id": input.scope.workspace_id,
@@ -305,7 +315,9 @@ pub(super) fn parse_cursor(token: &str) -> Result<Option<(u128, String)>, ProxyE
     let Some((created_at, proxy_id)) = token.split_once('|') else {
         return Err(ProxyError::invalid_cursor());
     };
-    let created_at_micros = created_at.parse::<u128>().map_err(|_| ProxyError::invalid_cursor())?;
+    let created_at_micros = created_at
+        .parse::<u128>()
+        .map_err(|_| ProxyError::invalid_cursor())?;
     Ok(Some((created_at_micros, proxy_id.to_owned())))
 }
 
@@ -324,14 +336,14 @@ pub(super) fn build_revision(
     created_by: String,
     lifecycle_state: ProxyLifecycleState,
     redaction_status: ProxyRedactionStatus,
-    created_at_millis: u64,
+    created_at_micros: u128,
 ) -> Result<McpProxyRevision, ProxyError> {
     let config_hash = hash_hex(spec_json(&spec).as_bytes());
     let mut revision =
         McpProxyRevision::new(proxy_id, revision_id, spec, config_hash, lifecycle_state)?;
     revision.redaction_status = redaction_status;
     revision.created_by = created_by;
-    revision.created_at = format_rfc3339_micros(u128::from(created_at_millis) * 1_000);
+    revision.created_at = format_rfc3339_micros(created_at_micros);
     Ok(revision)
 }
 
@@ -367,6 +379,12 @@ pub(super) fn spec_json(spec: &ProxySpec) -> String {
             "executable_ref": profile.executable_ref,
             "executable_digest": profile.executable_digest,
             "argv_template": profile.fixed_argv,
+            "argv_schema": {
+                "fields": profile.argv_schema.fields.iter().map(|field| json!({
+                    "name": field.name,
+                    "required": field.required
+                })).collect::<Vec<_>>()
+            },
             "environment_allowlist": profile.environment_allowlist,
             "secret_refs": profile.secret_refs.iter().map(SecretRef::as_str).collect::<Vec<_>>(),
             "working_directory": profile.working_directory,
@@ -411,12 +429,15 @@ pub(super) fn spec_json(spec: &ProxySpec) -> String {
     .to_string()
 }
 
-#[cfg(feature = "postgres")]
+#[allow(dead_code)]
 pub(super) fn parse_spec_json(input: &str) -> Result<ProxySpec, ProxyError> {
     parse_proxy_spec_wire_json(input)
 }
 
-pub(super) fn list_from_rows(mut rows: Vec<StoreProxy>, query: &super::ListProxies) -> ListProxiesPage {
+pub(super) fn list_from_rows(
+    mut rows: Vec<StoreProxy>,
+    query: &super::ListProxies,
+) -> ListProxiesPage {
     rows.sort_unstable_by(|left, right| {
         left.created_at_micros
             .cmp(&right.created_at_micros)
@@ -453,9 +474,24 @@ pub(super) fn list_from_rows(mut rows: Vec<StoreProxy>, query: &super::ListProxi
     }
 }
 
-pub(super) fn ensure_scope_match(actual: &ExactScope, expected: &ExactScope) -> Result<(), ProxyError> {
+pub(super) fn ensure_scope_match(
+    actual: &ExactScope,
+    expected: &ExactScope,
+) -> Result<(), ProxyError> {
     if actual != expected {
         return Err(ProxyError::proxy_not_found());
+    }
+    Ok(())
+}
+
+pub(super) fn check_idempotency_record(
+    record: &IdempotencyRecord,
+    expected_hash: &str,
+    expected_scope: &ExactScope,
+) -> Result<(), ProxyError> {
+    ensure_scope_match(&record.scope, expected_scope)?;
+    if record.payload_hash != expected_hash {
+        return Err(ProxyError::idempotency_conflict());
     }
     Ok(())
 }
