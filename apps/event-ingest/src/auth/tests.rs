@@ -151,7 +151,21 @@ async fn spawn_outbox_retention_worker_prunes_completed_rows_and_frees_capacity(
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(service);
 
-    let mut reopened = FileOutbox::open(&path, &base, 1).unwrap();
+    // The maintenance task enters `spawn_blocking`; aborting its outer
+    // scheduler handle cannot cancel that work. Retry the writer lock for a
+    // bounded interval instead of relying on a fixed sleep that flakes on a
+    // busy CI runner.
+    let mut reopened = None;
+    for _ in 0..200 {
+        match FileOutbox::open(&path, &base, 1) {
+            Ok(outbox) => {
+                reopened = Some(outbox);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+    let mut reopened = reopened.expect("retention worker must release the outbox lock");
     assert_eq!(
         reopened.enqueue(&second).unwrap(),
         EnqueueResult::Enqueued,
