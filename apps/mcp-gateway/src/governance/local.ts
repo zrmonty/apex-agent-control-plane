@@ -1,14 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import type {
   ApexEvents,
   ApexGovernance,
   AuthorizationDecision,
   AuthorizationRequest,
+  EventReceipt,
   PolicySnapshot,
   ToolExecutionEvent,
 } from "../contracts.js";
-import { ToolExecutionEventSchema } from "../schemas.js";
+import { portfolioResourceReference } from "../context.js";
+import { EventReceiptSchema, ToolExecutionEventSchema } from "../schemas.js";
 
 const LOCAL_POLICY_ID = "local-read-v1";
 const LOCAL_POLICY_REVISION = 1;
@@ -19,44 +21,47 @@ const LOCAL_FIELD_RESTRICTIONS = Object.freeze([
 ] as const);
 const DEFAULT_ALLOWED_PORTFOLIOS = Object.freeze(["northstar-401k"]);
 
-function resourcePrefix(scope: AuthorizationRequest["scope"]): string {
-  return `portfolio:${scope.workspaceId}/${scope.namespaceId}/`;
+function isPortfolioReadRequest(request: AuthorizationRequest): boolean {
+  return (
+    request.tool === "portfolio.read" &&
+    request.action === "read" &&
+    request.classification === "confidential" &&
+    /^portfolio:sha256:[0-9a-f]{64}$/.test(request.resource)
+  );
 }
 
-function extractPortfolioId(request: AuthorizationRequest): string | null {
-  const prefix = resourcePrefix(request.scope);
+function createUuidV7(): string {
+  const bytes = Buffer.alloc(16);
+  bytes.writeUIntBE(Date.now(), 0, 6);
+  randomBytes(10).copy(bytes, 6);
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
 
-  if (
-    request.tool !== "portfolio.read" ||
-    request.action !== "read" ||
-    request.classification !== "confidential" ||
-    !request.resource.startsWith(prefix)
-  ) {
-    return null;
-  }
-
-  const portfolioId = request.resource.slice(prefix.length);
-  return portfolioId.length > 0 ? portfolioId : null;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export class StaticLocalApex implements ApexGovernance, ApexEvents {
-  readonly #allowedPortfolios: ReadonlySet<string>;
+  readonly #allowedResources: ReadonlySet<string>;
   readonly #eventSink?: ToolExecutionEvent[];
 
   constructor(options: {
     allowedPortfolios?: Iterable<string>;
     eventSink?: ToolExecutionEvent[];
   } = {}) {
-    this.#allowedPortfolios = new Set(
-      options.allowedPortfolios ?? DEFAULT_ALLOWED_PORTFOLIOS,
+    this.#allowedResources = new Set(
+      [...(options.allowedPortfolios ?? DEFAULT_ALLOWED_PORTFOLIOS)].map(
+        portfolioResourceReference,
+      ),
     );
     this.#eventSink = options.eventSink;
   }
 
   async authorize(request: AuthorizationRequest): Promise<AuthorizationDecision> {
-    const portfolioId = extractPortfolioId(request);
-
-    if (portfolioId === null || !this.#allowedPortfolios.has(portfolioId)) {
+    if (
+      !isPortfolioReadRequest(request) ||
+      !this.#allowedResources.has(request.resource)
+    ) {
       return {
         outcome: "denied",
         policyId: LOCAL_POLICY_ID,
@@ -78,13 +83,10 @@ export class StaticLocalApex implements ApexGovernance, ApexEvents {
       scope,
       policyId: LOCAL_POLICY_ID,
       revision: LOCAL_POLICY_REVISION,
-      tool: "portfolio.read",
-      action: "read",
-      classification: "confidential",
     };
   }
 
-  async emit(event: ToolExecutionEvent): Promise<{ readonly eventId: string }> {
+  async emit(event: ToolExecutionEvent): Promise<EventReceipt> {
     const metadata = ToolExecutionEventSchema.parse(event);
 
     this.#eventSink?.push({
@@ -98,6 +100,7 @@ export class StaticLocalApex implements ApexGovernance, ApexEvents {
       },
       tool: metadata.tool,
       action: metadata.action,
+      resource: metadata.resource,
       backend: metadata.backend,
       status: metadata.status,
       latencyMs: metadata.latencyMs,
@@ -123,6 +126,6 @@ export class StaticLocalApex implements ApexGovernance, ApexEvents {
       },
     });
 
-    return { eventId: `evt-${randomUUID()}` };
+    return EventReceiptSchema.parse({ eventId: createUuidV7() });
   }
 }

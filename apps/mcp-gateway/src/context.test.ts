@@ -69,7 +69,7 @@ test("context parser rejects an oversized principal without echoing its value", 
   );
 });
 
-test("authorization request injects caller scope and portfolio resource metadata", () => {
+test("authorization request injects caller scope and an opaque Rust-valid resource", () => {
   const caller = parseAuthenticatedContext({
     APEX_MCP_PRINCIPAL: "spiffe://apex/agent/research",
     APEX_MCP_AGENT_ID: "research-agent",
@@ -92,12 +92,34 @@ test("authorization request injects caller scope and portfolio resource metadata
       },
       tool: "portfolio.read",
       action: "read",
-      resource: "portfolio:northstar/research/northstar-growth",
+      resource:
+        "portfolio:sha256:fb351c1eea5b9999b9224ea9dfa8d945ff12fae714d28afb6574540605537e2d",
       classification: "confidential",
       trace: {
         traceId: "trace-001",
         spanId: "span-001",
       },
+    },
+  );
+});
+
+test("context parser rejects principals outside the Rust caller boundary", () => {
+  const malformedPrincipal = "spiffe://apex/agent/../research";
+
+  assert.throws(
+    () =>
+      parseAuthenticatedContext({
+        APEX_MCP_PRINCIPAL: malformedPrincipal,
+        APEX_MCP_AGENT_ID: "research-agent",
+        APEX_MCP_WORKSPACE_ID: "northstar",
+        APEX_MCP_NAMESPACE_ID: "research",
+        APEX_MCP_TRACE_ID: "trace-001",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof GatewayError);
+      assert.equal(error.code, "INVALID_INPUT");
+      assert.equal(error.message.includes(malformedPrincipal), false);
+      return true;
     },
   );
 });

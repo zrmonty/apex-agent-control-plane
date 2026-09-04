@@ -12,7 +12,9 @@ The thin stdio gateway and deterministic local `portfolio.read` path are impleme
 - Authorizes before any adapter access
 - Verifies the exact-scope policy identity for allowed reads
 - Filters seeded sensitive fields before returning structured content
-- Emits metadata-only execution events after filtering and before returning
+- Uses an opaque, Rust-compatible resource reference in governance requests and events
+- Validates durable UUIDv7 event receipts before returning an allowed result
+- Emits bounded metadata-only execution events after filtering and before returning
 
 ## Local usage
 

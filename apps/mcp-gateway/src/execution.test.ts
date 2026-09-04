@@ -9,6 +9,7 @@ import {
   type ApexGovernance,
   type AuthorizationDecision,
   type AuthorizationRequest,
+  type EventReceipt,
   type GatewayErrorCode,
   type PolicySnapshot,
   type SafeTelemetry,
@@ -94,9 +95,6 @@ class RecordingGovernance implements ApexGovernance {
         },
         policyId: "local-read-v1",
         revision: 1,
-        tool: "portfolio.read",
-        action: "read",
-        classification: "confidential",
       } satisfies PolicySnapshot);
     this.authorizeError = options.authorizeError;
     this.policyError = options.policyError;
@@ -126,9 +124,16 @@ class RecordingGovernance implements ApexGovernance {
 class RecordingEvents implements ApexEvents {
   readonly events: ToolExecutionEvent[] = [];
   readonly emitError?: Error;
+  readonly emitResponse: unknown;
 
-  constructor(emitError?: Error) {
-    this.emitError = emitError;
+  constructor(options: { emitError?: Error; emitResponse?: unknown } = {}) {
+    this.emitError = options.emitError;
+    this.emitResponse =
+      options.emitResponse === undefined
+        ? ({
+            eventId: "018f5c91-2d88-7c00-8000-000000000001",
+          } satisfies EventReceipt)
+        : options.emitResponse;
   }
 
   async emit(event: ToolExecutionEvent): Promise<{ readonly eventId: string }> {
@@ -138,7 +143,7 @@ class RecordingEvents implements ApexEvents {
       throw this.emitError;
     }
 
-    return { eventId: `evt-${this.events.length}` };
+    return this.emitResponse as EventReceipt;
   }
 }
 
@@ -181,8 +186,10 @@ type FixtureOptions = {
   authorizeError?: Error;
   policyError?: Error;
   emitError?: Error;
+  emitResponse?: unknown;
   readError?: Error;
   filter?: GatewayExecutor["dependencies"]["filter"];
+  backend?: string;
 };
 
 function fixture(options: FixtureOptions = {}) {
@@ -192,7 +199,10 @@ function fixture(options: FixtureOptions = {}) {
     authorizeError: options.authorizeError,
     policyError: options.policyError,
   });
-  const events = new RecordingEvents(options.emitError);
+  const events = new RecordingEvents({
+    emitError: options.emitError,
+    emitResponse: options.emitResponse,
+  });
   const adapter = new RecordingPortfolioAdapter({ readError: options.readError });
   const telemetry = new RecordingTelemetry();
   const executor = new GatewayExecutor({
@@ -208,6 +218,7 @@ function fixture(options: FixtureOptions = {}) {
     portfolio: adapter,
     telemetry,
     filter: options.filter,
+    backend: options.backend,
   });
 
   return { executor, governance, events, adapter, telemetry };
@@ -389,6 +400,25 @@ test("malformed authorization decisions fail safely before adapter access", asyn
   assert.equal(events.events.length, 0);
 });
 
+test("oversized authorization metadata fails safely before filtering", async () => {
+  const oversizedPolicyId = "p".repeat(10_000);
+  const { executor, adapter, events } = fixture({
+    decision: {
+      ...allowedDecision(),
+      policyId: oversizedPolicyId,
+    },
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "GOVERNANCE_UNAVAILABLE", [
+    oversizedPolicyId,
+    "northstar-401k",
+  ]);
+  assert.equal(adapter.readCount, 0);
+  assert.equal(events.events.length, 0);
+});
+
 test("adapter failure returns a safe adapter error", async () => {
   const { executor, events } = fixture({
     readError: new Error("portfolio backend exploded"),
@@ -438,6 +468,19 @@ test("event admission failure prevents an allowed result", async () => {
   assert.equal(events.events[0]?.status, "succeeded");
 });
 
+test("invalid allowed event receipts prevent the result", async () => {
+  const { executor, adapter, events } = fixture({ emitResponse: null });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "EVENT_ADMISSION_FAILED", [
+    "northstar-401k",
+    "client-record-raw",
+  ]);
+  assert.equal(adapter.readCount, 1);
+  assert.equal(events.events.length, 1);
+});
+
 test("execution events exclude caller-supplied portfolio identifiers", async () => {
   const { executor, events } = fixture();
 
@@ -464,6 +507,61 @@ test("denied-event admission failure preserves the denial and records safe telem
   assert.deepEqual(telemetry.codes, ["EVENT_ADMISSION_FAILED"]);
 });
 
+test("invalid denied event receipts preserve the denial and record safe telemetry", async () => {
+  const { executor, adapter, telemetry, events } = fixture({
+    decision: deniedDecision(),
+    emitResponse: {},
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "AUTHORIZATION_DENIED", ["northstar-401k"]);
+  assert.equal(adapter.readCount, 0);
+  assert.equal(events.events.length, 1);
+  assert.deepEqual(telemetry.codes, ["EVENT_ADMISSION_FAILED"]);
+});
+
+test("invalid approval event receipts preserve approval and record safe telemetry", async () => {
+  const { executor, adapter, telemetry, events } = fixture({
+    decision: approvalDecision(),
+    emitResponse: { eventId: "not-a-uuid" },
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "APPROVAL_REQUIRED", ["northstar-401k"]);
+  assert.equal(adapter.readCount, 0);
+  assert.equal(events.events.length, 1);
+  assert.deepEqual(telemetry.codes, ["EVENT_ADMISSION_FAILED"]);
+});
+
+test("oversized event metadata is rejected before event emission", async () => {
+  const { executor, adapter, events } = fixture({
+    filter: () => ({
+      view: {
+        portfolioId: "public-portfolio",
+        asOf: "2026-08-31",
+        baseCurrency: "USD",
+        totalValue: 125000,
+        client: { displayName: "Northstar Research" },
+        positions: [],
+      },
+      removedFields: Array.from(
+        { length: 64 },
+        () => `field.${"a".repeat(53)}`,
+      ),
+      sourceBytes: 20,
+      filteredBytes: 15,
+    }),
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "EVENT_ADMISSION_FAILED", ["northstar-401k"]);
+  assert.equal(adapter.readCount, 1);
+  assert.equal(events.events.length, 0);
+});
+
 test("local event admission rejects non-metadata fields without persisting them", async () => {
   const sink: ToolExecutionEvent[] = [];
   const apex = new StaticLocalApex({ eventSink: sink });
@@ -478,6 +576,7 @@ test("local event admission rejects non-metadata fields without persisting them"
     },
     tool: "portfolio.read",
     action: "read",
+    resource: "portfolio:opaque",
     backend: "local-portfolio",
     status: "succeeded",
     latencyMs: 1,
@@ -501,4 +600,13 @@ test("local event admission rejects non-metadata fields without persisting them"
 
   await assert.rejects(apex.emit(event as ToolExecutionEvent));
   assert.deepEqual(sink, []);
+
+  const metadataEvent = { ...event };
+  delete (metadataEvent as { rawRecord?: unknown }).rawRecord;
+  const receipt = await apex.emit(metadataEvent as ToolExecutionEvent);
+  assert.match(
+    receipt.eventId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(sink.length, 1);
 });

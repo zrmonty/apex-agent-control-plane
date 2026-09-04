@@ -14,10 +14,16 @@ import {
 import {
   buildPortfolioReadAuthorizationRequest,
 } from "./context.js";
-import { filterPortfolioRecord, type FilterResult, type RawPortfolioRecord } from "./filtering.js";
+import {
+  filterPortfolioRecord,
+  type FilterResult,
+  type RawPortfolioRecord,
+} from "./filtering.js";
 import {
   AuthorizationDecisionSchema,
+  EventReceiptSchema,
   PolicySnapshotSchema,
+  ToolExecutionEventSchema,
   parsePortfolioReadInput,
 } from "./schemas.js";
 import {
@@ -89,11 +95,19 @@ function matchesPolicySnapshot(
   return (
     policy.policyId === decision.policyId &&
     policy.scope.workspaceId === request.scope.workspaceId &&
-    policy.scope.namespaceId === request.scope.namespaceId &&
-    policy.tool === request.tool &&
-    policy.action === request.action &&
-    policy.classification === request.classification
+    policy.scope.namespaceId === request.scope.namespaceId
   );
+}
+
+function recordTelemetrySafely(
+  telemetry: SafeTelemetry,
+  code: GatewayErrorCode,
+): void {
+  try {
+    telemetry.record(code);
+  } catch {
+    // Safe telemetry is best-effort and must never alter a governed result.
+  }
 }
 
 export class GatewayExecutor {
@@ -140,7 +154,7 @@ export class GatewayExecutor {
 
     if (decision.outcome !== "allowed") {
       try {
-        await this.dependencies.events.emit(
+        const parsedEvent = ToolExecutionEventSchema.parse(
           createToolExecutionEvent({
             request,
             backend: this.dependencies.backend,
@@ -160,8 +174,10 @@ export class GatewayExecutor {
             },
           }),
         );
+        const receipt = await this.dependencies.events.emit(parsedEvent);
+        EventReceiptSchema.parse(receipt);
       } catch {
-        this.dependencies.telemetry.record("EVENT_ADMISSION_FAILED");
+        recordTelemetrySafely(this.dependencies.telemetry, "EVENT_ADMISSION_FAILED");
       }
 
       return toErrorResult(
@@ -202,7 +218,7 @@ export class GatewayExecutor {
     }
 
     try {
-      await this.dependencies.events.emit(
+      const parsedEvent = ToolExecutionEventSchema.parse(
         createToolExecutionEvent({
           request,
           backend: this.dependencies.backend,
@@ -222,6 +238,8 @@ export class GatewayExecutor {
           },
         }),
       );
+      const receipt = await this.dependencies.events.emit(parsedEvent);
+      EventReceiptSchema.parse(receipt);
     } catch (error: unknown) {
       return toErrorResult(toGatewayError(error, "EVENT_ADMISSION_FAILED").code);
     }
