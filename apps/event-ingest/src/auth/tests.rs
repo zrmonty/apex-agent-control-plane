@@ -220,7 +220,20 @@ async fn spawn_idempotency_retention_worker_prunes_committed_keys_and_frees_capa
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(service);
 
-    let mut reopened = FileIdempotencyStore::open(&path, &base, 1).unwrap();
+    // `spawn_blocking` cannot be cancelled by aborting the outer task, so
+    // retry the writer lock for a bounded interval instead of relying on a
+    // fixed sleep that can be too short on a busy CI runner.
+    let mut reopened = None;
+    for _ in 0..200 {
+        match FileIdempotencyStore::open(&path, &base, 1) {
+            Ok(store) => {
+                reopened = Some(store);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+        }
+    }
+    let mut reopened = reopened.expect("retention worker must release the idempotency lock");
     assert!(matches!(
         reopened.reserve(second, [2; 32]).unwrap(),
         ReservationResult::Reserved(_)
