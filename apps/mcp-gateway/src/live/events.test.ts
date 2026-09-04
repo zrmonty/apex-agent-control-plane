@@ -54,6 +54,14 @@ test("Struct encoding uses proto-loader's camelCase Value oneof members", () => 
   });
 });
 
+test("Struct encoding preserves the legal __proto__ JSON field safely", () => {
+  const payload = JSON.parse('{"__proto__":{"polluted":true},"safe":"ok"}');
+  const roundTripped = structToJson(jsonToStruct(payload));
+  assert.equal(Object.hasOwn(roundTripped, "__proto__"), true);
+  assert.deepEqual(roundTripped["__proto__"], { polluted: true });
+  assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+});
+
 test("canonical JSON sorts object keys deterministically", () => {
   assert.equal(canonicalizeJson({ z: 1, a: { y: true, x: "ok" } }), '{"a":{"x":"ok","y":true},"z":1}');
 });

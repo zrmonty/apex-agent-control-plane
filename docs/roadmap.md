@@ -48,7 +48,8 @@ Only work that advances the objective below is active.
 - Durable admission remains enqueue-only: the admission call commits the local outbox and returns, while a separate replay worker owns downstream publication and recovery.
 - The thin TypeScript stdio MCP gateway is implemented in `apps/mcp-gateway` and exposes one validated read-only MCP tool over stdio without recreating governance.
 - The deterministic local `portfolio.read` path is implemented with strict input validation, exact-scope local authorization, gateway-side filtering, and metadata-only execution events.
-- The remaining active work is to replace the local Apex authorization/event stubs with live clients and prove the narrow operator-visible vertical slice. The live completion gate is still open.
+- The live TypeScript MCP-to-Apex authorization/event path is now proven against real mTLS containers, durable admission, downstream fanout, and operator-visible event storage. CI run `33834884799` and live run `33834884797` passed the full gate.
+- The current pass is a controlled hardening/refactor of this active slice: every tracked source/test file is at or below 600 lines, the live boundary has stricter endpoint/secret/container checks, and the gateway serialization path has a measured throughput improvement. The hardening evidence is recorded in [`codebase-hardening-baseline.md`](architecture/codebase-hardening-baseline.md), [`codebase-hardening-review.md`](security/codebase-hardening-review.md), and [`gateway-throughput-baseline.md`](performance/gateway-throughput-baseline.md).
 
 The foundation boundary is complete: the dependency-direction check and the durable ACK-before-downstream regression checks are green in the full workspace verification.
 
@@ -123,9 +124,9 @@ Start with `portfolio.read` or an equivalent read-only portfolio tool.
 
 **Exit gate:** allowed and denied requests are both tested, the tool cannot mutate portfolio state, and sensitive fields are removed by the gateway rather than by model instructions.
 
-### 6. Prove the live vertical slice
+### 6. Prove and harden the live vertical slice
 
-**Status:** Not complete. This remains the active completion gate.
+**Status:** Complete for the narrow active slice. The follow-on hardening gate is complete locally and is being integrated through CI.
 
 Connect the real path end to end. The operator must be able to see:
 
@@ -138,6 +139,8 @@ Connect the real path end to end. The operator must be able to see:
 - the relevant cost correlation metadata without raw prompts or full client records.
 
 **Completion gate:** one real request traverses the full sequence above and the result is visible from server-derived operator data. This is the only product slice required before the roadmap may expand.
+
+The completed gate includes the real gateway image, mTLS, product SDK proof, governed MCP stdio proof, operator command path, Postgres replicas, cross-replica Valkey admission, Keycloak operator credentials, adversarial event corpus, compose validation, and teardown. The controlled hardening pass adds the 600-line readability gate, responsibility-based Rust/TypeScript/Python splits, strict live-target and secret handling, read-only gateway root filesystem, and the equivalent Struct serialization benchmark. No held roadmap feature was started.
 
 ## Explicit hold
 

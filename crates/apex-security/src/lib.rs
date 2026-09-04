@@ -13,6 +13,8 @@ mod validate;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_ids;
 
 pub use apex_domain::{Caller, is_lowercase_uuidv7, is_scope_identifier};
 pub use detect::{detect_and_record, detection_finding};

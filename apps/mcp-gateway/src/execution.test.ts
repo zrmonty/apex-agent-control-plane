@@ -16,7 +16,6 @@ import {
   type ToolExecutionEvent,
 } from "./contracts.js";
 import { GatewayExecutor } from "./execution.js";
-import { StaticLocalApex } from "./governance/local.js";
 import type { RawPortfolioRecord } from "./filtering.js";
 import type { PortfolioAdapter } from "./adapters/portfolio.js";
 
@@ -582,51 +581,4 @@ test("oversized event metadata is rejected before event emission", async () => {
   assert.equal(events.events.length, 0);
 });
 
-test("local event admission rejects non-metadata fields without persisting them", async () => {
-  const sink: ToolExecutionEvent[] = [];
-  const apex = new StaticLocalApex({ eventSink: sink });
-  const event = {
-    caller: {
-      principal: "spiffe://apex/agent/research",
-      agentId: "research-agent",
-    },
-    scope: {
-      workspaceId: "northstar",
-      namespaceId: "research",
-    },
-    tool: "portfolio.read",
-    action: "read",
-    resource: "portfolio:opaque",
-    backend: "local-portfolio",
-    status: "succeeded",
-    latencyMs: 1,
-    retryCount: 0,
-    sizes: {
-      inputBytes: 10,
-      sourceBytes: 20,
-      filteredBytes: 15,
-      outputBytes: 15,
-    },
-    filtering: { removedFields: ["client.tax_id"] },
-    policy: {
-      outcome: "allowed",
-      policyId: "local-read-v1",
-      reasonCode: "policy.allowed",
-      fieldRestrictions: ["client.tax_id"],
-    },
-    trace: { traceId: "trace-001", spanId: "span-001" },
-    rawRecord: rawPortfolioFixture,
-  };
-
-  await assert.rejects(apex.emit(event as ToolExecutionEvent));
-  assert.deepEqual(sink, []);
-
-  const metadataEvent = { ...event };
-  delete (metadataEvent as { rawRecord?: unknown }).rawRecord;
-  const receipt = await apex.emit(metadataEvent as ToolExecutionEvent);
-  assert.match(
-    receipt.eventId,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  );
-  assert.equal(sink.length, 1);
-});
+// Admission-specific event persistence coverage lives in execution.admission.test.ts.
