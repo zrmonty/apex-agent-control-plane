@@ -35,7 +35,11 @@ try {
     arguments: { portfolioId },
   });
   if (result.isError || typeof result.structuredContent !== "object") {
-    throw new Error("live MCP tool call was rejected");
+    const safeText = result.content
+      ?.filter((item) => item.type === "text")
+      .map((item) => item.text)
+      .join(" ");
+    throw new Error(`live MCP tool call was rejected${safeText ? `: ${safeText}` : ""}`);
   }
 
   const serialized = JSON.stringify(result.structuredContent);
