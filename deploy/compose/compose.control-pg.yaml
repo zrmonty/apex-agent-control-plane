@@ -53,6 +53,10 @@ x-control-pg-environment: &control-pg-environment
   APEX_CONTROL_SERVER_KEY_FILE: /var/lib/apex-control-secrets/control_server_key
   APEX_CONTROL_CLIENT_CA_FILE: /var/lib/apex-control-secrets/ca
   APEX_CONTROL_OPERATOR_TOKENS_FILE: /var/lib/apex-control-secrets/control_operator_tokens
+  # Keep the Postgres replicas aligned with the primary control service: the
+  # governance gateway is required at startup and uses the same staged secret
+  # volume, even though this overlay changes only the durability backend.
+  APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE: /var/lib/apex-control-secrets/mcp_gateway_token
   # `apex_control`, not the ingest gateway's database. `PostgresOutbox`
   # hardcodes the `apex_event_outbox` table name, so two services sharing one
   # database share one outbox table -- and each service's replay worker would
