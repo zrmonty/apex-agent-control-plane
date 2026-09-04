@@ -73,7 +73,8 @@ export async function unaryCall(
       (error, response) => {
         if (error !== null) {
           if (process.env.APEX_MCP_DEBUG_LIVE_ERRORS === "1") {
-            console.error(`mcp live ${failureCode} grpc-status-${error.code}`);
+            const detail = error.details.replace(/[\r\n]+/g, " ").slice(0, 256);
+            console.error(`mcp live ${failureCode} grpc-status-${error.code} detail=${detail}`);
           }
           const explanation =
             process.env.APEX_MCP_DEBUG_LIVE_ERRORS === "1"
