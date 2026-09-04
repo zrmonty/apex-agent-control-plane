@@ -278,8 +278,8 @@ fn validate_proxy_spec_rejects_a_malformed_direct_ingress_host() {
     spec.ingress.host = "https://proxy.apex.test/mcp".to_owned();
 
     let error = validate_proxy_spec(&spec).unwrap_err();
-
     assert_eq!(error.code(), "INVALID_PROXY_SPEC");
+    assert_eq!(error.message(), "Proxy hosts require a bounded host reference.");
 }
 
 #[test]
@@ -327,7 +327,15 @@ fn proxy_revision_rejects_an_uppercase_config_hash() {
 #[test]
 fn validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule() {
     let mut spec = valid_proxy_spec();
-    for host in ["10.0.0.20", "api.internal", "api.local", "host.docker.internal"] {
+    for host in [
+        "10.0.0.20",
+        "api.internal",
+        "api.local",
+        "host.docker.internal",
+        "API.INTERNAL",
+        "LOCALHOST",
+        "Host.Docker.Internal",
+    ] {
         let destination = EgressDestination::Https {
             host: host.to_owned(),
             port: 443,

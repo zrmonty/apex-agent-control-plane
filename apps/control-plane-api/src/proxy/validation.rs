@@ -372,7 +372,7 @@ fn validate_host(value: &str) -> Result<(), ProxyError> {
         || (!normalized.parse::<std::net::IpAddr>().is_ok() && !is_dns_hostname(normalized))
     {
         return Err(ProxyError::invalid_proxy_spec(
-            "Proxy egress destinations require a bounded host reference.",
+            "Proxy hosts require a bounded host reference.",
         ));
     }
     Ok(())

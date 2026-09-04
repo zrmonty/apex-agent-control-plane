@@ -482,9 +482,10 @@ fn is_valid_slug(value: &str) -> bool {
 
 fn is_private_host(value: &str) -> bool {
     let normalized = value.trim_matches(['[', ']']);
-    if matches!(normalized, "localhost" | "host.docker.internal")
-        || normalized.ends_with(".internal")
-        || normalized.ends_with(".local")
+    let lowercase_host = normalized.to_ascii_lowercase();
+    if matches!(lowercase_host.as_str(), "localhost" | "host.docker.internal")
+        || lowercase_host.ends_with(".internal")
+        || lowercase_host.ends_with(".local")
     {
         return true;
     }

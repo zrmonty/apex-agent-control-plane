@@ -238,3 +238,68 @@ Final touched file lengths are: `contracts/proto/apex/v1/mcp_proxy.proto` 488, `
 ### Round 2 concerns
 
 `cargo fmt --all --check` remains non-clean because it reports unrelated repository-wide formatting drift. The focused tests, focused library check, line-limit gate, and `git diff --check` passed for this change; the review fix did not modify unrelated files.
+
+## Round 3 Fix Report
+
+### Review findings addressed
+
+- The shared private-host classifier now creates a lowercase classification copy with `to_ascii_lowercase()`. Stored host strings are unchanged, and IP parsing still uses the original bracket-trimmed value. Uppercase `API.INTERNAL`, `LOCALHOST`, and `Host.Docker.Internal` therefore require explicit private-destination allowance.
+- The shared strict host validator now reports the field-neutral message `Proxy hosts require a bounded host reference.` for both ingress and egress host failures.
+- Structured tool/egress conversion, strict unknown-field wire parsing, lowercase hash enforcement, and declarative Apex governance semantics remain unchanged.
+
+### RED evidence
+
+The uppercase private-host regression failed before classification normalization:
+
+```text
+cargo test -p apex-control-plane-api validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule -- --nocapture
+test proxy::tests::validate_proxy_spec_rejects_a_private_destination_without_an_explicit_allow_rule ... FAILED
+assertion failed: destination.requires_private_allowance()
+```
+
+The host-message regression failed before the field-neutral error-text fix:
+
+```text
+cargo test -p apex-control-plane-api validate_proxy_spec_rejects_a_malformed_direct_ingress_host -- --nocapture
+assertion `left == right` failed
+left: "Proxy egress destinations require a bounded host reference."
+right: "Proxy hosts require a bounded host reference."
+```
+
+### GREEN/fix evidence
+
+After the classifier normalization, neutral error text, and the line-limit trim:
+
+```text
+cargo test -p apex-control-plane-api proxy::tests --no-default-features -- --nocapture
+running 25 tests
+test result: ok. 25 passed; 0 failed
+```
+
+The focused library compile passed:
+
+```text
+cargo check -p apex-control-plane-api --lib --no-default-features
+Finished `dev` profile
+```
+
+The line-limit and whitespace gates passed:
+
+```text
+python scripts/test_check_source_line_limits.py
+exit code 0
+git diff --check
+exit code 0
+```
+
+Final touched file lengths are: `contracts/proto/apex/v1/mcp_proxy.proto` 488, `apps/control-plane-api/src/lib.rs` 118, `apps/control-plane-api/src/proxy.rs` 506, `apps/control-plane-api/src/proxy/validation.rs` 576, `apps/control-plane-api/src/proxy/wire.rs` 469, and `apps/control-plane-api/src/proxy/tests.rs` 600.
+
+### Round 3 changed files
+
+- `apps/control-plane-api/src/proxy.rs`
+- `apps/control-plane-api/src/proxy/validation.rs`
+- `apps/control-plane-api/src/proxy/tests.rs`
+
+### Round 3 concerns
+
+`cargo fmt --all --check` remains non-clean because of unrelated repository-wide formatting drift. The task-scoped tests, focused library check, line-limit gate, and `git diff --check` passed; pre-existing untracked review artifacts and `apps/mcp-gateway/pnpm-workspace.yaml` remain untouched.
