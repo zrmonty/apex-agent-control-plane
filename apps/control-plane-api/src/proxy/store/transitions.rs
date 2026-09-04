@@ -4,6 +4,9 @@ use crate::proxy::{ProxyId, ProxyLifecycleState, ProxyRevisionId};
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct LifecycleTransition {
+    pub(super) transition_id: String,
+    pub(super) request_id: String,
+    pub(super) occurred_at_micros: u128,
     pub(super) operation: String,
     pub(super) scope: ExactScope,
     pub(super) proxy_id: ProxyId,
@@ -28,6 +31,9 @@ impl LifecycleTransition {
         status: impl Into<String>,
     ) -> Self {
         Self {
+            transition_id: String::new(),
+            request_id: String::new(),
+            occurred_at_micros: 0,
             operation: operation.into(),
             scope,
             proxy_id,
@@ -38,6 +44,17 @@ impl LifecycleTransition {
             reason_code: reason_code.into(),
             status: status.into(),
         }
+    }
+
+    pub(super) fn with_identity(
+        mut self,
+        request_id: impl Into<String>,
+        occurred_at_micros: u128,
+    ) -> Self {
+        self.transition_id = uuid::Uuid::now_v7().hyphenated().to_string();
+        self.request_id = request_id.into();
+        self.occurred_at_micros = occurred_at_micros;
+        self
     }
 
     #[cfg(test)]

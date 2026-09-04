@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use apex_control_plane_api::{
-    ControlGatewayService, GatewayRuntimeMetrics, GatewayShutdown, OperatorTokenAuthenticator,
-    McpProxyService, bounded_control_gateway_server, bounded_mcp_proxy_service_server,
+    ControlGatewayService, GatewayRuntimeMetrics, GatewayShutdown, McpProxyService,
+    OperatorTokenAuthenticator, bounded_control_gateway_server, bounded_mcp_proxy_service_server,
 };
 use tonic::transport::Server;
 
@@ -71,7 +71,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let governance_service = build_governance_service(&trusted_base)?;
     let auth = OperatorTokenAuthenticator::new(resolver);
-    let proxy_service = McpProxyService::new(OperatorTokenAuthenticator::new(proxy_resolver), proxy_store);
+    let proxy_service =
+        McpProxyService::new(OperatorTokenAuthenticator::new(proxy_resolver), proxy_store);
     // Resolved and validated here, with no runtime entered; spawned below,
     // inside one. No socket is opened either way -- an unreachable broker
     // must never stop this gateway from starting (ADR-0006).
@@ -117,7 +118,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         health_reporter
             .set_service_status(
                 "apex.v1.McpProxyService",
-                tonic_health::ServingStatus::Serving,
+                tonic_health::ServingStatus::NotServing,
             )
             .await;
         health_reporter

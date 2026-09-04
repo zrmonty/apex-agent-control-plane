@@ -9,9 +9,8 @@ use super::shared::{
 };
 use super::transitions::LifecycleTransition;
 use super::{
-    CreateProxy, ListProxies, ListProxiesPage, McpProxy, ProxyRevisionStore, ProxyStore,
-    ProxyLifecycleStore, PublishRevision, RetireProxy, TransitionProxyLifecycle,
-    UpdateProxyDraft,
+    CreateProxy, CreateProxyResult, ListProxies, ListProxiesPage, McpProxy, ProxyRevisionStore,
+    ProxyStore, PublishRevision, RetireProxy, UpdateProxyDraft,
 };
 use crate::ExactScope;
 use crate::proxy::{
@@ -19,13 +18,15 @@ use crate::proxy::{
     ProxyRevisionId,
 };
 
+mod lifecycle;
+
 #[derive(Debug, Default)]
 pub struct InMemoryProxyStore {
     state: Mutex<StoreState>,
 }
 
 impl ProxyStore for InMemoryProxyStore {
-    fn create(&self, input: CreateProxy) -> Result<McpProxy, ProxyError> {
+    fn create_with_outcome(&self, input: CreateProxy) -> Result<CreateProxyResult, ProxyError> {
         let (display_name, description, owner) = validate_create(&input)?;
         let created_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = create_payload_hash(
@@ -44,7 +45,10 @@ impl ProxyStore for InMemoryProxyStore {
             &payload_hash,
             &input.scope,
         )? {
-            return state.replay_proxy(&record);
+            return Ok(CreateProxyResult {
+                proxy: state.replay_proxy(&record)?,
+                duplicate: true,
+            });
         }
         state.ensure_identity_available(&input.scope, &input.proxy_id, &input.slug)?;
         let proxy = StoreProxy {
@@ -62,17 +66,20 @@ impl ProxyStore for InMemoryProxyStore {
         };
         let response = proxy.to_proxy(&state.revisions, None);
         state.proxies.insert(response.proxy_id.to_string(), proxy);
-        state.record_transition(LifecycleTransition::new(
-            CREATE_OPERATION,
-            response.scope.clone(),
-            response.proxy_id.clone(),
-            None,
-            None,
-            ProxyLifecycleState::Draft,
-            None,
-            "proxy.created",
-            "committed",
-        ));
+        state.record_transition(
+            LifecycleTransition::new(
+                CREATE_OPERATION,
+                response.scope.clone(),
+                response.proxy_id.clone(),
+                None,
+                None,
+                ProxyLifecycleState::Draft,
+                None,
+                "proxy.created",
+                "committed",
+            )
+            .with_identity(input.request_id.clone(), created_at_micros),
+        );
         state.record_idempotency(IdempotencyRecord {
             request_id: input.request_id,
             operation: CREATE_OPERATION,
@@ -81,7 +88,10 @@ impl ProxyStore for InMemoryProxyStore {
             revision_id: None,
             scope: response.scope.clone(),
         });
-        Ok(response)
+        Ok(CreateProxyResult {
+            proxy: response,
+            duplicate: false,
+        })
     }
 
     fn update_draft(&self, input: UpdateProxyDraft) -> Result<McpProxy, ProxyError> {
@@ -130,17 +140,20 @@ impl ProxyStore for InMemoryProxyStore {
             .ok_or_else(ProxyError::proxy_not_found)?;
         proxy.draft_revision_id = Some(revision_id.clone());
         let response = proxy.clone().to_proxy(&state.revisions, None);
-        state.record_transition(LifecycleTransition::new(
-            UPDATE_DRAFT_OPERATION,
-            response.scope.clone(),
-            response.proxy_id.clone(),
-            Some(revision_id.clone()),
-            Some(prior_state),
-            ProxyLifecycleState::Draft,
-            Some(actor_id),
-            "proxy.draft_updated",
-            "committed",
-        ));
+        state.record_transition(
+            LifecycleTransition::new(
+                UPDATE_DRAFT_OPERATION,
+                response.scope.clone(),
+                response.proxy_id.clone(),
+                Some(revision_id.clone()),
+                Some(prior_state),
+                ProxyLifecycleState::Draft,
+                Some(actor_id),
+                "proxy.draft_updated",
+                "committed",
+            )
+            .with_identity(input.request_id.clone(), created_at_micros),
+        );
         state.record_idempotency(IdempotencyRecord {
             request_id: input.request_id,
             operation: UPDATE_DRAFT_OPERATION,
@@ -208,17 +221,20 @@ impl ProxyStore for InMemoryProxyStore {
             .get_mut(&key)
             .ok_or_else(ProxyError::proxy_not_found)?
             .active_revision_id = Some(revision_id.clone());
-        state.record_transition(LifecycleTransition::new(
-            PUBLISH_OPERATION,
-            input.scope.clone(),
-            input.proxy_id.clone(),
-            Some(revision_id.clone()),
-            Some(prior_state),
-            ProxyLifecycleState::Draft,
-            Some(actor_id),
-            "proxy.revision_published",
-            "committed",
-        ));
+        state.record_transition(
+            LifecycleTransition::new(
+                PUBLISH_OPERATION,
+                input.scope.clone(),
+                input.proxy_id.clone(),
+                Some(revision_id.clone()),
+                Some(prior_state),
+                ProxyLifecycleState::Draft,
+                Some(actor_id),
+                "proxy.revision_published",
+                "committed",
+            )
+            .with_identity(input.request_id.clone(), created_at_micros),
+        );
         state.record_idempotency(IdempotencyRecord {
             request_id: input.request_id,
             operation: PUBLISH_OPERATION,
@@ -287,6 +303,7 @@ impl ProxyRevisionStore for InMemoryProxyStore {
 
     fn retire(&self, input: RetireProxy) -> Result<McpProxy, ProxyError> {
         validate_retire(&input)?;
+        let occurred_at_micros = validate_request_id(&input.request_id)?;
         let payload_hash = retire_payload_hash(&input);
         let mut state = self
             .state
@@ -312,17 +329,20 @@ impl ProxyRevisionStore for InMemoryProxyStore {
         let prior_state = proxy.lifecycle_state;
         proxy.lifecycle_state = ProxyLifecycleState::Retired;
         let response = proxy.clone().to_proxy(&state.revisions, None);
-        state.record_transition(LifecycleTransition::new(
-            RETIRE_OPERATION,
-            input.scope.clone(),
-            input.proxy_id.clone(),
-            input.expected_revision_id.clone(),
-            Some(prior_state),
-            ProxyLifecycleState::Retired,
-            None,
-            "proxy.retired",
-            "committed",
-        ));
+        state.record_transition(
+            LifecycleTransition::new(
+                RETIRE_OPERATION,
+                input.scope.clone(),
+                input.proxy_id.clone(),
+                input.expected_revision_id.clone(),
+                Some(prior_state),
+                ProxyLifecycleState::Retired,
+                None,
+                "proxy.retired",
+                "committed",
+            )
+            .with_identity(input.request_id.clone(), occurred_at_micros),
+        );
         state.record_idempotency(IdempotencyRecord {
             request_id: input.request_id,
             operation: RETIRE_OPERATION,
@@ -330,52 +350,6 @@ impl ProxyRevisionStore for InMemoryProxyStore {
             proxy_id: key,
             revision_id: None,
             scope: input.scope,
-        });
-        Ok(response)
-    }
-}
-
-impl ProxyLifecycleStore for InMemoryProxyStore {
-    fn transition(&self, input: TransitionProxyLifecycle) -> Result<McpProxy, ProxyError> {
-        super::shared::validate_request_id(&input.request_id)?;
-        super::shared::validate_scope(&input.scope)?;
-        let actor_id = super::super::validation::bounded_required_string(input.actor_id)?;
-        let reason_code = super::super::validation::bounded_required_string(input.reason_code)?;
-        let operation = input.command.operation();
-        let payload_hash = format!(
-            "{}:{}:{}:{}:{}:{}",
-            input.proxy_id, input.revision_id, input.expected_revision_id.as_ref().map(ToString::to_string).unwrap_or_default(),
-            actor_id, reason_code, input.approved
-        );
-        let mut state = self.state.lock().map_err(|_| super::shared::configuration_error())?;
-        if let Some(record) = state.check_idempotency(operation, &input.request_id, &payload_hash, &input.scope)? {
-            return state.replay_proxy(&record);
-        }
-        let key = input.proxy_id.to_string();
-        let current = state.proxies.get(&key).ok_or_else(ProxyError::proxy_not_found)?;
-        super::shared::ensure_scope_match(&current.scope, &input.scope)?;
-        if current.active_revision_id != input.expected_revision_id || current.active_revision_id.as_ref() != Some(&input.revision_id) {
-            return Err(ProxyError::revision_conflict());
-        }
-        let transition = super::super::lifecycle::LifecycleTransition::new(
-            current.lifecycle_state,
-            input.command,
-            input.approved,
-        )?;
-        let revision = state.revisions.get_mut(&super::shared::revision_key(&input.proxy_id, &input.revision_id)).ok_or_else(ProxyError::revision_not_found)?;
-        if !revision.published { return Err(ProxyError::immutable_revision()); }
-        revision.revision.lifecycle_state = transition.next_state;
-        let proxy = state.proxies.get_mut(&key).ok_or_else(ProxyError::proxy_not_found)?;
-        proxy.lifecycle_state = transition.next_state;
-        let response = proxy.clone().to_proxy(&state.revisions, None);
-        state.record_transition(super::transitions::LifecycleTransition::new(
-            operation, input.scope.clone(), input.proxy_id.clone(), Some(input.revision_id.clone()),
-            Some(transition.prior_state), transition.next_state, Some(actor_id),
-            reason_code, "committed",
-        ));
-        state.record_idempotency(IdempotencyRecord {
-            request_id: input.request_id, operation, payload_hash, proxy_id: key,
-            revision_id: None, scope: input.scope,
         });
         Ok(response)
     }

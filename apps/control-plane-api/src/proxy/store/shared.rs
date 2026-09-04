@@ -18,6 +18,8 @@ pub(super) const CREATE_OPERATION: &str = "create";
 pub(super) const UPDATE_DRAFT_OPERATION: &str = "update_draft";
 pub(super) const PUBLISH_OPERATION: &str = "publish_revision";
 pub(super) const RETIRE_OPERATION: &str = "retire_proxy";
+pub(super) const ROTATE_OPERATION: &str = "rotate_proxy_credentials";
+pub(super) const ROLLBACK_OPERATION: &str = "rollback_proxy";
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct StoreState {
@@ -308,6 +310,72 @@ pub(super) fn retire_payload_hash(input: &RetireProxy) -> String {
     }))
 }
 
+pub(super) fn lifecycle_payload_hash(
+    input: &super::TransitionProxyLifecycle,
+    actor_id: &str,
+    reason_code: &str,
+) -> String {
+    hash_json(&json!({
+        "request_id": input.request_id,
+        "workspace_id": input.scope.workspace_id,
+        "namespace_id": input.scope.namespace_id,
+        "proxy_id": input.proxy_id.to_string(),
+        "revision_id": input.revision_id.to_string(),
+        "expected_revision_id": input.expected_revision_id.as_ref().map(ToString::to_string),
+        "actor_id": actor_id,
+        "reason_code": reason_code,
+        "operation": input.command.operation(),
+        "approved": input.approved
+    }))
+}
+
+pub(super) fn rotate_payload_hash(input: &super::RotateProxyCredentials, actor_id: &str) -> String {
+    hash_json(&json!({
+        "request_id": input.request_id,
+        "workspace_id": input.scope.workspace_id,
+        "namespace_id": input.scope.namespace_id,
+        "proxy_id": input.proxy_id.to_string(),
+        "revision_id": input.revision_id.to_string(),
+        "expected_revision_id": input.expected_revision_id.as_ref().map(ToString::to_string),
+        "actor_id": actor_id,
+        "reason_code": input.reason_code,
+        "secret_refs": input.secret_refs.iter().map(SecretRef::as_str).collect::<Vec<_>>()
+    }))
+}
+
+pub(super) fn rollback_payload_hash(input: &super::RollbackProxy, actor_id: &str) -> String {
+    hash_json(&json!({
+        "request_id": input.request_id,
+        "workspace_id": input.scope.workspace_id,
+        "namespace_id": input.scope.namespace_id,
+        "proxy_id": input.proxy_id.to_string(),
+        "revision_id": input.revision_id.to_string(),
+        "target_revision_id": input.target_revision_id.to_string(),
+        "expected_revision_id": input.expected_revision_id.as_ref().map(ToString::to_string),
+        "actor_id": actor_id,
+        "reason_code": input.reason_code
+    }))
+}
+
+pub(super) fn validate_reason_code(value: String) -> Result<String, ProxyError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || byte == b'_'
+                || byte == b'.'
+                || byte == b'-'
+                || (index > 0 && byte == b'/')
+        })
+    {
+        return Err(ProxyError::invalid_proxy_spec(
+            "Proxy lifecycle reason codes must use bounded lowercase domain values.",
+        ));
+    }
+    Ok(value)
+}
+
 pub(super) fn parse_cursor(token: &str) -> Result<Option<(u128, String)>, ProxyError> {
     if token.is_empty() {
         return Ok(None);
@@ -319,6 +387,22 @@ pub(super) fn parse_cursor(token: &str) -> Result<Option<(u128, String)>, ProxyE
         .parse::<u128>()
         .map_err(|_| ProxyError::invalid_cursor())?;
     Ok(Some((created_at_micros, proxy_id.to_owned())))
+}
+
+#[cfg(feature = "postgres")]
+pub(super) fn parse_activity_cursor(token: &str) -> Result<(usize, ()), ProxyError> {
+    if token.is_empty() {
+        return Ok((0, ()));
+    }
+    token
+        .parse::<usize>()
+        .map(|offset| (offset, ()))
+        .map_err(|_| ProxyError::invalid_cursor())
+}
+
+#[cfg(feature = "postgres")]
+pub(super) fn list_activity_cursor(offset: usize) -> String {
+    offset.to_string()
 }
 
 pub(super) fn encode_cursor(created_at_micros: u128, proxy_id: &ProxyId) -> String {
@@ -347,87 +431,7 @@ pub(super) fn build_revision(
     Ok(revision)
 }
 
-pub(super) fn spec_json(spec: &ProxySpec) -> String {
-    json!({
-        "ingress": {
-            "transport": transport_to_wire(spec.ingress.transport),
-            "exposure": exposure_to_wire(spec.ingress.exposure),
-            "host": spec.ingress.host,
-            "path": spec.ingress.path,
-            "allowed_origins": spec.ingress.allowed_origins,
-            "protocol_revision": spec.ingress.protocol_revision,
-            "inbound_authentication_required": spec.ingress.inbound_authentication_required
-        },
-        "upstreams": spec.upstreams.iter().map(|upstream| json!({
-            "upstream_id": upstream.upstream_id,
-            "display_name": upstream.display_name,
-            "transport": transport_to_wire(upstream.transport),
-            "endpoint_or_command_ref": upstream.endpoint_or_command_ref,
-            "credential_ref": upstream.credential_ref.as_ref().map(SecretRef::as_str).unwrap_or_default(),
-            "secret_refs": upstream.secret_refs.iter().map(SecretRef::as_str).collect::<Vec<_>>(),
-            "server_identity": upstream.server_identity,
-            "tool_catalog_hash": upstream.tool_catalog_hash.as_deref().unwrap_or_default()
-        })).collect::<Vec<_>>(),
-        "exposed_tools": spec.exposed_tools.iter().map(|tool| json!({
-            "upstream_id": tool.upstream_id,
-            "tool_name": tool.tool_name,
-            "alias": tool.alias,
-            "classification": classification_to_wire(tool.classification)
-        })).collect::<Vec<_>>(),
-        "cli_profiles": spec.cli_profiles.iter().map(|profile| json!({
-            "profile_id": profile.profile_id,
-            "executable_ref": profile.executable_ref,
-            "executable_digest": profile.executable_digest,
-            "argv_template": profile.fixed_argv,
-            "argv_schema": {
-                "fields": profile.argv_schema.fields.iter().map(|field| json!({
-                    "name": field.name,
-                    "required": field.required
-                })).collect::<Vec<_>>()
-            },
-            "environment_allowlist": profile.environment_allowlist,
-            "secret_refs": profile.secret_refs.iter().map(SecretRef::as_str).collect::<Vec<_>>(),
-            "working_directory": profile.working_directory,
-            "filesystem_policy": profile.filesystem_policy,
-            "network_policy": profile.network_policy,
-            "shell": profile.shell,
-            "timeout_ms": profile.timeout_ms,
-            "max_output_bytes": profile.max_output_bytes,
-            "allowed_exit_codes": profile.allowed_exit_codes
-        })).collect::<Vec<_>>(),
-        "auth_bindings": spec.auth_bindings.iter().map(|binding| json!({
-            "binding_id": binding.binding_id,
-            "inbound_subject": binding.inbound_subject,
-            "outbound_credential_ref": binding.outbound_credential_ref.as_ref().map(SecretRef::as_str).unwrap_or_default(),
-            "scopes": binding.scopes
-        })).collect::<Vec<_>>(),
-        "governance_binding": {
-            "policy_id": spec.governance_binding.policy_id,
-            "approval_mode": approval_mode_to_wire(spec.governance_binding.approval_mode),
-            "data_classification": data_classification_to_wire(spec.governance_binding.data_classification),
-            "rate_limit": format!("{}/m", spec.governance_binding.rate_limit_per_minute),
-            "concurrency_limit": spec.governance_binding.concurrency_limit.to_string(),
-            "budget": format!("{}/d", spec.governance_binding.budget_limit_per_day),
-            "retention": format!("{}d", spec.governance_binding.retention_days)
-        },
-        "runtime_profile": {
-            "image_digest": spec.runtime_profile.image_digest,
-            "cpu_limit": spec.runtime_profile.cpu_limit,
-            "memory_limit": spec.runtime_profile.memory_limit,
-            "network_policy": spec.runtime_profile.network_policy,
-            "filesystem_policy": spec.runtime_profile.filesystem_policy,
-            "rootless": spec.runtime_profile.rootless,
-            "egress_destinations": spec.runtime_profile.network.destinations.iter().map(|destination| match destination {
-                crate::proxy::EgressDestination::Https { host, port, private_allowance } => json!({
-                    "host": host,
-                    "port": port,
-                    "private_destination_allowance": private_allowance_to_wire(*private_allowance)
-                })
-            }).collect::<Vec<_>>()
-        }
-    })
-    .to_string()
-}
+pub(super) use super::canonical::spec_json;
 
 #[allow(dead_code)]
 pub(super) fn parse_spec_json(input: &str) -> Result<ProxySpec, ProxyError> {
@@ -547,50 +551,4 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
-}
-
-fn transport_to_wire(value: crate::proxy::ProxyTransport) -> i32 {
-    match value {
-        crate::proxy::ProxyTransport::StreamableHttp => 1,
-        crate::proxy::ProxyTransport::Stdio => 2,
-    }
-}
-
-fn exposure_to_wire(value: crate::proxy::ProxyExposure) -> i32 {
-    match value {
-        crate::proxy::ProxyExposure::Private => 1,
-        crate::proxy::ProxyExposure::External => 2,
-    }
-}
-
-fn classification_to_wire(value: crate::proxy::ProxyToolClassification) -> i32 {
-    match value {
-        crate::proxy::ProxyToolClassification::Read => 1,
-        crate::proxy::ProxyToolClassification::BusinessWrite => 2,
-        crate::proxy::ProxyToolClassification::HighImpact => 3,
-    }
-}
-
-fn approval_mode_to_wire(value: crate::proxy::ApprovalMode) -> &'static str {
-    match value {
-        crate::proxy::ApprovalMode::None => "none",
-        crate::proxy::ApprovalMode::Operator => "operator",
-        crate::proxy::ApprovalMode::DualOperator => "dual-operator",
-    }
-}
-
-fn data_classification_to_wire(value: crate::proxy::DataClassification) -> &'static str {
-    match value {
-        crate::proxy::DataClassification::Public => "public",
-        crate::proxy::DataClassification::Internal => "internal",
-        crate::proxy::DataClassification::Confidential => "confidential",
-        crate::proxy::DataClassification::Restricted => "restricted",
-    }
-}
-
-fn private_allowance_to_wire(value: crate::proxy::PrivateDestinationAllowance) -> i32 {
-    match value {
-        crate::proxy::PrivateDestinationAllowance::Denied => 1,
-        crate::proxy::PrivateDestinationAllowance::Allowed => 2,
-    }
 }

@@ -81,21 +81,23 @@ pub use keycloak::{
 #[cfg(feature = "postgres")]
 pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
+#[cfg(feature = "postgres")]
+pub use proxy::PostgresProxyStore;
 pub use proxy::{
-    ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, DataClassification,
-    EgressDestination, ExposedTool, GovernanceBinding, InMemoryProxyStore, Ingress,
-    ListProxies, ListProxiesPage, McpProxy, McpProxyRevision, McpProxySummary, NetworkPolicy,
-    PrivateDestinationAllowance, ProxyDraft, ProxyError, ProxyExposure, ProxyId,
-    ProxyLifecycleStore, ProxyStoreBackend, TransitionProxyLifecycle,
-    ProxyLifecycleState, ProxyRedactionStatus, ProxyRevisionId, ProxyRevisionStore, ProxySpec,
-    ProxyStore, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
-    RuntimeProfile, SecretRef, UpdateProxyDraft, UpstreamBinding, CreateProxy,
-    McpProxyService, ProxyEventSink, ProxyRuntimeProvider, bounded_mcp_proxy_service_server,
+    ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, CreateProxy,
+    CreateProxyResult, DataClassification, EgressDestination, ExposedTool, GovernanceBinding,
+    InMemoryProxyStore, Ingress, ListProxies, ListProxiesPage, ListProxyActivity,
+    ListProxyActivityPage, McpProxy, McpProxyRevision, McpProxyService, McpProxySummary,
+    NetworkPolicy, PrivateDestinationAllowance, ProxyActivity, ProxyApprovalAuthority,
+    ProxyApprovalRequest, ProxyDraft, ProxyError, ProxyEventSink, ProxyExposure, ProxyId,
+    ProxyLifecycleEvent, ProxyLifecycleState, ProxyLifecycleStore, ProxyRedactionStatus,
+    ProxyRevisionId, ProxyRevisionStore, ProxyRuntimeProvider, ProxySpec, ProxyStore,
+    ProxyStoreBackend, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
+    RollbackProxy, RotateProxyCredentials, RuntimeProfile, SecretRef, TransitionProxyLifecycle,
+    UpdateProxyDraft, UpstreamBinding, bounded_mcp_proxy_service_server,
     parse_proxy_spec_wire_json, validate_mcp_proxy_revision, validate_proxy_spec,
     validate_proxy_spec_wire_json,
 };
-#[cfg(feature = "postgres")]
-pub use proxy::PostgresProxyStore;
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,

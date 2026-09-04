@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS mcp_proxy_idempotency (
 
 CREATE TABLE IF NOT EXISTS mcp_proxy_lifecycle_transitions (
     transition_id UUID PRIMARY KEY,
+    request_id UUID,
     proxy_id UUID NOT NULL REFERENCES mcp_proxies(proxy_id),
     operation TEXT NOT NULL CHECK (operation ~ '^[a-z][a-z0-9_]{0,63}$'),
     workspace_id TEXT NOT NULL,
@@ -67,3 +68,6 @@ CREATE TABLE IF NOT EXISTS mcp_proxy_lifecycle_transitions (
     status TEXT NOT NULL CHECK (status ~ '^[a-z][a-z0-9_.-]{0,63}$'),
     occurred_at_micros BIGINT NOT NULL CHECK (occurred_at_micros >= 0)
 );
+
+ALTER TABLE mcp_proxy_lifecycle_transitions
+    ADD COLUMN IF NOT EXISTS request_id UUID;

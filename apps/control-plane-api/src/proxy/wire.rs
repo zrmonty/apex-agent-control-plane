@@ -29,6 +29,9 @@ pub fn validate_proxy_spec_wire_json(input: &str) -> Result<(), ProxyError> {
     parse_proxy_spec_wire_json(input).map(|_| ())
 }
 
+mod proto_wire;
+pub(super) use proto_wire::proxy_spec_to_proto;
+
 impl TryFrom<proto::McpProxySpec> for ProxySpec {
     type Error = ProxyError;
 
