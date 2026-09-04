@@ -245,6 +245,9 @@ export type ProxyRevisionConfig = Readonly<{
   }>;
 }>;
 
+export type UpstreamConfig = ProxyRevisionConfig["upstreams"][number];
+export type ExposedTool = ProxyRevisionConfig["exposedTools"][number];
+
 export function parseProxyRevisionConfig(input: unknown): ProxyRevisionConfig {
   try {
     const parsed = proxyRevisionConfigSchema.parse(input) as ProxyRevisionConfig;
