@@ -6,12 +6,16 @@ use crate::{ExactScope, proto};
 
 mod error;
 mod lifecycle;
+mod provider;
+mod reconciler;
 mod service;
 mod store;
 mod validation;
 mod wire;
 
 pub use error::ProxyError;
+pub use provider::{DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput, RuntimeCommandRunner, RuntimeHandle};
+pub use reconciler::{ProxyRuntimeReconciler, RuntimeOperations};
 
 #[allow(unused_imports)]
 pub use lifecycle::{LifecycleCommand, LifecycleTransition, transition_state};

@@ -1,0 +1,28 @@
+{
+  "proxyId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+  "revisionId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+  "configHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ingress": {
+    "transport": "stdio",
+    "allowedOrigins": []
+  },
+  "upstreams": [],
+  "exposedTools": [],
+  "cliProfiles": [],
+  "authBindings": [],
+  "governance": {
+    "policyId": "mcp-proxy-test-read-only",
+    "approvalMode": "none",
+    "classification": "internal"
+  },
+  "runtime": {
+    "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cpuMillis": 500,
+    "memoryBytes": 268435456,
+    "pidLimit": 128,
+    "readOnlyRootfs": true,
+    "networkMode": "isolated",
+    "noNewPrivileges": true,
+    "droppedCapabilities": ["ALL"]
+  }
+}

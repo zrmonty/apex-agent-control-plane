@@ -1,0 +1,57 @@
+# Disposable managed MCP proxy profile.
+#
+# This overlay is intentionally narrow: the proxy has its own internal egress
+# network, no host ports, no Docker socket, no host mounts, and no raw secret
+# values. The control plane is the only component allowed to decide which
+# revision is provisioned in a real deployment.
+
+services:
+  mcp-proxy-portfolio:
+    image: apex-mcp-gateway:runtime-baseline
+    build:
+      context: ../..
+      dockerfile: apps/mcp-gateway/Dockerfile
+    environment:
+      APEX_MCP_PROXY_REVISION_CONFIG: /run/secrets/proxy_revision_config
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 128
+    cpus: "0.5"
+    mem_limit: 268m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks: [mcp-proxy-egress]
+    secrets:
+      - proxy_revision_config
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+
+  mcp-proxy-test-upstream:
+    image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+    command: ["python", "/opt/mcp-proxy-test/upstream.py"]
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 64
+    mem_limit: 128m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    volumes:
+      - ./mcp-proxy-test:/opt/mcp-proxy-test:ro
+    networks: [mcp-proxy-egress]
+
+networks:
+  mcp-proxy-egress:
+    internal: true
+
+secrets:
+  proxy_revision_config:
+    file: ./mcp-proxy-test/revision-config.json

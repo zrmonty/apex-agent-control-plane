@@ -94,6 +94,8 @@ pub use proxy::{
     ProxyRevisionId, ProxyRevisionStore, ProxyRuntimeProvider, ProxySpec, ProxyStore,
     ProxyStoreBackend, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
     RollbackProxy, RotateProxyCredentials, RuntimeProfile, SecretRef, TransitionProxyLifecycle,
+    DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput,
+    RuntimeCommandRunner, RuntimeHandle, ProxyRuntimeReconciler, RuntimeOperations,
     UpdateProxyDraft, UpstreamBinding, bounded_mcp_proxy_service_server,
     parse_proxy_spec_wire_json, validate_mcp_proxy_revision, validate_proxy_spec,
     validate_proxy_spec_wire_json,
