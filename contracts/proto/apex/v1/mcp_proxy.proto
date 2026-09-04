@@ -1,0 +1,403 @@
+syntax = "proto3";
+
+package apex.v1;
+
+// Managed MCP proxy control-plane contract.
+//
+// This is the operator-facing lifecycle surface for proxy resources. It is
+// separate from the existing ControlGateway command stream and carries only
+// redacted configuration, immutable revision identifiers, and secret
+// references.
+service McpProxyService {
+  rpc CreateProxy(CreateProxyRequest) returns (CreateProxyResponse);
+  rpc GetProxy(GetProxyRequest) returns (GetProxyResponse);
+  rpc ListProxies(ListProxiesRequest) returns (ListProxiesResponse);
+  rpc UpdateProxyDraft(UpdateProxyDraftRequest) returns (UpdateProxyDraftResponse);
+  rpc ValidateProxy(ValidateProxyRequest) returns (ValidateProxyResponse);
+  rpc DiscoverUpstream(DiscoverUpstreamRequest) returns (DiscoverUpstreamResponse);
+  rpc TestProxyConnection(TestProxyConnectionRequest) returns (TestProxyConnectionResponse);
+  rpc PublishProxyRevision(PublishProxyRevisionRequest) returns (PublishProxyRevisionResponse);
+  rpc DeployProxy(DeployProxyRequest) returns (DeployProxyResponse);
+  rpc PauseProxy(PauseProxyRequest) returns (PauseProxyResponse);
+  rpc ResumeProxy(ResumeProxyRequest) returns (ResumeProxyResponse);
+  rpc RotateProxyCredentials(RotateProxyCredentialsRequest) returns (RotateProxyCredentialsResponse);
+  rpc RollbackProxy(RollbackProxyRequest) returns (RollbackProxyResponse);
+  rpc RetireProxy(RetireProxyRequest) returns (RetireProxyResponse);
+  rpc ListProxyActivity(ListProxyActivityRequest) returns (ListProxyActivityResponse);
+}
+
+enum McpProxyLifecycleState {
+  MCP_PROXY_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  MCP_PROXY_LIFECYCLE_STATE_DRAFT = 1;
+  MCP_PROXY_LIFECYCLE_STATE_VALIDATING = 2;
+  MCP_PROXY_LIFECYCLE_STATE_AWAITING_APPROVAL = 3;
+  MCP_PROXY_LIFECYCLE_STATE_PROVISIONING = 4;
+  MCP_PROXY_LIFECYCLE_STATE_READY = 5;
+  MCP_PROXY_LIFECYCLE_STATE_DEGRADED = 6;
+  MCP_PROXY_LIFECYCLE_STATE_PAUSED = 7;
+  MCP_PROXY_LIFECYCLE_STATE_RETIRING = 8;
+  MCP_PROXY_LIFECYCLE_STATE_RETIRED = 9;
+  MCP_PROXY_LIFECYCLE_STATE_FAILED = 10;
+}
+
+enum McpProxyRedactionStatus {
+  MCP_PROXY_REDACTION_STATUS_UNSPECIFIED = 0;
+  MCP_PROXY_REDACTION_STATUS_REDACTED = 1;
+  MCP_PROXY_REDACTION_STATUS_PARTIALLY_REDACTED = 2;
+}
+
+enum McpProxyTransport {
+  MCP_PROXY_TRANSPORT_UNSPECIFIED = 0;
+  MCP_PROXY_TRANSPORT_STREAMABLE_HTTP = 1;
+  MCP_PROXY_TRANSPORT_STDIO = 2;
+}
+
+enum McpProxyExposure {
+  MCP_PROXY_EXPOSURE_UNSPECIFIED = 0;
+  MCP_PROXY_EXPOSURE_PRIVATE = 1;
+  MCP_PROXY_EXPOSURE_EXTERNAL = 2;
+}
+
+message CreateProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string display_name = 5;
+  string slug = 6;
+  optional string description = 7;
+  optional string owner = 8;
+  repeated string tags = 9;
+}
+
+message CreateProxyResponse {
+  McpProxy proxy = 1;
+  bool duplicate = 2;
+}
+
+message GetProxyRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string proxy_id = 3;
+}
+
+message GetProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message ListProxiesRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListProxiesResponse {
+  repeated McpProxySummary proxies = 1;
+  string next_page_token = 2;
+}
+
+message UpdateProxyDraftRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  optional string expected_revision_id = 5;
+  McpProxySpec draft = 6;
+}
+
+message UpdateProxyDraftResponse {
+  McpProxy proxy = 1;
+  McpProxyRevision revision = 2;
+}
+
+message ValidateProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  optional string expected_revision_id = 5;
+  McpProxySpec draft = 6;
+}
+
+message ValidateProxyResponse {
+  ProxyValidationReport report = 1;
+}
+
+message DiscoverUpstreamRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string upstream_id = 6;
+}
+
+message DiscoverUpstreamResponse {
+  ProxyUpstreamDiscovery discovery = 1;
+}
+
+message TestProxyConnectionRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string upstream_id = 6;
+}
+
+message TestProxyConnectionResponse {
+  ProxyConnectionTest result = 1;
+}
+
+message PublishProxyRevisionRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  optional string expected_revision_id = 5;
+  McpProxySpec draft = 6;
+}
+
+message PublishProxyRevisionResponse {
+  McpProxyRevision revision = 1;
+}
+
+message DeployProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+}
+
+message DeployProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message PauseProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  optional string reason_code = 6;
+}
+
+message PauseProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message ResumeProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+}
+
+message ResumeProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message RotateProxyCredentialsRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  optional string reason_code = 6;
+  repeated string secret_refs = 7;
+}
+
+message RotateProxyCredentialsResponse {
+  McpProxyRevision revision = 1;
+}
+
+message RollbackProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string target_revision_id = 6;
+  optional string reason_code = 7;
+}
+
+message RollbackProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message RetireProxyRequest {
+  optional string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  optional string reason_code = 6;
+}
+
+message RetireProxyResponse {
+  McpProxy proxy = 1;
+}
+
+message ListProxyActivityRequest {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string proxy_id = 3;
+  uint32 page_size = 4;
+  string page_token = 5;
+}
+
+message ListProxyActivityResponse {
+  repeated McpProxyActivityEntry activity = 1;
+  string next_page_token = 2;
+}
+
+message McpProxy {
+  string proxy_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string display_name = 4;
+  string slug = 5;
+  optional string description = 6;
+  optional string owner = 7;
+  McpProxyLifecycleState lifecycle_state = 8;
+  McpProxyRedactionStatus redaction_status = 9;
+  string active_revision_id = 10;
+  string draft_revision_id = 11;
+  McpProxySpec spec = 12;
+}
+
+message McpProxySummary {
+  string proxy_id = 1;
+  string display_name = 2;
+  string slug = 3;
+  string workspace_id = 4;
+  string namespace_id = 5;
+  McpProxyLifecycleState lifecycle_state = 6;
+  McpProxyRedactionStatus redaction_status = 7;
+  string active_revision_id = 8;
+}
+
+message McpProxyRevision {
+  string revision_id = 1;
+  string proxy_id = 2;
+  string config_hash = 3;
+  McpProxyLifecycleState lifecycle_state = 4;
+  McpProxyRedactionStatus redaction_status = 5;
+  McpProxySpec spec = 6;
+  string created_by = 7;
+  string created_at = 8;
+}
+
+message McpProxyActivityEntry {
+  string activity_id = 1;
+  string proxy_id = 2;
+  string revision_id = 3;
+  string occurred_at = 4;
+  string actor_id = 5;
+  string activity_type = 6;
+  optional string reason_code = 7;
+  McpProxyLifecycleState lifecycle_state = 8;
+  McpProxyRedactionStatus redaction_status = 9;
+  string summary = 10;
+}
+
+message ProxyValidationReport {
+  bool valid = 1;
+  repeated string error_messages = 2;
+  repeated string warning_messages = 3;
+  string validation_id = 4;
+  McpProxyRedactionStatus redaction_status = 5;
+}
+
+message ProxyUpstreamDiscovery {
+  string upstream_id = 1;
+  string server_identity = 2;
+  repeated string discovered_tools = 3;
+  repeated string discovered_resources = 4;
+  repeated string discovered_prompts = 5;
+  string schema_hash = 6;
+  McpProxyRedactionStatus redaction_status = 7;
+}
+
+message ProxyConnectionTest {
+  bool connected = 1;
+  string upstream_id = 2;
+  string server_identity = 3;
+  string summary = 4;
+  McpProxyRedactionStatus redaction_status = 5;
+}
+
+message McpProxySpec {
+  McpProxyIngress ingress = 1;
+  repeated McpProxyUpstreamBinding upstreams = 2;
+  repeated string exposed_tools = 3;
+  repeated McpProxyCliProfile cli_profiles = 4;
+  repeated McpProxyAuthBinding auth_bindings = 5;
+  McpProxyGovernanceBinding governance_binding = 6;
+  McpProxyRuntimeProfile runtime_profile = 7;
+}
+
+message McpProxyIngress {
+  McpProxyTransport transport = 1;
+  McpProxyExposure exposure = 2;
+  string host = 3;
+  string path = 4;
+  repeated string allowed_origins = 5;
+  string protocol_revision = 6;
+  bool inbound_authentication_required = 7;
+}
+
+message McpProxyUpstreamBinding {
+  string upstream_id = 1;
+  string display_name = 2;
+  McpProxyTransport transport = 3;
+  string endpoint_or_command_ref = 4;
+  string credential_ref = 5;
+  repeated string secret_refs = 6;
+  string server_identity = 7;
+  string tool_catalog_hash = 8;
+}
+
+message McpProxyCliProfile {
+  string profile_id = 1;
+  string executable_ref = 2;
+  string executable_digest = 3;
+  repeated string argv_template = 4;
+  repeated string environment_allowlist = 5;
+  repeated string secret_refs = 6;
+  string working_directory = 7;
+  string filesystem_policy = 8;
+  string network_policy = 9;
+  uint32 timeout_ms = 10;
+  uint32 max_output_bytes = 11;
+  repeated int32 allowed_exit_codes = 12;
+}
+
+message McpProxyAuthBinding {
+  string binding_id = 1;
+  string inbound_subject = 2;
+  string outbound_credential_ref = 3;
+  repeated string scopes = 4;
+}
+
+message McpProxyGovernanceBinding {
+  string policy_id = 1;
+  string approval_mode = 2;
+  string data_classification = 3;
+  string rate_limit = 4;
+  string concurrency_limit = 5;
+  string budget = 6;
+  string retention = 7;
+}
+
+message McpProxyRuntimeProfile {
+  string image_digest = 1;
+  string cpu_limit = 2;
+  string memory_limit = 3;
+  string network_policy = 4;
+  string filesystem_policy = 5;
+  bool rootless = 6;
+}

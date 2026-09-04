@@ -10,10 +10,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "../../contracts/proto/apex/v1/control.proto",
                 "../../contracts/proto/apex/v1/governance.proto",
+                "../../contracts/proto/apex/v1/mcp_proxy.proto",
             ],
             &["../../contracts/proto"],
         )?;
     println!("cargo:rerun-if-changed=../../contracts/proto/apex/v1/control.proto");
     println!("cargo:rerun-if-changed=../../contracts/proto/apex/v1/governance.proto");
+    println!("cargo:rerun-if-changed=../../contracts/proto/apex/v1/mcp_proxy.proto");
     Ok(())
 }

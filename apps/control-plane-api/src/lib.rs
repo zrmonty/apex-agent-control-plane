@@ -42,6 +42,7 @@ mod errors;
 mod governance;
 mod inbox;
 mod keycloak;
+mod proxy;
 mod outbox;
 mod replay;
 mod service;
