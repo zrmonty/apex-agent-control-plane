@@ -20,16 +20,16 @@ use super::env::{
 };
 use super::fanout::prepare_control_fanout;
 
+mod proxy;
 mod resolvers;
 mod storage;
-mod proxy;
 mod workers;
 
+use proxy::{build_runtime_provider, proxy_service_status};
 use resolvers::{
     build_agent_resolver, build_governance_service, build_operator_resolver, load_server_tls,
 };
 use storage::{build_ephemeral_store, open_inbox, open_outbox, open_proxy_store};
-use proxy::{build_runtime_provider, proxy_service_status};
 use workers::{
     spawn_health_monitor, spawn_inbox_reconciliation_worker, spawn_inbox_retention_worker,
     spawn_metrics_server, spawn_status_logger, wait_for_shutdown_signal,
@@ -79,7 +79,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_provider = build_runtime_provider()?;
     let mut proxy_service = McpProxyService::new(
         OperatorTokenAuthenticator::new(proxy_resolver),
-        proxy_store,
+        proxy_store.backend,
     )
     .with_event_sink(proxy_events);
     let proxy_is_serving = runtime_provider.is_some();
@@ -161,6 +161,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await;
         let shutdown = GatewayShutdown::default();
+        #[cfg(feature = "postgres")]
+        let proxy_evidence_worker = proxy_store.operations.map(|store| {
+            workers::spawn_proxy_evidence_worker(
+                store, Arc::clone(&outbox), health_reporter.clone(), shutdown.clone(),
+            )
+        });
         // Bound to a named variable, not `_`, and kept alive until `serve`
         // returns: this is the only thing that turns a durably accepted
         // command into an observable `control` event. Nothing on the accept
@@ -230,6 +236,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             .shutdowns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(handle) = fanout_worker {
+            let _ = handle.await;
+        }
+        #[cfg(feature = "postgres")]
+        if let Some(handle) = proxy_evidence_worker {
             let _ = handle.await;
         }
         let _ = inbox_retention_worker.await;

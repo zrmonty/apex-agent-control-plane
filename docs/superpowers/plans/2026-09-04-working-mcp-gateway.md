@@ -26,7 +26,7 @@
 
 ## Status and authorization
 
-This is a planning deliverable requested on 2026-09-04, not an assertion of completion. All implementation tasks are unchecked. The new browser/runtime boundaries are proposed choices described in the linked design. Writing this document does not execute changes, install services, expose endpoints, publish containers, or authorize production credentials.
+Execution was authorized by the subsequent request to execute this plan. Tasks 1 and 2 are implemented, verified and reviewed. The Task 16 gateway clock primitive is implemented, but end-to-end tracing is not. Remaining tasks and G0-G3 are incomplete. See the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md) for tested checkpoints and limitations. Execution authorization does not supply production credentials or enable real mutating business tools.
 
 The assessment baseline is `1a6df0908de0a604415fd5c1631f697656d679ee`. Existing components should be repaired/reused, not rewritten automatically. Earlier plans are context; this task sequence resolves the observed usability gaps and includes the subsequent explicit microsecond-tracing requirement.
 

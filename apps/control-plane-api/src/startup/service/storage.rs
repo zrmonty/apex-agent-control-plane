@@ -166,23 +166,37 @@ pub(super) fn build_ephemeral_store(
 
 /// Warms the MCP proxy store backend during startup so schema/application
 /// errors fail before the runtime enters its serve loop.
-pub(super) fn open_proxy_store() -> Result<std::sync::Arc<dyn ProxyStoreBackend>, Box<dyn std::error::Error>> {
+pub(super) struct OpenedProxyStore {
+    pub backend: std::sync::Arc<dyn ProxyStoreBackend>,
+    #[cfg(feature = "postgres")]
+    pub operations: Option<std::sync::Arc<PostgresProxyStore>>,
+}
+
+pub(super) fn open_proxy_store() -> Result<OpenedProxyStore, Box<dyn std::error::Error>> {
+    let postgres_url = control_postgres_url()?;
+    let profile = match std::env::var("APEX_CONTROL_PROXY_PROFILE") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(io::Error::other("invalid MCP proxy profile encoding").into()),
+    };
+    super::super::env::proxy_storage_profile_value(profile.as_deref(), postgres_url.is_some())?;
     #[cfg(feature = "postgres")]
     {
-        if let Some(url) = control_postgres_url()? {
+        if let Some(url) = postgres_url {
             let store = PostgresProxyStore::connect(&url).map_err(|error| {
-                io::Error::other(format!(
-                    "failed to open mcp proxy store: {}",
-                    error.code()
-                ))
+                io::Error::other(format!("failed to open mcp proxy store: {}", error.code()))
             })?;
             println!("apex-control-plane-api proxy store backend: postgres");
-            return Ok(std::sync::Arc::new(store));
+            let store = std::sync::Arc::new(store);
+            return Ok(OpenedProxyStore {
+                backend: store.clone(),
+                operations: Some(store),
+            });
         }
     }
     #[cfg(not(feature = "postgres"))]
     {
-        if control_postgres_url()?.is_some() {
+        if postgres_url.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "APEX_CONTROL_POSTGRES_URL is set but this binary was not built with --features postgres",
@@ -191,7 +205,11 @@ pub(super) fn open_proxy_store() -> Result<std::sync::Arc<dyn ProxyStoreBackend>
         }
     }
     println!("apex-control-plane-api proxy store backend: in-memory (development only)");
-    Ok(std::sync::Arc::new(InMemoryProxyStore::default()))
+    Ok(OpenedProxyStore {
+        backend: std::sync::Arc::new(InMemoryProxyStore::default()),
+        #[cfg(feature = "postgres")]
+        operations: None,
+    })
 }
 
 /// Selects the durable outbox backend, mirroring `event-ingest`'s

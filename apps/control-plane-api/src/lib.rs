@@ -87,21 +87,25 @@ pub use outbox::{ControlOutboxBackend, submit_command};
 pub use proxy::PostgresProxyStore;
 pub use proxy::{
     ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, CreateProxy,
-    CreateProxyResult, DataClassification, EgressDestination, ExposedTool, GovernanceBinding,
-    InMemoryProxyStore, Ingress, ListProxies, ListProxiesPage, ListProxyActivity,
-    ListProxyActivityPage, McpProxy, McpProxyRevision, McpProxyService, McpProxySummary,
-    NetworkPolicy, PrivateDestinationAllowance, ProxyActivity, ProxyApprovalAuthority,
-    ProxyApprovalRequest, ProxyDraft, ProxyError, ProxyEventSink, ProxyExposure, ProxyId,
-    ProxyLifecycleEvent, ProxyLifecycleState, ProxyLifecycleStore, ProxyRedactionStatus,
-    DurableProxyEventSink, ProxyRevisionId, ProxyRevisionStore, ProxyRuntimeProvider, ProxySpec, ProxyStore,
-    ProxyStoreBackend, ProxyToolClassification, ProxyTransport, PublishRevision, RetireProxy,
-    RollbackProxy, RotateProxyCredentials, RuntimeProfile, SecretRef, TransitionProxyLifecycle,
-    DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput,
-    RuntimeCommandRunner, RuntimeHandle, ProxyRuntimeReconciler, RuntimeOperations,
+    CreateProxyResult, DataClassification, DockerCommandRunner, DockerProxyProvider,
+    DurableProxyEventSink, EgressDestination, ExposedTool, GovernanceBinding, InMemoryProxyStore,
+    Ingress, ListProxies, ListProxiesPage, ListProxyActivity, ListProxyActivityPage, McpProxy,
+    McpProxyRevision, McpProxyService, McpProxySummary, NetworkPolicy, PrivateDestinationAllowance,
+    ProxyActivity, ProxyApprovalAuthority, ProxyApprovalRequest, ProxyDraft, ProxyError,
+    ProxyEventSink, ProxyExposure, ProxyId, ProxyLifecycleEvent, ProxyLifecycleState,
+    ProxyLifecycleStore, ProxyRedactionStatus, ProxyRevisionId, ProxyRevisionStore,
+    ProxyRuntimeProvider, ProxyRuntimeReconciler, ProxySpec, ProxyStore, ProxyStoreBackend,
+    ProxyToolClassification, ProxyTransport, PublishRevision, Readiness, RetireProxy,
+    RollbackProxy, RotateProxyCredentials, RuntimeCommandOutput, RuntimeCommandRunner,
+    RuntimeHandle, RuntimeOperations, RuntimeProfile, SecretRef, TransitionProxyLifecycle,
     UpdateProxyDraft, UpstreamBinding, bounded_mcp_proxy_service_server,
     parse_proxy_spec_wire_json, validate_mcp_proxy_revision, validate_proxy_spec,
     validate_proxy_spec_wire_json,
 };
+#[cfg(feature = "postgres")]
+pub use proxy::{LeasedProxyOperation, SubmitProxyOperation};
+#[cfg(feature = "postgres")]
+pub use proxy::{ProxyEvidenceRelayStatus, spawn_proxy_evidence_relay};
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,

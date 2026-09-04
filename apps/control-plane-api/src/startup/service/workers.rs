@@ -11,6 +11,11 @@ use apex_control_plane_api::{
     SharedEphemeralStore,
 };
 
+#[cfg(feature = "postgres")]
+mod proxy_evidence;
+#[cfg(feature = "postgres")]
+pub(super) use proxy_evidence::spawn_proxy_evidence_worker;
+
 const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const INBOX_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5);
 const INBOX_RECONCILIATION_BATCH: usize = 256;

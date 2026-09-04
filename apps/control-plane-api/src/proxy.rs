@@ -7,6 +7,8 @@ use crate::{ExactScope, proto};
 mod error;
 mod events;
 mod lifecycle;
+#[cfg(feature = "postgres")]
+mod operation_worker;
 mod provider;
 mod reconciler;
 mod service;
@@ -16,7 +18,12 @@ mod wire;
 
 pub use error::ProxyError;
 pub use events::DurableProxyEventSink;
-pub use provider::{DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput, RuntimeCommandRunner, RuntimeHandle};
+#[cfg(feature = "postgres")]
+pub use operation_worker::{ProxyEvidenceRelayStatus, spawn_proxy_evidence_relay};
+pub use provider::{
+    DockerCommandRunner, DockerProxyProvider, Readiness, RuntimeCommandOutput,
+    RuntimeCommandRunner, RuntimeHandle,
+};
 pub use reconciler::{ProxyRuntimeReconciler, RuntimeOperations};
 
 #[allow(unused_imports)]
@@ -34,6 +41,8 @@ pub use store::{
     ProxyLifecycleStore, ProxyRevisionStore, ProxyStore, ProxyStoreBackend, PublishRevision,
     RetireProxy, RollbackProxy, RotateProxyCredentials, TransitionProxyLifecycle, UpdateProxyDraft,
 };
+#[cfg(feature = "postgres")]
+pub use store::{LeasedProxyOperation, SubmitProxyOperation};
 use validation::{bounded_host, bounded_required_string, is_lowercase_uuidv7, is_scope_identifier};
 pub use validation::{validate_mcp_proxy_revision, validate_proxy_spec};
 pub use wire::{parse_proxy_spec_wire_json, validate_proxy_spec_wire_json};

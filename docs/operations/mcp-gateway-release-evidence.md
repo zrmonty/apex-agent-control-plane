@@ -6,6 +6,40 @@ This ledger covers the acceptance registry portion of [task 1](../superpowers/pl
 All 15 required live cases are registered and **unimplemented**. Selecting any case produces `ACCEPTANCE_NOT_IMPLEMENTED`, a failed result and exit 1. No case is counted as skipped or passed.
 This does not complete task 1's contracts, task 21's live runners, any G0-G3 gate, or the [implementation plan](../superpowers/plans/2026-09-04-working-mcp-gateway.md).
 
+## Implementation checkpoints — not live acceptance
+
+- `1161c95`: shared contracts, strict Rust/TypeScript JSON conversion, reproducible
+  generation and compatibility checks. The registry's failure status is unchanged.
+- `d9cc788`: monotonic/high-resolution gateway clock primitive, including exact
+  1/7/999-microsecond and above-2^53 tests. This is not end-to-end tracing or a UI waterfall.
+- Task 2 work after `d9cc788`: durable desired operations, frozen evidence intents,
+  fencing, version guards and startup relay are implemented. Dedicated PostgreSQL
+  tests cover transaction rollback, process death, uncertain enqueue, connection
+  loss, competing leases, completed-command immutability, stale targets, schema
+  incompatibility, fairness, lock-contention shutdown and cancellation cleanup.
+  See the [operation journal guide](mcp-proxy-operation-journal.md). This checkpoint
+  does not connect the Task 9 runtime controller or implement browser sessions.
+- Task 2 reviewed transport work: an async-backed synchronous worker adapter adds overall
+  connect and SQL deadlines, socket-driver cancellation, bounded DNS resource use
+  and nested rollback. Startup-wrapper abort, healthy-primary/blocked-backup DNS,
+  stalled trust-loader and real TLS verification/handshake regressions now pass.
+  Independent specification/security review approved Task 2 after all findings
+  were corrected and verified. Production release remains blocked on later tasks.
+
+Fresh local command evidence after the deadline-adapter and serial-harness fixes:
+`cargo test -p apex-durability -p apex-control-plane-api --locked --all-features
+--quiet`, with `RUST_TEST_THREADS=1` and the dedicated PostgreSQL environment,
+passed 267 control library tests, 31 startup tests, 10 contract tests, 21 recovery
+entries (17 real database cases plus 4 child-process entry helpers), and 116
+durability tests. Recovery took 33.85 seconds and durability 41.28 seconds.
+All-feature/all-target Clippy with `-D warnings` passed for both packages.
+The worker's 14 socket/DNS/trust/TLS tests also passed in parallel and serial runs.
+Staged-diff, changed-Rust formatting and all-tracked-source 600-line checks passed.
+Existing separately environment-gated
+live suites are not counted as live evidence; their zero-time returns do not prove
+deployed behavior. The dedicated journal database was present and its tests did
+not skip. These numbers are a development checkpoint, not a G0–G3 result.
+
 | Verification class | Entry point | What a successful command establishes |
 | --- | --- | --- |
 | Registry inventory | `node scripts/verify-working-mcp-gateway.mjs --list` | Metadata is available; `releaseGate: not-run`. |

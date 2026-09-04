@@ -28,6 +28,8 @@ pub mod security {
 
 mod backoff;
 #[cfg(feature = "postgres")]
+mod postgres_client;
+#[cfg(feature = "postgres")]
 mod postgres_transport;
 
 pub mod permissions {
@@ -78,7 +80,13 @@ pub use outbox::{
 };
 pub use persistence::{FindingJournal, FindingPersistenceError};
 #[cfg(feature = "postgres")]
-pub use postgres_transport::{apply_postgres_schema, connect_postgres};
+pub use postgres_client::{
+    PostgresClientError, PostgresClientOps, PostgresConnection, PostgresTransaction,
+};
+#[cfg(feature = "postgres")]
+pub use postgres_transport::{
+    apply_postgres_schema, connect_postgres, connect_postgres_for_worker,
+};
 pub use publisher::{
     InMemoryPublisher, JetStreamPublisher, JetStreamTransport, RetryingJetStreamTransport,
 };

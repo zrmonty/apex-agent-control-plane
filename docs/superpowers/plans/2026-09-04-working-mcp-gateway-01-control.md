@@ -53,7 +53,7 @@ message ProxyStageTiming {
 }
 ```
 
-- [ ] Write failing compatibility tests for different ingress/upstream URLs, canonical approval enums (`none`, `operator`, `dual-operator`), URL-shaped audience, unknown fields, UUIDv4 rejection, unsafe numeric truncation, and missing capability rejection. Create complete control/runtime fixtures from `proxy::tests::valid_proxy_spec()` and `deploy/compose/mcp-proxy-test/revision-config.json`, with distinct real-shape endpoints and no credentials.
+- [x] Write failing compatibility tests for different ingress/upstream URLs, canonical approval enums (`none`, `operator`, `dual-operator`), URL-shaped audience, unknown fields, UUIDv4 rejection, unsafe numeric truncation, and missing capability rejection. Create complete control/runtime fixtures from `proxy::tests::valid_proxy_spec()` and `deploy/compose/mcp-proxy-test/revision-config.json`, with distinct real-shape endpoints and no credentials.
 
 ```js
 import assert from "node:assert/strict";
@@ -66,10 +66,10 @@ assert.equal(BigInt(trace.startedAtUnixUs) + 1n, 1788480000123457n);
 
 Set that trace fixture's `startedAtUnixUs` to `"1788480000123456"`; include `durationNs: "7000"`. Also round-trip `"9007199254740993"` to catch conversions above JavaScript's safe integer range.
 
-- [ ] Run `pnpm --dir contracts test`; expect missing generation/contract behavior, not an unrelated fixture syntax error. Commit no passing claims from nonexistent tests.
-- [ ] Implement generation with pinned local tooling: Rust descriptor + pbjson serialization and TypeScript protobuf generator/JSON adapters. Generate the browser RPC allowlist from approved services. Add field-count/size validation and descriptor compatibility checking. Generated config validation must preserve unknown-field rejection. Keep the frozen EventEnvelope v1 hash schema unchanged; trace metadata lives in its existing `data` object.
-- [ ] Run `pnpm --dir contracts generate`, `pnpm --dir contracts test`, `pnpm --dir contracts verify`, `cargo test -p apex-control-plane-api --locked`. `verify` generates into a temporary directory and byte-compares output; it also rejects incompatible field-number reuse. Register acceptance cases that fail explicitly until implemented, with `--list` available immediately.
-- [ ] Review and commit only contract/generation/fixture/harness files: `feat: define working gateway contracts and compatibility gates`.
+- [x] Run `pnpm --dir contracts test`; expect missing generation/contract behavior, not an unrelated fixture syntax error. Commit no passing claims from nonexistent tests.
+- [x] Implement generation with pinned local tooling: Rust descriptor + pbjson serialization and TypeScript protobuf generator/JSON adapters. Generate the browser RPC allowlist from approved services. Add field-count/size validation and descriptor compatibility checking. Generated config validation must preserve unknown-field rejection. Keep the frozen EventEnvelope v1 hash schema unchanged; trace metadata lives in its existing `data` object.
+- [x] Run `pnpm --dir contracts generate`, `pnpm --dir contracts test`, `pnpm --dir contracts verify`, `cargo test -p apex-control-plane-api --locked`. `verify` generates into a temporary directory and byte-compares output; it also rejects incompatible field-number reuse. Register acceptance cases that fail explicitly until implemented, with `--list` available immediately.
+- [x] Review and commit only contract/generation/fixture/harness files: `feat: define working gateway contracts and compatibility gates`.
 
 ## Task 2: Durable operations and atomic lifecycle evidence intent
 
@@ -86,7 +86,7 @@ Set that trace fixture's `startedAtUnixUs` to `"1788480000123456"`; include `dur
 
 An intent relay calls the existing outbox; it never publishes downstream directly. Each transition has its own event ID; request IDs correlate transitions but are not reused as every transition's event identity. Duplicate retries reproduce original IDs/timestamps/payloads exactly.
 
-- [ ] Add crash-boundary tests: transaction rollback, crash after commit/before relay, crash after enqueue/before relay marking, repeated request with different body, stale revision, competing controllers, and production startup without Postgres.
+- [x] Add crash-boundary tests: transaction rollback, crash after commit/before relay, crash after enqueue/before relay marking, repeated request with different body, stale revision, competing controllers, and production startup without Postgres.
 
 ```sql
 -- Assertions run by the recovery test after killing and restarting its child.
@@ -96,10 +96,10 @@ SELECT count(*) FROM mcp_proxy_evidence_intents WHERE operation_id = $1;
 -- Every intent must eventually have exactly one canonical accepted event ID.
 ```
 
-- [ ] Run `cargo test -p apex-control-plane-api --features postgres --test proxy_operation_recovery -- --nocapture`; initially fail on absent journal/recovery, and fail clearly if its dedicated test database is unavailable.
-- [ ] Implement migrations, compare-and-swap generation, lease/fence checks and relay. Preserve existing scopes/idempotency. Require the explicit `production` profile to use Postgres; permit memory only under a named `development` profile. Use bounded blocking DB work outside Tokio worker threads. Keep migration locks and rollback-safe additive schema changes.
-- [ ] Re-run the recovery suite against real Postgres and `cargo test -p apex-control-plane-api --all-features`. Verify state survives restart without client retries, events survive downstream outage, and no duplicate transition results from lease handoff.
-- [ ] Commit: `feat: persist proxy operations and lifecycle evidence intents`.
+- [x] Run `cargo test -p apex-control-plane-api --features postgres --test proxy_operation_recovery -- --nocapture`; initially fail on absent journal/recovery, and fail clearly if its dedicated test database is unavailable.
+- [x] Implement migrations, compare-and-swap generation, lease/fence checks and relay. Preserve existing scopes/idempotency. Require the explicit `production` profile to use Postgres; permit memory only under a named `development` profile. Use bounded blocking DB work outside Tokio worker threads. Keep migration locks and rollback-safe additive schema changes.
+- [x] Re-run the recovery suite against real Postgres and `cargo test -p apex-control-plane-api --all-features`. Verify state survives restart without client retries, events survive downstream outage, and no duplicate transition results from lease handoff.
+- [x] Commit: `feat: persist proxy operations and lifecycle evidence intents`.
 
 ## Task 3: Rust browser sessions and the generated management bridge
 

@@ -3,7 +3,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use postgres::Client;
+use crate::{PostgresClientOps, PostgresConnection as Client};
 use uuid::Uuid;
 
 use super::postgres_replay::PostgresReplayOps;
@@ -86,14 +86,36 @@ pub(super) fn capacity_margin(capacity: usize) -> usize {
 
 impl PostgresOutbox {
     pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, GatewayError> {
+        Self::connect_using(connection_string, capacity, |url| {
+            crate::connect_postgres(url).map(Client::Standard)
+        })
+    }
+
+    /// Same authoritative outbox with worker socket/statement/lock deadlines.
+    pub fn connect_for_worker(
+        connection_string: &str,
+        capacity: usize,
+    ) -> Result<Self, GatewayError> {
+        Self::connect_using(
+            connection_string,
+            capacity,
+            crate::connect_postgres_for_worker,
+        )
+    }
+
+    fn connect_using(
+        connection_string: &str,
+        capacity: usize,
+        connect: fn(&str) -> Result<Client, ()>,
+    ) -> Result<Self, GatewayError> {
         if capacity == 0 || capacity > 1_000_000 {
             return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
         }
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_outbox_configuration());
         }
-        let mut client = crate::postgres_transport::connect_postgres(connection_string)
-            .map_err(|_| GatewayError::invalid_outbox_configuration())?;
+        let mut client =
+            connect(connection_string).map_err(|_| GatewayError::invalid_outbox_configuration())?;
         crate::postgres_transport::apply_postgres_schema(
             &mut client,
             OUTBOX_SCHEMA_LOCK,

@@ -6,8 +6,12 @@ use crate::ExactScope;
 
 mod canonical;
 mod memory;
+#[cfg(feature = "postgres")]
+mod operations;
 mod shared;
 mod transitions;
+#[cfg(feature = "postgres")]
+pub use operations::{LeasedProxyOperation, SubmitProxyOperation};
 
 #[cfg(feature = "postgres")]
 mod postgres;

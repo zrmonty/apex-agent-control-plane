@@ -26,6 +26,10 @@ use apex_durability::{GatewayError, GatewayErrorCode};
 
 use crate::errors::CommandError;
 
+#[cfg(test)]
+#[path = "outbox/relay_tests.rs"]
+mod relay_tests;
+
 pub struct ControlOutboxBackend {
     inner: BackendInner,
 }
@@ -75,6 +79,32 @@ impl ControlOutboxBackend {
                     .lock()
                     .map_err(|_| CommandError::internal())?;
                 Ok(f(&mut guard))
+            }
+        }
+    }
+
+    /// Best-effort maintenance must not queue behind a busy request or fanout
+    /// connection. Try each bounded pool slot once; retain the intent on failure.
+    #[cfg(any(feature = "postgres", test))]
+    pub(crate) fn try_with_lock<T>(
+        &self,
+        f: impl FnOnce(&mut Box<dyn EventOutbox + Send>) -> T,
+    ) -> Result<T, CommandError> {
+        match &self.inner {
+            BackendInner::Single(inner) => {
+                let mut guard = inner.try_lock().map_err(|_| CommandError::internal())?;
+                Ok(f(&mut guard))
+            }
+            BackendInner::Pool { connections, next } => {
+                let start = next.fetch_add(1, Ordering::Relaxed) % connections.len();
+                for offset in 0..connections.len() {
+                    if let Ok(mut guard) =
+                        connections[(start + offset) % connections.len()].try_lock()
+                    {
+                        return Ok(f(&mut guard));
+                    }
+                }
+                Err(CommandError::internal())
             }
         }
     }
@@ -200,7 +230,21 @@ pub fn submit_command(
     request: &IngestRequest,
 ) -> Result<SubmitOutcome, CommandError> {
     let result = backend.with_lock(|outbox| outbox.enqueue(request))??;
-    Ok(match result {
+    Ok(submit_outcome(result))
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn try_submit_command(
+    backend: &ControlOutboxBackend,
+    request: &IngestRequest,
+) -> Result<SubmitOutcome, CommandError> {
+    Ok(submit_outcome(
+        backend.try_with_lock(|outbox| outbox.enqueue(request))??,
+    ))
+}
+
+fn submit_outcome(result: EnqueueResult) -> SubmitOutcome {
+    match result {
         EnqueueResult::Enqueued => SubmitOutcome {
             duplicate: false,
             delivered: false,
@@ -213,7 +257,7 @@ pub fn submit_command(
             duplicate: true,
             delivered: true,
         },
-    })
+    }
 }
 
 impl From<apex_durability::GatewayError> for CommandError {
@@ -239,7 +283,8 @@ pub struct RecoveringPostgresOutbox {
 #[cfg(feature = "postgres")]
 impl RecoveringPostgresOutbox {
     pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, GatewayError> {
-        let inner = apex_durability::PostgresOutbox::connect(connection_string, capacity)?;
+        let inner =
+            apex_durability::PostgresOutbox::connect_for_worker(connection_string, capacity)?;
         Ok(Self {
             connection_string: connection_string.to_owned(),
             capacity,
@@ -254,7 +299,7 @@ impl RecoveringPostgresOutbox {
         match operation(&mut self.inner) {
             Ok(value) => Ok(value),
             Err(error) if error.code == GatewayErrorCode::Internal => {
-                let replacement = apex_durability::PostgresOutbox::connect(
+                let replacement = apex_durability::PostgresOutbox::connect_for_worker(
                     &self.connection_string,
                     self.capacity,
                 )?;

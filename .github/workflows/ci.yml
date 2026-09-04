@@ -162,6 +162,21 @@ jobs:
 
   rust-control-plane:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          # Disposable CI database; these credentials are lab-only.
+          POSTGRES_USER: apex_journal_ci
+          POSTGRES_PASSWORD: apex_journal_lab_only
+          POSTGRES_DB: apex_proxy_journal
+        ports:
+          - "127.0.0.1:15432:5432"
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U apex_journal_ci -d apex_proxy_journal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: apps/control-plane-api
@@ -182,11 +197,22 @@ jobs:
             ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Test (control gateway)
         env:
+          # Required by journal/recovery tests; plaintext is loopback/lab-only.
+          APEX_PROXY_JOURNAL_TEST_DATABASE_URL: "postgres://apex_journal_ci:apex_journal_lab_only@127.0.0.1:15432/apex_proxy_journal?sslmode=disable"
+          APEX_ALLOW_POSTGRES_PLAINTEXT: "1"
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
         run: cargo test --locked --features "test-support,postgres,valkey" -- --nocapture
+      - name: Test durable worker failure boundaries
+        env:
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          RUST_BACKTRACE: "1"
+        # Dependency unit tests are not run by the application test command.
+        # These self-contained real-socket/TLS tests require no external database.
+        run: cargo test -p apex-durability --locked --all-features --lib postgres_transport::worker -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"

@@ -1,6 +1,6 @@
 # Working MCP Gateway: Delivery Design
 
-**Status:** Proposed execution baseline; implementation has not started under this document.
+**Status:** Approved execution baseline; implementation is underway. Release gates remain unproven; see the [evidence ledger](../../operations/mcp-gateway-release-evidence.md).
 **Date:** 2026-09-04
 **Assessed revision:** `1a6df0908de0a604415fd5c1631f697656d679ee`
 **Request:** Turn the current application into a working managed MCP gateway, including microsecond-level tracing.
