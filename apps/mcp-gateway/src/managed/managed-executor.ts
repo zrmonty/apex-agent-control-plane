@@ -138,7 +138,10 @@ export class ManagedExecutor {
       }
       return filtered.output;
     } catch (error: unknown) {
-      if (error instanceof GatewayError && error.code === "EVENT_ADMISSION_FAILED") {
+      if (
+        error instanceof GatewayError &&
+        ["EVENT_ADMISSION_FAILED", "FILTERING_FAILED", "INVALID_INPUT"].includes(error.code)
+      ) {
         throw error;
       }
       throw new GatewayError("ADAPTER_FAILED", "managed proxy execution failed safely");
