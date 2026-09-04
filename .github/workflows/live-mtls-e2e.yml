@@ -108,7 +108,7 @@ jobs:
           # shared between them: the inbox redelivers for 30s, so a command
           # left over from an earlier proof would otherwise reappear inside a
           # later one.
-          chmod 644 secrets/control-operator-tokens secrets/control-agent-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password 2>/dev/null || true
+          chmod 644 secrets/control-operator-tokens secrets/control-agent-tokens secrets/control-nats-username secrets/control-nats-password secrets/valkey-control-password secrets/mcp-gateway-token 2>/dev/null || true
           if [ ! -f secrets/ingest-bearer-token ]; then
             printf 'gateway-ref-token' > secrets/ingest-bearer-token
             chmod 644 secrets/ingest-bearer-token
