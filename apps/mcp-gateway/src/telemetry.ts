@@ -68,7 +68,6 @@ export function createToolExecutionEvent(options: {
     scope: request.scope,
     tool: request.tool,
     action: request.action,
-    resource: request.resource,
     backend,
     status,
     latencyMs,

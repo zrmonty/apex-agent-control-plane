@@ -46,7 +46,6 @@ export type ToolExecutionEvent = {
   readonly scope: AuthorizationRequest["scope"];
   readonly tool: AuthorizationRequest["tool"];
   readonly action: AuthorizationRequest["action"];
-  readonly resource: string;
   readonly backend: string;
   readonly status: "succeeded" | "denied" | "failed";
   readonly latencyMs: number;

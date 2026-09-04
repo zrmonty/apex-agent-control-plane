@@ -15,7 +15,11 @@ import {
   buildPortfolioReadAuthorizationRequest,
 } from "./context.js";
 import { filterPortfolioRecord, type FilterResult, type RawPortfolioRecord } from "./filtering.js";
-import { parsePortfolioReadInput } from "./schemas.js";
+import {
+  AuthorizationDecisionSchema,
+  PolicySnapshotSchema,
+  parsePortfolioReadInput,
+} from "./schemas.js";
 import {
   NullSafeTelemetry,
   createToolExecutionEvent,
@@ -124,7 +128,12 @@ export class GatewayExecutor {
 
     let decision: AuthorizationDecision;
     try {
-      decision = await this.dependencies.governance.authorize(request);
+      const response = await this.dependencies.governance.authorize(request);
+      const parsedDecision = AuthorizationDecisionSchema.safeParse(response);
+      if (!parsedDecision.success) {
+        return toErrorResult("GOVERNANCE_UNAVAILABLE");
+      }
+      decision = parsedDecision.data;
     } catch (error: unknown) {
       return toErrorResult(toGatewayError(error, "GOVERNANCE_UNAVAILABLE").code);
     }
@@ -164,7 +173,12 @@ export class GatewayExecutor {
 
     let policy: PolicySnapshot;
     try {
-      policy = await this.dependencies.governance.getPolicy(request.scope);
+      const response = await this.dependencies.governance.getPolicy(request.scope);
+      const parsedPolicy = PolicySnapshotSchema.safeParse(response);
+      if (!parsedPolicy.success) {
+        return toErrorResult("GOVERNANCE_UNAVAILABLE");
+      }
+      policy = parsedPolicy.data;
     } catch (error: unknown) {
       return toErrorResult(toGatewayError(error, "GOVERNANCE_UNAVAILABLE").code);
     }

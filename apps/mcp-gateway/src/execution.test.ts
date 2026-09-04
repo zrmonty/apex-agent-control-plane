@@ -15,6 +15,7 @@ import {
   type ToolExecutionEvent,
 } from "./contracts.js";
 import { GatewayExecutor } from "./execution.js";
+import { StaticLocalApex } from "./governance/local.js";
 import type { RawPortfolioRecord } from "./filtering.js";
 import type { PortfolioAdapter } from "./adapters/portfolio.js";
 
@@ -72,14 +73,14 @@ function approvalDecision(): AuthorizationDecision {
 class RecordingGovernance implements ApexGovernance {
   readonly requests: AuthorizationRequest[] = [];
   readonly policyScopes: AuthorizationRequest["scope"][] = [];
-  readonly decision: AuthorizationDecision;
-  readonly policy: PolicySnapshot;
+  readonly decision: AuthorizationDecision | unknown;
+  readonly policy: PolicySnapshot | unknown;
   readonly authorizeError?: Error;
   readonly policyError?: Error;
 
   constructor(options: {
-    decision: AuthorizationDecision;
-    policy?: PolicySnapshot;
+    decision: AuthorizationDecision | unknown;
+    policy?: PolicySnapshot | unknown;
     authorizeError?: Error;
     policyError?: Error;
   }) {
@@ -91,7 +92,7 @@ class RecordingGovernance implements ApexGovernance {
           workspaceId: "northstar",
           namespaceId: "research",
         },
-        policyId: options.decision.policyId,
+        policyId: "local-read-v1",
         revision: 1,
         tool: "portfolio.read",
         action: "read",
@@ -108,7 +109,7 @@ class RecordingGovernance implements ApexGovernance {
       throw this.authorizeError;
     }
 
-    return this.decision;
+    return this.decision as AuthorizationDecision;
   }
 
   async getPolicy(scope: AuthorizationRequest["scope"]): Promise<PolicySnapshot> {
@@ -118,7 +119,7 @@ class RecordingGovernance implements ApexGovernance {
       throw this.policyError;
     }
 
-    return this.policy;
+    return this.policy as PolicySnapshot;
   }
 }
 
@@ -175,8 +176,8 @@ class RecordingTelemetry implements SafeTelemetry {
 }
 
 type FixtureOptions = {
-  decision?: AuthorizationDecision;
-  policy?: PolicySnapshot;
+  decision?: AuthorizationDecision | unknown;
+  policy?: PolicySnapshot | unknown;
   authorizeError?: Error;
   policyError?: Error;
   emitError?: Error;
@@ -354,6 +355,40 @@ test("policy mismatch fails closed before adapter access", async () => {
   assert.equal(events.events.length, 0);
 });
 
+test("malformed policy snapshots fail safely before adapter access", async () => {
+  const { executor, adapter, events } = fixture({
+    policy: {
+      policyId: "local-read-v1",
+      revision: 1,
+      tool: "portfolio.read",
+      action: "read",
+      classification: "confidential",
+    },
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "GOVERNANCE_UNAVAILABLE", ["northstar-401k"]);
+  assert.equal(adapter.readCount, 0);
+  assert.equal(events.events.length, 0);
+});
+
+test("malformed authorization decisions fail safely before adapter access", async () => {
+  const { executor, adapter, events } = fixture({
+    decision: {
+      outcome: "allowed",
+      policyId: "local-read-v1",
+      reasonCode: "policy.allowed",
+    },
+  });
+
+  const result = await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assertSafeErrorResult(result, "GOVERNANCE_UNAVAILABLE", ["northstar-401k"]);
+  assert.equal(adapter.readCount, 0);
+  assert.equal(events.events.length, 0);
+});
+
 test("adapter failure returns a safe adapter error", async () => {
   const { executor, events } = fixture({
     readError: new Error("portfolio backend exploded"),
@@ -403,6 +438,14 @@ test("event admission failure prevents an allowed result", async () => {
   assert.equal(events.events[0]?.status, "succeeded");
 });
 
+test("execution events exclude caller-supplied portfolio identifiers", async () => {
+  const { executor, events } = fixture();
+
+  await executor.executePortfolioRead({ portfolioId: "northstar-401k" });
+
+  assert.equal(JSON.stringify(events.events[0]).includes("northstar-401k"), false);
+});
+
 test("denied-event admission failure preserves the denial and records safe telemetry only", async () => {
   const { executor, adapter, telemetry, events } = fixture({
     decision: deniedDecision(),
@@ -419,4 +462,43 @@ test("denied-event admission failure preserves the denial and records safe telem
   assert.equal(adapter.readCount, 0);
   assert.equal(events.events.length, 1);
   assert.deepEqual(telemetry.codes, ["EVENT_ADMISSION_FAILED"]);
+});
+
+test("local event admission rejects non-metadata fields without persisting them", async () => {
+  const sink: ToolExecutionEvent[] = [];
+  const apex = new StaticLocalApex({ eventSink: sink });
+  const event = {
+    caller: {
+      principal: "spiffe://apex/agent/research",
+      agentId: "research-agent",
+    },
+    scope: {
+      workspaceId: "northstar",
+      namespaceId: "research",
+    },
+    tool: "portfolio.read",
+    action: "read",
+    backend: "local-portfolio",
+    status: "succeeded",
+    latencyMs: 1,
+    retryCount: 0,
+    sizes: {
+      inputBytes: 10,
+      sourceBytes: 20,
+      filteredBytes: 15,
+      outputBytes: 15,
+    },
+    filtering: { removedFields: ["client.tax_id"] },
+    policy: {
+      outcome: "allowed",
+      policyId: "local-read-v1",
+      reasonCode: "policy.allowed",
+      revision: 1,
+    },
+    trace: { traceId: "trace-001", spanId: "span-001" },
+    rawRecord: rawPortfolioFixture,
+  };
+
+  await assert.rejects(apex.emit(event as ToolExecutionEvent));
+  assert.deepEqual(sink, []);
 });

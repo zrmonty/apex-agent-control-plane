@@ -18,4 +18,4 @@ Thin TypeScript MCP gateway for governed, read-only `portfolio.read` access over
 2. Build the package with `pnpm build` or a direct TypeScript runner if policy wrappers block `pnpm`.
 3. Start the gateway with `pnpm start`.
 
-The local adapter is intentionally explicit and test-oriented: `StaticLocalApex` provides fixed local governance/event behavior and `LocalPortfolioAdapter` serves the seeded `northstar-401k` portfolio snapshot.
+The current wiring is local/test-only: `StaticLocalApex` and `LocalPortfolioAdapter` are the only active execution path today. Live Apex governance and event clients are deferred to a later task. `StaticLocalApex` provides fixed local governance/event behavior and `LocalPortfolioAdapter` serves the seeded `northstar-401k` portfolio snapshot.

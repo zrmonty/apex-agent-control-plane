@@ -35,3 +35,73 @@ export type PortfolioReadInput = z.infer<typeof PortfolioReadInputSchema>;
 export function parsePortfolioReadInput(value: unknown): PortfolioReadInput {
   return PortfolioReadInputSchema.parse(value);
 }
+
+const scopeSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    namespaceId: z.string().min(1),
+  })
+  .strict();
+
+export const AuthorizationDecisionSchema = z
+  .object({
+    outcome: z.enum(["allowed", "denied", "requires_approval"]),
+    policyId: z.string().min(1),
+    reasonCode: z.string().min(1),
+    fieldRestrictions: z.array(z.string()),
+  })
+  .strict();
+
+export const PolicySnapshotSchema = z
+  .object({
+    scope: scopeSchema,
+    policyId: z.string().min(1),
+    revision: z.number().int().nonnegative(),
+    tool: z.literal("portfolio.read"),
+    action: z.literal("read"),
+    classification: z.literal("confidential"),
+  })
+  .strict();
+
+export const ToolExecutionEventSchema = z
+  .object({
+    caller: z
+      .object({
+        principal: z.string().min(1),
+        agentId: z.string().min(1),
+      })
+      .strict(),
+    scope: scopeSchema,
+    tool: z.literal("portfolio.read"),
+    action: z.literal("read"),
+    backend: z.string().min(1),
+    status: z.enum(["succeeded", "denied", "failed"]),
+    latencyMs: z.number().finite().nonnegative(),
+    retryCount: z.number().int().nonnegative(),
+    sizes: z
+      .object({
+        inputBytes: z.number().int().nonnegative(),
+        sourceBytes: z.number().int().nonnegative(),
+        filteredBytes: z.number().int().nonnegative(),
+        outputBytes: z.number().int().nonnegative(),
+      })
+      .strict(),
+    filtering: z
+      .object({ removedFields: z.array(z.string()) })
+      .strict(),
+    policy: z
+      .object({
+        outcome: z.enum(["allowed", "denied", "requires_approval"]),
+        policyId: z.string().min(1),
+        reasonCode: z.string().min(1),
+        revision: z.number().int().nonnegative(),
+      })
+      .strict(),
+    trace: z
+      .object({
+        traceId: z.string().min(1),
+        spanId: z.string().min(1),
+      })
+      .strict(),
+  })
+  .strict();

@@ -8,6 +8,7 @@ import type {
   PolicySnapshot,
   ToolExecutionEvent,
 } from "../contracts.js";
+import { ToolExecutionEventSchema } from "../schemas.js";
 
 const LOCAL_POLICY_ID = "local-read-v1";
 const LOCAL_POLICY_REVISION = 1;
@@ -84,16 +85,42 @@ export class StaticLocalApex implements ApexGovernance, ApexEvents {
   }
 
   async emit(event: ToolExecutionEvent): Promise<{ readonly eventId: string }> {
+    const metadata = ToolExecutionEventSchema.parse(event);
+
     this.#eventSink?.push({
-      ...event,
-      filtering: {
-        removedFields: [...event.filtering.removedFields],
+      caller: {
+        principal: metadata.caller.principal,
+        agentId: metadata.caller.agentId,
       },
-      sizes: { ...event.sizes },
-      policy: { ...event.policy },
-      trace: { ...event.trace },
-      caller: { ...event.caller },
-      scope: { ...event.scope },
+      scope: {
+        workspaceId: metadata.scope.workspaceId,
+        namespaceId: metadata.scope.namespaceId,
+      },
+      tool: metadata.tool,
+      action: metadata.action,
+      backend: metadata.backend,
+      status: metadata.status,
+      latencyMs: metadata.latencyMs,
+      retryCount: metadata.retryCount,
+      filtering: {
+        removedFields: [...metadata.filtering.removedFields],
+      },
+      sizes: {
+        inputBytes: metadata.sizes.inputBytes,
+        sourceBytes: metadata.sizes.sourceBytes,
+        filteredBytes: metadata.sizes.filteredBytes,
+        outputBytes: metadata.sizes.outputBytes,
+      },
+      policy: {
+        outcome: metadata.policy.outcome,
+        policyId: metadata.policy.policyId,
+        reasonCode: metadata.policy.reasonCode,
+        revision: metadata.policy.revision,
+      },
+      trace: {
+        traceId: metadata.trace.traceId,
+        spanId: metadata.trace.spanId,
+      },
     });
 
     return { eventId: `evt-${randomUUID()}` };
