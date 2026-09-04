@@ -1,6 +1,6 @@
 # Managed MCP proxy threat model
 
-Status: implementation baseline for the Apex managed proxy platform  
+Status: implementation baseline for the Apex managed proxy platform
 Scope: control-plane lifecycle, one isolated OCI runtime per proxy, upstream
 sessions, fixed CLI profiles, operator UI, and durable activity evidence.
 
