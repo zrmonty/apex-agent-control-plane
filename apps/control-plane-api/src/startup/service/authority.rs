@@ -17,6 +17,12 @@ pub(super) fn prepare(
         settings.enrollment_file,
     )
     .map_err(|_| unavailable())?;
+    let files = match settings.deployment_bindings_file {
+        Some(path) => files
+            .with_deployment_bindings_file(path)
+            .map_err(|_| unavailable())?,
+        None => files,
+    };
     RuntimeAuthorityOwner::new(files, &database)
         .map(Some)
         .map_err(|_| unavailable())

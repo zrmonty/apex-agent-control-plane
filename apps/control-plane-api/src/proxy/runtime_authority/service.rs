@@ -22,11 +22,25 @@ use crate::proxy::RuntimeOperationSnapshot;
 pub struct RuntimeAuthorityService {
     client: Client<RuntimeOperationSnapshot>,
     shared: Arc<Shared>,
+    deployment_enabled: bool,
 }
 
 impl RuntimeAuthorityService {
-    pub(super) fn new(client: Client<RuntimeOperationSnapshot>, shared: Arc<Shared>) -> Self {
-        Self { client, shared }
+    pub(super) fn new(
+        client: Client<RuntimeOperationSnapshot>,
+        shared: Arc<Shared>,
+        deployment_enabled: bool,
+    ) -> Self {
+        Self {
+            client,
+            shared,
+            deployment_enabled,
+        }
+    }
+
+    /// Whether the root explicitly configured the protected deployment catalog.
+    pub fn deployment_resolution_enabled(&self) -> bool {
+        self.deployment_enabled
     }
 }
 
@@ -54,6 +68,23 @@ impl proto::runtime_authority_service_server::RuntimeAuthorityService for Runtim
         &self,
         request: tonic::Request<CheckRuntimeAuthorityRequest>,
     ) -> Result<tonic::Response<RuntimeAuthoritySnapshot>, tonic::Status> {
+        Ok(tonic::Response::new(
+            self.observe(request, false).await?.authority,
+        ))
+    }
+}
+
+pub(super) struct Observation {
+    pub authority: RuntimeAuthoritySnapshot,
+    pub deployment: Option<(proto::RuntimeConfiguration, String)>,
+}
+
+impl RuntimeAuthorityService {
+    pub(super) async fn observe(
+        &self,
+        request: tonic::Request<CheckRuntimeAuthorityRequest>,
+        resolve: bool,
+    ) -> Result<Observation, tonic::Status> {
         let started = Instant::now();
         let claims = RequestClaims::parse(&request).map_err(RuntimeAuthorityError::status)?;
         let budget = claims.budget;
@@ -87,6 +118,28 @@ impl proto::runtime_authority_service_server::RuntimeAuthorityService for Runtim
         // against the DB's own interval, never a cross-host wall-clock comparison.
         check_elapsed(started, Duration::from_micros(remaining)).map_err(|_| not_current())?;
         let claims = request.get_ref();
+        let deployment = if resolve {
+            let catalog = selected
+                .deployment
+                .as_ref()
+                .filter(|_| self.deployment_enabled)
+                .ok_or_else(|| RuntimeAuthorityError::Unavailable.status())?;
+            let target = claims
+                .target
+                .as_ref()
+                .ok_or_else(|| RuntimeAuthorityError::InvalidRequest.status())?;
+            let config = catalog
+                .compile(
+                    target,
+                    pair.installation_id(),
+                    binding.host_policy_version,
+                    &stored.revision,
+                )
+                .map_err(RuntimeAuthorityError::status)?;
+            Some((config, catalog.version().to_owned()))
+        } else {
+            None
+        };
         let response = RuntimeAuthoritySnapshot {
             schema_version: 1,
             target: claims.target.clone(),
@@ -108,12 +161,29 @@ impl proto::runtime_authority_service_server::RuntimeAuthorityService for Runtim
         if response.encoded_len() > 4096 {
             return Err(RuntimeAuthorityError::Unavailable.status());
         }
+        if let Some((configuration, version)) = &deployment {
+            // Include complete resolution envelope sizing before the final lease,
+            // request-budget and metadata checks (not after their handoff).
+            let encoded = proto::RuntimeDeploymentSnapshot {
+                schema_version: 1,
+                authority: Some(response.clone()),
+                configuration: Some(configuration.clone()),
+                deployment_bindings_version: version.clone(),
+            }
+            .encoded_len();
+            if encoded > 270_336 {
+                return Err(RuntimeAuthorityError::Unavailable.status());
+            }
+        }
         check_elapsed(started, budget).map_err(RuntimeAuthorityError::status)?;
         check_elapsed(started, Duration::from_micros(remaining)).map_err(|_| not_current())?;
         self.shared
             .recheck(&selected)
             .map_err(RuntimeAuthorityError::status)?;
-        Ok(tonic::Response::new(response))
+        Ok(Observation {
+            authority: response,
+            deployment,
+        })
     }
 }
 

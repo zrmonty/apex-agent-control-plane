@@ -223,6 +223,10 @@ pub(crate) fn run_until(
             .add_service(bounded_mcp_proxy_service_server(proxy_service))
             .add_service(apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(governance_service));
         #[cfg(feature = "postgres")]
+        let server = server.add_optional_service(authority_service.as_ref()
+            .filter(|service| service.deployment_resolution_enabled()).cloned()
+            .map(apex_control_plane_api::bounded_runtime_deployment_service_server));
+        #[cfg(feature = "postgres")]
         let server = server.add_optional_service(authority_service.map(
             apex_control_plane_api::bounded_runtime_authority_service_server));
         #[cfg(feature = "postgres")]

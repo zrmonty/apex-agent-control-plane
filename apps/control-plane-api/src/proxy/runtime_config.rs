@@ -17,6 +17,14 @@ mod network;
 mod schemas;
 mod validation;
 
+#[cfg(feature = "postgres")]
+pub(super) fn validate_deployment_limits(
+    pid_limit: u32,
+    telemetry: &proto::ProxyTelemetryPolicy,
+) -> Result<(), ProxyError> {
+    validation::limits(pid_limit, telemetry)
+}
+
 /// Deployment-owned metadata, never browser input or resolved secret material.
 /// The runtime agent must independently verify its catalogs, reference namespace,
 /// network policy and operation fencing before installing the resulting config.

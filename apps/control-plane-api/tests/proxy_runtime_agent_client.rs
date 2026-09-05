@@ -1,6 +1,8 @@
 #![cfg(feature = "postgres")]
 //! Real production control root + PostgreSQL + separately compiled agent client.
 //! The probe supplies test-only controller ingress, never a provisioning service.
+#[path = "proxy_runtime_agent_client/deployment.rs"]
+mod deployment;
 #[allow(dead_code)]
 #[path = "proxy_runtime_authority/material.rs"]
 mod material;
@@ -57,6 +59,16 @@ fn actual_agent_client_checks_production_root_and_current_postgres_lease() {
         "controller",
     );
     let checked_after = operation::database_now(&mut fixture.client());
+    root::assert_refusal(
+        root.probe_mode(
+            &materials,
+            &request,
+            &fixture.revision.config_hash,
+            "controller",
+            true,
+        ),
+        "RUNTIME_AUTHORITY_CLIENT_REMOTE_REFUSAL",
+    ); // No catalog opt-in: the actual root does not register resolution.
     let snapshot: RuntimeAuthoritySnapshot = serde_json::from_value(
         result
             .get("snapshot")

@@ -12,7 +12,7 @@ pub(super) fn deployment(
     require(
         is_scope_identifier(&b.scope.workspace_id) && is_scope_identifier(&b.scope.namespace_id),
     )?;
-    require(b.generation > 0 && (16..=1024).contains(&b.pid_limit))?;
+    require(b.generation > 0)?;
     let ingress = &revision.spec.ingress;
     let profile = &revision.spec.runtime_profile;
     // CLI/stdio need the later agent's approved executable and confinement
@@ -57,9 +57,16 @@ pub(super) fn deployment(
                 && url.port_or_known_default().map(u32::from) == Some(grant.port)
         }))?;
     }
-    let t = &b.telemetry;
+    limits(b.pid_limit, &b.telemetry)
+}
+
+pub(super) fn limits(
+    pid_limit: u32,
+    t: &crate::proto::ProxyTelemetryPolicy,
+) -> Result<(), ProxyError> {
     require(
-        (1..=1_000_000).contains(&t.full_trace_sample_per_million)
+        (16..=1024).contains(&pid_limit)
+            && (1..=1_000_000).contains(&t.full_trace_sample_per_million)
             && (1..=32).contains(&t.max_stages)
             && (1..=65_536).contains(&t.max_summary_bytes)
             && (1..=128).contains(&t.max_spans)

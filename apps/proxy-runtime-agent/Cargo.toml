@@ -7,6 +7,14 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Real Linux UID/GID filesystem acceptance; required separately in CI.
+staging-integration = []
+
+[[test]]
+name = "secret_staging"
+required-features = ["staging-integration"]
+
 [dependencies]
 # Canonical wire types are generated independently, never imported from an app.
 apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
@@ -22,6 +30,10 @@ tonic-prost = "0.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 url = "2"
 uuid = "1"
+zeroize = "=1.9.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process", "pipe"] }
 
 [build-dependencies]
 pbjson-build = "=0.9.0"
@@ -30,6 +42,7 @@ protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 
 [dev-dependencies]
+uuid = { version = "1", features = ["v7"] }
 base64 = "0.22"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sha2 = "0.10.9"

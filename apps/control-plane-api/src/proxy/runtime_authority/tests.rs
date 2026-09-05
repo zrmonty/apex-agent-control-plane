@@ -1,5 +1,6 @@
 //! Component contracts only: synthetic metadata is not TLS or live PG proof.
 
+mod deployment_policy;
 mod enrollment;
 mod enrollment_bounds;
 mod enrollment_selection;

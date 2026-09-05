@@ -1,0 +1,52 @@
+syntax = "proto3";
+package apex.v1;
+
+import "apex/v1/proxy_runtime.proto";
+import "apex/v1/proxy_runtime_authority.proto";
+import "apex/v1/proxy_trace.proto";
+
+// mTLS-only online resolution. Caller configuration is never accepted.
+service RuntimeDeploymentService {
+  rpc ResolveRuntimeDeployment(CheckRuntimeAuthorityRequest) returns (RuntimeDeploymentSnapshot);
+}
+
+// Point-in-time authoritative data, NOT permission for container effects.
+message RuntimeDeploymentSnapshot {
+  uint32 schema_version = 1;
+  RuntimeAuthoritySnapshot authority = 2;
+  RuntimeConfiguration configuration = 3;
+  string deployment_bindings_version = 4;
+}
+
+// Deployment-owned file, not a browser API. Strict ProtoJSON, <=262144 bytes.
+message RuntimeDeploymentBindingsDocument {
+  uint32 schema_version = 1;
+  string version = 2;
+  uint64 valid_from_unix_us = 3;
+  uint64 expires_at_unix_us = 4;
+  repeated RuntimeDeploymentProfile profiles = 5;
+}
+
+message RuntimeDeploymentImage {
+  string digest = 1;
+  string image_ref = 2;
+}
+
+// Exact immutable revision/installation selection; generation comes from PG.
+message RuntimeDeploymentProfile {
+  string installation_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string host_policy_version = 6;
+  string resource_url = 7;
+  repeated RuntimeDeploymentImage images = 8;
+  repeated string secret_refs = 9;
+  repeated RuntimeToolSchema tool_schemas = 10;
+  repeated string approved_output_profiles = 11;
+  repeated RuntimeNetworkGrant network_grants = 12;
+  RuntimeAuthentication auth = 13;
+  ProxyTelemetryPolicy telemetry = 14;
+  uint32 pid_limit = 15;
+}

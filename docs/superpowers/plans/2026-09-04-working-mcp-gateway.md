@@ -65,10 +65,16 @@ bounded PostgreSQL worker and explicit startup registration. Actual mTLS/PG and
 production-root tests pass on Windows and Linux. The runtime-agent callback
 client now validates actual Controller TLS and every snapshot binding; a test-only
 two-hop ingress reaches the real production control root and PostgreSQL.
-Provisioning starts with strict image-catalog selection, not signature verification.
-Production agent ingress, trusted staging and engine effects remain
-open; no production provisioning or Serving claim follows from this read-only
-snapshot. See the [callback guide](../../operations/mcp-runtime-authority.md) and
+Provisioning now includes strict image-catalog selection, real Linux Cosign
+verification and confined secret staging. Required CI acceptance exercises the
+actual verifier and root filesystem behavior. The approved
+[online deployment-binding continuation](2026-09-05-runtime-deployment-binding.md)
+adds published RuntimeConfiguration resolution through the real control root and
+agent client. Production ingress, launch-context/material binding, bounded
+blocking-owner composition and durable engine effects remain open;
+these primitives are not connected to EnsureRuntime and do not establish Serving.
+See the [provisioning guide](../../operations/mcp-runtime-provisioning.md),
+[callback guide](../../operations/mcp-runtime-authority.md) and
 [runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)
 for the exact slice boundaries and post-review verification.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.

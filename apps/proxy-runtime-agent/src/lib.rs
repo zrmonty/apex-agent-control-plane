@@ -1,17 +1,23 @@
-//! Runtime wire/inspection, current-operation client and image catalog boundary.
+//! Runtime wire/inspection, authority client and provisioning prerequisites.
 //!
 //! The mTLS authority client returns a point-in-time snapshot, not an execution
-//! permit. There is no production listener, engine call, secret staging or
-//! admission here. Catalog selection does not verify image signatures. These
-//! independent gates must be settled before any future Ensure side effect.
+//! permit. Linux signature verification and confined secret staging are separate
+//! synchronous boundaries. There is no production listener, engine call or
+//! admission here. Online resolution binds RuntimeConfiguration to publication;
+//! launch-context/material binding and owned effect composition must still be
+//! settled before any future Ensure side effect.
 
 pub mod authority;
+#[cfg(target_os = "linux")]
+mod command;
 mod error;
 pub mod image_catalog;
 mod inspect;
 mod inspect_decode;
 mod manifest;
+pub mod secrets;
 mod shapes;
+pub mod signature;
 mod target;
 
 pub use error::RuntimeError;

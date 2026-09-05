@@ -83,12 +83,28 @@ impl Materials {
     }
 
     pub fn owner(&self, url: &str) -> OwnerGuard {
+        self.owner_with_deployment(url, None)
+    }
+
+    pub fn owner_with_deployment(&self, url: &str, document: Option<&Value>) -> OwnerGuard {
         let files = RuntimeAuthorityPolicyFiles::new(
             self.root.clone(),
             "peer.json".into(),
             "enrollment.json".into(),
         )
         .unwrap();
+        let files = if let Some(document) = document {
+            let path = self.root.join("deployment.json");
+            fs::write(&path, serde_json::to_vec(document).unwrap()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            files.with_deployment_bindings_file(path).unwrap()
+        } else {
+            files
+        };
         OwnerGuard(RuntimeAuthorityOwner::new(files, url).unwrap())
     }
 }

@@ -34,6 +34,15 @@ impl Root {
     }
 
     pub fn start(fixture: &Fixture, pki: &Pki, materials: &Materials) -> Self {
+        Self::start_with_deployment(fixture, pki, materials, None)
+    }
+
+    pub fn start_with_deployment(
+        fixture: &Fixture,
+        pki: &Pki,
+        materials: &Materials,
+        deployment: Option<&serde_json::Value>,
+    ) -> Self {
         let directory = Directory::new();
         for name in [
             "ca.pem",
@@ -52,6 +61,13 @@ impl Root {
         let address = reservation.local_addr().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_apex-control-plane-api"));
         process::clean(&mut command);
+        if let Some(deployment) = deployment {
+            directory.write("deployment.json", &serde_json::to_vec(deployment).unwrap());
+            command.env(
+                "APEX_CONTROL_RUNTIME_DEPLOYMENT_BINDINGS_FILE",
+                "deployment.json",
+            );
+        }
         command
             .envs([
                 ("APEX_CONTROL_POSTGRES_URL", fixture.database.url.as_str()),
@@ -107,6 +123,17 @@ impl Root {
         config_hash: &str,
         caller: &str,
     ) -> serde_json::Value {
+        self.probe_mode(materials, request, config_hash, caller, false)
+    }
+
+    pub fn probe_mode(
+        &self,
+        materials: &Materials,
+        request: &CheckRuntimeAuthorityRequest,
+        config_hash: &str,
+        caller: &str,
+        resolve_deployment: bool,
+    ) -> serde_json::Value {
         let executable = PathBuf::from(
             std::env::var_os("APEX_RUNTIME_AUTHORITY_CLIENT_PROBE").expect(
                 "build the actual runtime_authority_probe example and set its exact path; no skip",
@@ -118,6 +145,7 @@ impl Root {
         let input = serde_json::json!({
             "authority_endpoint": self.endpoint, "peer_policy": materials.peer,
             "request": request, "config_hash": config_hash, "caller": caller,
+            "resolve_deployment": resolve_deployment,
         });
         let path = self.directory.write(
             &format!("input-{}.json", uuid::Uuid::now_v7()),

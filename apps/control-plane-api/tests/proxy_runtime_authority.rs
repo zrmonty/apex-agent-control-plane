@@ -6,6 +6,8 @@ mod blocked_policy;
 mod callback;
 #[path = "proxy_runtime_authority/concurrency.rs"]
 mod concurrency;
+#[path = "proxy_runtime_authority/deployment.rs"]
+mod deployment;
 #[path = "proxy_runtime_authority/material.rs"]
 mod material;
 #[path = "proxy_runtime_authority/observer.rs"]

@@ -15,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "../../contracts/proto/apex/v1/proxy_runtime.proto",
                 "../../contracts/proto/apex/v1/proxy_runtime_authority.proto",
+                "../../contracts/proto/apex/v1/proxy_runtime_deployment.proto",
             ],
             &["../../contracts/proto"],
         )?;
@@ -24,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for file in [
         "proxy_runtime.proto",
         "proxy_runtime_authority.proto",
+        "proxy_runtime_deployment.proto",
         "mcp_proxy.proto",
         "proxy_management.proto",
         "proxy_trace.proto",

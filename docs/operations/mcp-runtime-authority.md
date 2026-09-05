@@ -184,7 +184,11 @@ test requires `APEX_RUNTIME_AUTHORITY_CLIENT_PROBE` to name the freshly built ex
 executable. CI obtains that exact path from Cargo's artifact output before running
 control-plane tests; missing prerequisites fail, rather than skip, the test.
 
-The next boundary is [restricted provisioning](mcp-runtime-provisioning.md).
+The same client now supports a separate [authoritative deployment resolution](mcp-runtime-deployment.md)
+RPC. Both call types share the eight-call ceiling and pinned channel. Resolution
+does not enlarge the check-only snapshot or its 4 KiB envelope. It requires a
+separate protected catalog opt-in; production ingress and
+[restricted provisioning](mcp-runtime-provisioning.md) remain open.
 
 ## Verification
 

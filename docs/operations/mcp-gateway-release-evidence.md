@@ -8,6 +8,24 @@ This does not complete task 1's contracts, task 21's live runners, any G0-G3 gat
 
 ## Implementation checkpoints — not live acceptance
 
+- Task 7 provisioning prerequisites (2026-09-05, uncommitted after `1a040b8`):
+  real Linux Cosign verification, bounded child ownership and confined secret
+  staging are independently reviewed. Windows package verification passes 103
+  tests, including unsupported-platform staging refusal. Linux passes 28 staging
+  tests, 12 process tests and five signature tests (including real positive/negative
+  verification, filesystem attacks/held executable and UID1001 acceptance).
+  The four opt-in signature acceptance tests were explicitly executed, not counted
+  from their ignored ordinary-unit status. Linux also reran 3 snapshot, 8 catalog
+  and 43 runtime-boundary cases. Windows/Linux all-target, all-feature Clippy and
+  eight Node CI-contract tests pass. New source files are at most 279 lines.
+  CI now requires the root filesystem and real-signature acceptance separately
+  from ordinary nonroot tests; the updated workflow has not yet run on GitHub.
+  These are primitive/component tests, not the registered G0–G3 live cases.
+  Production ingress, trusted full published-manifest binding, fixed blocking-owner
+  composition and durable container effects remain open. See the
+  [provisioning guide](mcp-runtime-provisioning.md). No EnsureRuntime, Serving,
+  production-readiness or end-to-end tracing claim follows from this checkpoint.
+
 - `1161c95`: shared contracts, strict Rust/TypeScript JSON conversion, reproducible
   generation and compatibility checks. The registry's failure status is unchanged.
 - `d9cc788`: monotonic/high-resolution gateway clock primitive, including exact
@@ -595,6 +613,56 @@ end-to-end microsecond traces and release gates remain incomplete. No merge,
 push or GitHub CI result is claimed.
 
 ## Runtime continuation
+
+### Online deployment configuration binding — September 5, 2026
+
+The [approved binding continuation](../superpowers/plans/2026-09-05-runtime-deployment-binding.md)
+implements a separate mTLS resolution RPC, protected/versioned deployment catalog,
+published-revision compilation and a pinned agent resolution client. The existing
+check-only RPC and browser allowlist remain unchanged. See the
+[operator contract](mcp-runtime-deployment.md) for exact configuration and bounds.
+
+Verified in the isolated `codex/working-mcp-gateway` worktree:
+
+- Windows Rust 1.98: **91** authority component tests, including catalog compilation,
+  metadata generation and invalid-limit publication/refresh refusal; **10** existing
+  authority startup tests; **9** wire and **3** malformed-codec tests passed.
+  Final serial rerun also passed **13** actual authority mTLS/PostgreSQL tests and
+  **2** cross-process production-root cases. A preceding parallel run encountered
+  Windows socket error 10055 while opening a fixture connection; no code or host
+  networking settings were changed for the successful serial rerun.
+- Windows runtime-configuration compiler/export regression suite: **18** tests
+  passed after shared deployment-limit validation was extracted.
+- Windows agent all-features package: **114** tests passed, zero failed/ignored.
+  Includes eight new real-two-hop resolution tests, isolated JSON size limits,
+  oversized binary decoder refusal and mixed check/resolve capacity recovery.
+- Linux Rust 1.95: **6** agent authority units, **22** actual two-hop client tests,
+  **2** separately compiled agent/production-root/PostgreSQL cases and **13** real
+  authority mTLS/PostgreSQL cases passed, zero failed/ignored in these filtered runs.
+  Both packages passed all-target/all-feature Clippy with warnings denied.
+  The equivalent all-target/all-feature Clippy command also passed on Windows.
+- Generated contract suite: **97** passed. Regeneration verification and protobuf
+  compatibility gate passed; the workload resolution service is not browser exposed.
+- CI source-contract checks: **8** passed. Tracked and untracked changed handwritten
+  source files remain at or below 600 lines; `git diff --check` passed.
+
+Linux verification image: `apex-binding-linux:verified`, manifest-list digest
+`sha256:82168239f4bd5c740c99334944e2c6a1f695e99650b30bdd18eb15fd04f53031`.
+This disposable test image is not a production runtime artifact. Tests use owned
+disposable schemas and existing test PKI; they do not create managed containers.
+
+Independent review closed two findings: validate shared PID/telemetry limits when
+loading the catalog (not only during selected compilation), and isolate JSON/wire
+size-limit tests from hash-mismatch refusals. Linux also exposed an existing test
+probe's queue saturation: the corrected test tolerates only the exact busy code as
+an intermediate result and still requires proven revocation before releasing its
+held query. No production queue bound, deadline or authority requirement was relaxed.
+
+Execution gates remain open: real agent ingress and operation correlation,
+RuntimeLaunchContext/material-role binding, owned verification/staging composition,
+durable container provisioning, egress/admission and end-to-end microsecond tracing.
+Resolution is point-in-time data, not an execution permit. No `Serving`, complete
+Task 7, production readiness, commit, push or GitHub Actions run is claimed here.
 
 See [runtime evidence](mcp-gateway-runtime-evidence.md) for the reviewed readiness
 lifecycle checkpoint and subsequent runtime work; aggregate gates remain open.

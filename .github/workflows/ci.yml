@@ -328,6 +328,24 @@ jobs:
         # Dependency unit tests are not run by the application test command.
         # These self-contained real-socket/TLS tests require no external database.
         run: cargo test -p apex-durability --locked --all-features --lib postgres_transport::worker -- --nocapture
+      - name: Verify Linux runtime provisioning boundaries
+        # Privileged acceptance runs only on this disposable CI host.
+        working-directory: .
+        run: |
+          cargo test --locked -p apex-proxy-runtime-agent --features staging-integration --lib --test secret_staging --no-run --message-format=json-render-diagnostics > "${RUNNER_TEMP}/provisioning-tests.jsonl"
+          staging_test="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "secret_staging" and .profile.test == true and .executable != null) | .executable' "${RUNNER_TEMP}/provisioning-tests.jsonl")"
+          agent_test="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "apex_proxy_runtime_agent" and .profile.test == true and .executable != null) | .executable' "${RUNNER_TEMP}/provisioning-tests.jsonl")"
+          test -x "${staging_test}" && test -x "${agent_test}"
+          sudo -- "${staging_test}" --test-threads=1
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 --output "${RUNNER_TEMP}/apex-test-cosign"
+          printf '%s  %s\n' 4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 "${RUNNER_TEMP}/apex-test-cosign" | sha256sum --check --strict
+          sudo install -m 0755 "${RUNNER_TEMP}/apex-test-cosign" /usr/local/bin/apex-test-cosign
+          sudo install -d -m 0700 /cosign-test-cache
+          sudo -- "${agent_test}" signature::tests::live_cosign_accepts_exact_signer_and_rejects_wrong_identity --exact --ignored
+          sudo -- "${agent_test}" signature::tests::filesystem:: --ignored --test-threads=1
+          sudo install -d -m 0700 -o 1001 -g 1001 /signature-user-cache
+          sudo -u '#1001' -g '#1001' -- "${agent_test}" signature::tests::dedicated_agent_uid_can_open_its_protected_cache --exact --ignored
+          cargo clippy --locked -p apex-proxy-runtime-agent --all-targets --all-features -- -D warnings
       - name: Verify integer microsecond clock primitive
         run: |
           cargo test -p apex-telemetry --locked

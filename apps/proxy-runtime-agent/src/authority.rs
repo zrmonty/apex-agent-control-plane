@@ -14,9 +14,12 @@ use tonic::{
 
 use crate::proto;
 use proto::runtime_authority_service_client::RuntimeAuthorityServiceClient;
+use proto::runtime_deployment_service_client::RuntimeDeploymentServiceClient;
 
 mod configuration;
+mod deployment;
 mod snapshot;
+pub use deployment::ResolvedDeployment;
 
 const MAX_BUDGET: Duration = Duration::from_secs(5);
 const CAPACITY: usize = 8;
@@ -46,6 +49,7 @@ pub struct AuthorityOperation<'a> {
 /// One bounded authority connection, with no caller-selected channel constructor.
 pub struct RuntimeAuthorityClient {
     client: RuntimeAuthorityServiceClient<Channel>,
+    deployment_client: RuntimeDeploymentServiceClient<Channel>,
     slots: Semaphore,
     // Transport fields are moved into tonic at connect; only enrollment metadata remains.
     config: AuthorityClientConfig,
@@ -149,6 +153,9 @@ impl RuntimeAuthorityClient {
                 .await
                 .map_err(|_| AuthorityClientError::Transport)?;
             Ok(Self {
+                deployment_client: RuntimeDeploymentServiceClient::new(channel.clone())
+                    .max_encoding_message_size(MESSAGE_LIMIT)
+                    .max_decoding_message_size(deployment::MESSAGE_LIMIT),
                 client: RuntimeAuthorityServiceClient::new(channel)
                     .max_encoding_message_size(MESSAGE_LIMIT)
                     .max_decoding_message_size(MESSAGE_LIMIT),
@@ -177,6 +184,38 @@ impl RuntimeAuthorityClient {
         operation: AuthorityOperation<'_>,
         budget: Duration,
     ) -> Result<proto::RuntimeAuthoritySnapshot, AuthorityClientError> {
+        Ok(self
+            .observe(incoming, current_policy, operation, budget, false)
+            .await?
+            .authority)
+    }
+
+    /// Resolve the published configuration through the same pinned online authority.
+    /// No caller manifest is accepted. This is not admission for container effects.
+    ///
+    /// # Errors
+    /// Refuses invalid peers, operation or response bindings and exhausted bounds.
+    pub async fn resolve<T>(
+        &self,
+        incoming: &tonic::Request<T>,
+        current_policy: &RuntimePeerPolicy,
+        operation: AuthorityOperation<'_>,
+        budget: Duration,
+    ) -> Result<ResolvedDeployment, AuthorityClientError> {
+        self.observe(incoming, current_policy, operation, budget, true)
+            .await?
+            .deployment
+            .ok_or(AuthorityClientError::InvalidSnapshot)
+    }
+
+    async fn observe<T>(
+        &self,
+        incoming: &tonic::Request<T>,
+        current_policy: &RuntimePeerPolicy,
+        operation: AuthorityOperation<'_>,
+        budget: Duration,
+        resolve: bool,
+    ) -> Result<Observation, AuthorityClientError> {
         let started = Instant::now();
         let budget = budget.min(MAX_BUDGET);
         if budget.is_zero() {
@@ -204,7 +243,6 @@ impl RuntimeAuthorityClient {
             .slots
             .try_acquire()
             .map_err(|_| AuthorityClientError::Overloaded)?;
-        let mut client = self.client.clone();
         let mut request = Request::new(proto::CheckRuntimeAuthorityRequest {
             schema_version: 1,
             target: Some(operation.target.clone()),
@@ -221,15 +259,37 @@ impl RuntimeAuthorityClient {
         request.set_timeout(remaining);
         // The generated method includes readiness and full unary decoding. Dropping
         // this future on timeout/caller cancellation drops the underlying RPC future.
-        let result =
-            tokio::time::timeout_at(deadline, client.check_runtime_authority(request)).await;
+        let result = tokio::time::timeout_at(deadline, async {
+            if resolve {
+                let mut client = self.deployment_client.clone();
+                let reply = client
+                    .resolve_runtime_deployment(request)
+                    .await
+                    .map_err(remote_error)?
+                    .into_inner();
+                let deployment = ResolvedDeployment::parse(reply)?;
+                Ok(Observation {
+                    authority: deployment.authority().clone(),
+                    deployment: Some(deployment),
+                })
+            } else {
+                let mut client = self.client.clone();
+                let authority = client
+                    .check_runtime_authority(request)
+                    .await
+                    .map_err(remote_error)?
+                    .into_inner();
+                Ok(Observation {
+                    authority,
+                    deployment: None,
+                })
+            }
+        })
+        .await;
         if started.elapsed() >= budget {
             return Err(AuthorityClientError::Deadline);
         }
-        let response = result
-            .map_err(|_| AuthorityClientError::Deadline)?
-            .map_err(remote_error)?
-            .into_inner();
+        let response = result.map_err(|_| AuthorityClientError::Deadline)??;
         // Recheck the very same original request and policy, not cached evidence or
         // outbound TLS. The owner supplies policy replacement on subsequent calls.
         let handoff = authorize()?;
@@ -239,7 +299,7 @@ impl RuntimeAuthorityClient {
             return Err(AuthorityClientError::Denied);
         }
         snapshot::validate(
-            &response,
+            &response.authority,
             &self.config,
             &operation,
             handoff.identity_id(),
@@ -251,9 +311,14 @@ impl RuntimeAuthorityClient {
         if elapsed >= budget {
             return Err(AuthorityClientError::Deadline);
         }
-        snapshot::validate_elapsed(&response, elapsed)?;
+        snapshot::validate_elapsed(&response.authority, elapsed)?;
         Ok(response)
     }
+}
+
+struct Observation {
+    authority: proto::RuntimeAuthoritySnapshot,
+    deployment: Option<ResolvedDeployment>,
 }
 
 fn peer_error(error: RuntimePeerError) -> AuthorityClientError {

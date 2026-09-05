@@ -21,6 +21,8 @@ struct Input {
     request: CheckRuntimeAuthorityRequest,
     config_hash: String,
     caller: String,
+    #[serde(default)]
+    resolve_deployment: bool,
 }
 
 fn main() {
@@ -82,11 +84,18 @@ async fn probe(input: Input) -> Result<serde_json::Value, ()> {
         &serde_json::to_vec(&input.peer_policy).map_err(|_| ())?,
     )
     .map_err(|_| ())?;
-    let server = server::start(client, policy, input.config_hash, &pki)?;
+    let server = server::start(
+        client,
+        policy,
+        input.config_hash,
+        input.resolve_deployment,
+        &pki,
+    )?;
     let result = invoke(&pki, &server.endpoint, &input.caller, input.request).await;
+    let resolution = server.resolution.lock().map_err(|_| ())?.clone();
     server.finish().await?;
     match result {
-        Ok(snapshot) => Ok(serde_json::json!({"snapshot": snapshot})),
+        Ok(snapshot) => Ok(serde_json::json!({"snapshot": snapshot, "resolution": resolution})),
         Err(status) => {
             let code = status.message();
             if code.len() > 128
