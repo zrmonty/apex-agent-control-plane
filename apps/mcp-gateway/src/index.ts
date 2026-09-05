@@ -6,11 +6,16 @@ import { ManagedHttpServer } from "./managed/http-server.js";
 import { loadRuntimeConfiguration } from "./managed/startup-loader.js";
 import { buildManagedRuntime } from "./live/managed-runtime.js";
 import { createMcpServer } from "./server.js";
+import { selectStartupProfile } from "./startup-profile.js";
 import { buildGatewayDependencies } from "./wiring.js";
 
 async function main(): Promise<void> {
-  const revisionConfig = await loadRuntimeConfiguration(process.env);
-  if (revisionConfig !== undefined) {
+  const profile = selectStartupProfile(process.env);
+  if (profile === "managed") {
+    const revisionConfig = await loadRuntimeConfiguration(process.env);
+    if (revisionConfig === undefined) {
+      throw new GatewayError("INVALID_INPUT", "managed runtime configuration rejected safely");
+    }
     const runtime = await buildManagedRuntime(revisionConfig, process.env);
     const server = new ManagedHttpServer({
       config: revisionConfig,

@@ -7,6 +7,13 @@ type NodeRunOptions = Readonly<{
   args?: readonly string[];
   input?: string;
   timeoutMs?: number;
+  // Trusted test callbacks only. receive runs after byte-budget acceptance;
+  // close must synchronously release pending protocol requests on every exit.
+  dialogue?: Readonly<{
+    start(send: (input: string) => void): Promise<void>;
+    receive(chunk: Buffer): void;
+    close(): void;
+  }>;
 }>;
 
 export type NodeRunResult = Readonly<{
@@ -34,6 +41,7 @@ export async function runNode(options: NodeRunOptions): Promise<NodeRunResult> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000) {
     throw new RangeError("node test child timeout is outside its safe bound");
   }
+  if (options.dialogue && options.input !== undefined) throw new RangeError("node test child input is ambiguous");
   const child = spawn(process.execPath,
     ["--import", "tsx", options.entrypoint, ...options.args ?? []],
     { cwd: options.cwd, env: options.env, stdio: "pipe", windowsHide: true });
@@ -44,6 +52,7 @@ export async function runNode(options: NodeRunOptions): Promise<NodeRunResult> {
     let code: number | null = null;
     let signal: NodeJS.Signals | null = null;
     let reaped = false, settled = false;
+    let dialogueComplete = options.dialogue === undefined;
     let failure: Failure | undefined;
     let executionTimer: NodeJS.Timeout | undefined;
     let forceTimer: NodeJS.Timeout | undefined;
@@ -58,6 +67,8 @@ export async function runNode(options: NodeRunOptions): Promise<NodeRunResult> {
       settled = true;
       clearTimeout(executionTimer); clearTimeout(forceTimer); clearTimeout(cleanupTimer);
       child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+      if (!dialogueComplete) failure ??= "io";
+      try { options.dialogue?.close(); } catch { failure ??= "io"; }
       // A failed OS kill must be visible without retaining handles indefinitely.
       if (!reaped) child.unref();
       const result = { pid: child.pid, code, signal, reaped,
@@ -83,6 +94,9 @@ export async function runNode(options: NodeRunOptions): Promise<NodeRunResult> {
       if (stream === "stdout") stdoutLength += kept;
       else stderrLength += kept;
       if (chunk.byteLength > kept) fail(`${stream}-overflow`);
+      else if (stream === "stdout") {
+        try { options.dialogue?.receive(chunk); } catch { fail("io"); }
+      }
     }
     child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk));
@@ -92,6 +106,16 @@ export async function runNode(options: NodeRunOptions): Promise<NodeRunResult> {
     child.once("exit", (value, received) => { reaped = true; code = value; signal = received; });
     child.once("close", () => finish());
     executionTimer = setTimeout(() => fail("timeout"), timeoutMs);
-    child.stdin.end(options.input ?? "");
+    if (options.dialogue) {
+      try {
+        void options.dialogue.start(input => {
+          if (settled || failure) throw new Error("node test child input is closed");
+          child.stdin.write(input);
+        }).then(() => {
+          dialogueComplete = true;
+          if (!settled && !failure) child.stdin.end();
+        }).catch(() => fail("io"));
+      } catch { fail("io"); }
+    } else child.stdin.end(options.input ?? "");
   });
 }

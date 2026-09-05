@@ -1,9 +1,10 @@
-# Disposable managed MCP proxy profile.
+# Bootstrap/startup-refusal fixture for a managed MCP proxy.
 #
-# This overlay is intentionally narrow: the proxy has its own internal egress
-# network, no host ports, no Docker socket, no host mounts, and no raw secret
-# values. The control plane is the only component allowed to decide which
-# revision is provisioned in a real deployment.
+# The legacy revision-config fixture below is not generated runtime config.
+# This overlay is not a deployable-ready profile or release/readiness proof.
+# The proxy retains its internal fixture network, no host ports, no Docker
+# socket, no host mounts, and no raw secret values. The control plane alone
+# decides which revision is provisioned in a real deployment.
 
 services:
   mcp-proxy-portfolio:
@@ -12,6 +13,8 @@ services:
       context: ../..
       dockerfile: apps/mcp-gateway/Dockerfile
     environment:
+      APEX_MCP_PROFILE: managed
+      APEX_MCP_GOVERNANCE_MODE: live
       APEX_MCP_PROXY_REVISION_CONFIG_FILE: /run/secrets/proxy_revision_config
       APEX_MCP_PRINCIPAL: spiffe://apex/agent/mcp-proxy-runtime
       APEX_MCP_AGENT_ID: mcp-proxy-runtime
@@ -32,11 +35,9 @@ services:
     networks: [mcp-proxy-egress]
     secrets:
       - proxy_revision_config
+    # No real authenticated health probe exists yet; disabling is not readiness.
     healthcheck:
-      test: ["CMD", "node", "-e", "process.exit(0)"]
-      interval: 5s
-      timeout: 2s
-      retries: 3
+      disable: true
 
   mcp-proxy-test-upstream:
     image: python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de

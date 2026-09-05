@@ -5,7 +5,8 @@ import { parseRuntimeConfiguration, type ReadonlyRuntimeConfiguration } from "./
 
 const MAX_CONFIG_BYTES = 262144;
 
-/** Only absence selects standalone. Inline legacy configuration is no longer a
+/** Absence means no configuration, not permission to serve standalone. Process
+ * selection is validated separately before loading. Inline legacy configuration is no longer a
  * supported startup source, including empty inline values or two supplied vars.
  * Publication/catalog provenance remains a trusted provisioning precondition. */
 export async function loadRuntimeConfiguration(env: NodeJS.ProcessEnv): Promise<ReadonlyRuntimeConfiguration | undefined> {
