@@ -23,7 +23,7 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         mode(&root, 0o700);
         let exe = root.join("cosign");
-        fs::copy("/usr/local/bin/apex-test-cosign", &exe).unwrap();
+        fs::copy(COSIGN, &exe).unwrap();
         mode(&exe, 0o755);
         let cache = root.join("cache");
         fs::create_dir(&cache).unwrap();

@@ -666,3 +666,28 @@ Task 7, production readiness, commit, push or GitHub Actions run is claimed here
 
 See [runtime evidence](mcp-gateway-runtime-evidence.md) for the reviewed readiness
 lifecycle checkpoint and subsequent runtime work; aggregate gates remain open.
+
+### September 5: hosted-runner Cosign fixture correction
+
+[CI run 33990339393](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/33990339393)
+passed the control gateway, runtime-agent/shared boundaries, durable-worker checks
+and all 28 Linux staging tests. The real Cosign test then refused its executable
+configuration before verification with `InvalidConfiguration`.
+
+The workflow installed the executable under `/usr/local/bin`, without establishing
+the ownership/modes of its ancestors. Making that ancestor group-writable in the
+disposable Linux validation image reproduced the exact refusal. The remote log
+does not identify which individual ancestor failed the protected-path check.
+
+The fixture now installs `/apex-signature-tools/cosign` beneath an explicitly
+root-owned 0755 directory; all signature tests use that same path. No shared runner
+directory permissions or production verifier checks are changed. With the shared
+tool ancestor still group-writable, local real-Cosign acceptance, wrong-identity
+refusal, two filesystem/held-executable tests and the UID 1001 cache test passed
+(four test cases). Linux all-feature/all-target agent Clippy and all eight CI
+source-contract checks also passed. This local evidence does not claim a green
+replacement GitHub Actions run.
+
+The separate [Live mTLS + E2E run 33990339379](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/33990339379)
+completed successfully for merge commit `4fa4e7f`. Acceptance of the fixture
+correction must be established by a new main CI run after publication.
