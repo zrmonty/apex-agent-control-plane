@@ -14,6 +14,9 @@
 .codex/
 .cursor/
 .impeccable/
+.superpowers/
+.worktrees/
+**/dist/
 apps/operator-ui/
 docs/
 examples/

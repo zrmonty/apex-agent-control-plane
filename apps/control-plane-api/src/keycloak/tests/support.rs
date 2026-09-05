@@ -80,21 +80,21 @@ pub(super) const SIGNING_KEY_MODULUS_B64URL: &str = concat!(
     "CF4KuHJt7Y9KvsKY_7mwtTXuYhlUw",
 );
 
-pub(super) const KID: &str = "apex-control-test-sig";
+pub(crate) const KID: &str = "apex-control-test-sig";
 pub(super) const ISSUER: &str = "https://keycloak.invalid/realms/apex";
 pub(super) const AUDIENCE: &str = "apex-control-gateway";
 pub(super) const SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
 
-pub(super) fn signing_key() -> EncodingKey {
+pub(crate) fn signing_key() -> EncodingKey {
     EncodingKey::from_rsa_der(&B64.decode(SIGNING_KEY_PKCS1_DER_B64).expect("fixture DER"))
 }
 
-pub(super) fn foreign_key() -> EncodingKey {
+pub(crate) fn foreign_key() -> EncodingKey {
     EncodingKey::from_rsa_der(&B64.decode(FOREIGN_KEY_PKCS1_DER_B64).expect("fixture DER"))
 }
 
 /// The realm's published signing key, in the shape Keycloak publishes it.
-pub(super) fn jwks() -> JwkSet {
+pub(crate) fn jwks() -> JwkSet {
     serde_json::from_value(json!({
         "keys": [{
             "kid": KID,
@@ -179,13 +179,13 @@ pub(super) fn claims() -> serde_json::Value {
     })
 }
 
-pub(super) fn header() -> Header {
+pub(crate) fn header() -> Header {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KID.to_owned());
     header
 }
 
-pub(super) fn sign(header: &Header, claims: &serde_json::Value, key: &EncodingKey) -> String {
+pub(crate) fn sign(header: &Header, claims: &serde_json::Value, key: &EncodingKey) -> String {
     jsonwebtoken::encode(header, claims, key).expect("fixture token must sign")
 }
 

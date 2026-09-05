@@ -11,6 +11,7 @@ mod lifecycle;
 mod operation_worker;
 mod provider;
 mod reconciler;
+mod runtime_config;
 mod service;
 mod store;
 mod validation;
@@ -25,6 +26,7 @@ pub use provider::{
     RuntimeCommandRunner, RuntimeHandle,
 };
 pub use reconciler::{ProxyRuntimeReconciler, RuntimeOperations};
+pub use runtime_config::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 
 #[allow(unused_imports)]
 pub use lifecycle::{LifecycleCommand, LifecycleTransition, transition_state};

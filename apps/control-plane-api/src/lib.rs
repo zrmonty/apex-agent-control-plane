@@ -37,6 +37,8 @@ mod governance_tests;
 
 mod agent_auth;
 mod auth;
+#[cfg(feature = "postgres")]
+pub mod browser;
 pub mod contract_json;
 mod dual_approval;
 mod envelope;
@@ -85,6 +87,7 @@ pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
 #[cfg(feature = "postgres")]
 pub use proxy::PostgresProxyStore;
+pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 pub use proxy::{
     ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, CreateProxy,
     CreateProxyResult, DataClassification, DockerCommandRunner, DockerProxyProvider,

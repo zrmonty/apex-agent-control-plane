@@ -397,9 +397,18 @@ async fn serve_metrics_connection(
     } else {
         ("404 Not Found", "not found\n".to_owned())
     };
+    #[cfg(feature = "postgres")]
+    let body = if status == "200 OK" {
+        body + &metrics.browser_observation_prometheus()
+    } else {
+        body
+    };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
 }
+
+#[cfg(all(test, feature = "postgres"))]
+mod metrics_tests;

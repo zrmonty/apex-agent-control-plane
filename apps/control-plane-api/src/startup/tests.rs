@@ -44,3 +44,8 @@ include!("tests/network.rs");
 include!("tests/limits.rs");
 include!("tests/secrets.rs");
 include!("tests/runtime.rs");
+include!("tests/browser.rs");
+
+#[cfg(feature = "postgres")]
+#[path = "tests/root_browser.rs"]
+mod root_browser;

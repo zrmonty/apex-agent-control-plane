@@ -53,7 +53,10 @@ jobs:
         run: python3 scripts/check_source_line_limits.py
 
   mcp-gateway:
+    needs: rust-control-plane
     runs-on: ubuntu-latest
+    env:
+      APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-contract/runtime-revision.json
     defaults:
       run:
         working-directory: apps/mcp-gateway
@@ -69,6 +72,12 @@ jobs:
           cache-dependency-path: apps/mcp-gateway/pnpm-lock.yaml
       - name: Install
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download the actual Rust-compiled runtime contract
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-runtime-contract
+          path: ${{ runner.temp }}/runtime-contract
+          digest-mismatch: error
       - name: Test, typecheck, and build
         run: |
           pnpm test
@@ -92,8 +101,9 @@ jobs:
           cache-dependency-path: apps/operator-ui/pnpm-lock.yaml
       - name: Install
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Typecheck and build
+      - name: Test, typecheck, and build
         run: |
+          pnpm test
           pnpm typecheck
           pnpm build
 
@@ -195,16 +205,92 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Generate disposable browser TLS fixtures
+        working-directory: .
+        run: |
+          python -m pip install --disable-pip-version-check --no-input cryptography==49.0.0
+          fixture_root="$(mktemp -d "${RUNNER_TEMP}/apex-browser-pki.XXXXXX")"
+          python -B deploy/compose/live-mtls/generate_pki.py --out "${fixture_root}/trusted"
+          python -B deploy/compose/live-mtls/generate_pki.py --out "${fixture_root}/untrusted"
+          echo "APEX_BROWSER_TEST_PKI_DIR=${fixture_root}" >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: apps/operator-ui/pnpm-lock.yaml
+      - name: Cache the pinned acceptance browser
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-apex-chromium-playwright-1.62.0
+      - name: Prepare the actual UI and browser acceptance driver
+        working-directory: .
+        run: |
+          pnpm --dir apps/operator-ui install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/operator-ui build
+          pnpm --dir apps/operator-ui exec playwright install --with-deps --only-shell chromium
+          node --test apps/operator-ui/scripts/browser-journey/*.test.mjs
+      - name: Start real Keycloak browser fixture
+        working-directory: .
+        run: |
+          node --test scripts/prepare-browser-keycloak.test.mjs
+          docker pull quay.io/keycloak/keycloak@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+          node scripts/prepare-browser-keycloak.mjs start --port 18451 > "${RUNNER_TEMP}/apex-browser-keycloak.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import path from 'node:path';
+          const fixture = JSON.parse(readFileSync(path.join(process.env.RUNNER_TEMP, 'apex-browser-keycloak.json'), 'utf8'));
+          if (fixture.ready !== true || !/^[a-f0-9]{32}$/.test(fixture.ownedId)) throw new Error('fixture did not become ready');
+          appendFileSync(process.env.GITHUB_ENV,
+            `APEX_BROWSER_KEYCLOAK_OWNED_ID=${fixture.ownedId}\nAPEX_BROWSER_KEYCLOAK_ISSUER=${fixture.env.APEX_BROWSER_KEYCLOAK_ISSUER}\n`);
+          NODE
+      - name: Start real refresh-race Keycloak backend
+        working-directory: .
+        run: |
+          node scripts/prepare-browser-keycloak.mjs start --port 18462 --issuer-port 18461 > "${RUNNER_TEMP}/apex-browser-refresh-keycloak.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import path from 'node:path';
+          const fixture = JSON.parse(readFileSync(path.join(process.env.RUNNER_TEMP, 'apex-browser-refresh-keycloak.json'), 'utf8'));
+          if (fixture.ready !== true || !/^[a-f0-9]{32}$/.test(fixture.ownedId)) throw new Error('refresh fixture did not become ready');
+          appendFileSync(process.env.GITHUB_ENV,
+            `APEX_BROWSER_REFRESH_OWNED_ID=${fixture.ownedId}\nAPEX_BROWSER_REFRESH_TEST_ISSUER=${fixture.env.APEX_BROWSER_KEYCLOAK_ISSUER}\n`);
+          NODE
       - name: Test (control gateway)
         env:
+          # Dedicated test-owned root; the exporter creates its UUID directory here.
+          TMPDIR: ${{ runner.temp }}/rust-contract-export
+          TEMP: ${{ runner.temp }}/rust-contract-export
+          TMP: ${{ runner.temp }}/rust-contract-export
           # Required by journal/recovery tests; plaintext is loopback/lab-only.
           APEX_PROXY_JOURNAL_TEST_DATABASE_URL: "postgres://apex_journal_ci:apex_journal_lab_only@127.0.0.1:15432/apex_proxy_journal?sslmode=disable"
+          APEX_BROWSER_SESSION_TEST_DATABASE_URL: "postgres://apex_journal_ci:apex_journal_lab_only@127.0.0.1:15432/apex_proxy_journal?sslmode=disable"
           APEX_ALLOW_POSTGRES_PLAINTEXT: "1"
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
-        run: cargo test --locked --features "test-support,postgres,valkey" -- --nocapture
+        run: |
+          mkdir "${TMPDIR}"
+          cargo test --locked --features "test-support,postgres,valkey" -- --nocapture
+      - name: Collect only the generated runtime contract
+        working-directory: .
+        run: |
+          node --test scripts/tests/collect-runtime-fixture.test.mjs
+          node scripts/collect-runtime-fixture.mjs --root "${RUNNER_TEMP}/rust-contract-export" --out "${RUNNER_TEMP}/runtime-revision.json"
+      - name: Share the actual Rust export with the gateway tests
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-runtime-contract
+          path: ${{ runner.temp }}/runtime-revision.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Test durable worker failure boundaries
         env:
           CARGO_NET_RETRY: "10"
@@ -213,6 +299,10 @@ jobs:
         # Dependency unit tests are not run by the application test command.
         # These self-contained real-socket/TLS tests require no external database.
         run: cargo test -p apex-durability --locked --all-features --lib postgres_transport::worker -- --nocapture
+      - name: Verify integer microsecond clock primitive
+        run: |
+          cargo test -p apex-telemetry --locked
+          cargo clippy -p apex-telemetry --locked --all-targets -- -D warnings
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"
@@ -223,6 +313,15 @@ jobs:
           CARGO_NET_RETRY: "10"
           CARGO_HTTP_MULTIPLEXING: "false"
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Remove only the owned refresh-race Keycloak backend
+        if: ${{ always() && env.APEX_BROWSER_REFRESH_OWNED_ID != '' }}
+        working-directory: .
+        run: node scripts/prepare-browser-keycloak.mjs stop --owned-id "${APEX_BROWSER_REFRESH_OWNED_ID}"
+      - name: Remove only the owned Keycloak fixture
+        if: ${{ always() && env.APEX_BROWSER_KEYCLOAK_OWNED_ID != '' }}
+        working-directory: .
+        run: node scripts/prepare-browser-keycloak.mjs stop --owned-id "${APEX_BROWSER_KEYCLOAK_OWNED_ID}"
 
   rust-agent-supervisor:
     runs-on: ubuntu-latest

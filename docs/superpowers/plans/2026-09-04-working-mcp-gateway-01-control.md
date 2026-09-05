@@ -116,7 +116,7 @@ Routes: `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout`, `GET /api/
 
 `BrowserSession` contains an opaque random ID, subject, expiry, CSRF binding and an encrypted token bundle in Postgres. Cookie name `__Host-apex_session`, Secure, HttpOnly, SameSite=Lax, Path=/, no Domain. Use a maintained OIDC client and AEAD implementation compatible with the repository license/security policy; do not write cryptography or accept ID tokens as API access tokens.
 
-- [ ] Add a real HTTP integration test for login state/nonce/PKCE, callback replay, wrong issuer/audience, expired session, logout, forbidden scope, absent/wrong CSRF, Origin mismatch, token refresh rotation and upstream timeout. Explicitly test that a syntactically valid session cannot turn a denied RPC into an allowed one.
+- [x] Add a real HTTP integration test for login state/nonce/PKCE, callback replay, wrong issuer/audience, expired session, logout, forbidden scope, absent/wrong CSRF, Origin mismatch, token refresh rotation and upstream timeout. Explicitly test that a syntactically valid session cannot turn a denied RPC into an allowed one.
 
 ```text
 GET /api/session without cookie -> 401, Cache-Control: no-store
@@ -125,9 +125,9 @@ POST CreateProxy with scope outside operator token -> 403, zero runtime calls
 POST CreateProxy with valid session/scope/CSRF -> generated CreateProxyResponse
 ```
 
-- [ ] Run `cargo test -p apex-control-plane-api --features postgres --test browser_session_flow`; expect failure while the routes/session store are absent.
-- [ ] Add the Rust HTTP edge (Axum/tower modules, with dependencies pinned by lockfile), OIDC code flow, encrypted server-side sessions and strict allowlisted RPC mapping. Reuse scope verification in Rust, not browser claims. Apply request bounds, secure headers/CSP, no-store, safe error mapping (401/403/409/429/503), and audit metadata. No wildcard credentialed CORS, arbitrary redirect URL or provider endpoint supplied by the browser.
-- [ ] Run the suite and a real Keycloak login in the growing acceptance harness. Confirm browser responses/storage contain no token; revoke/expire the server session and confirm the next mutation is refused. Measure BFF stages using the task-1 timing shape, with clock implementation supplied by task 16.
+- [x] Run `cargo test -p apex-control-plane-api --features postgres --test browser_session_flow`; expect failure while the routes/session store are absent.
+- [x] Add the Rust HTTP edge (Axum/tower modules, with dependencies pinned by lockfile), OIDC code flow, encrypted server-side sessions and strict allowlisted RPC mapping. Reuse scope verification in Rust, not browser claims. Apply request bounds, secure headers/CSP, no-store, safe error mapping (401/403/409/429/503), and audit metadata. No wildcard credentialed CORS, arbitrary redirect URL or provider endpoint supplied by the browser.
+- [x] Run the suite and a real Keycloak login in the growing acceptance harness. Confirm browser responses/storage contain no token; revoke/expire the server session and confirm the next mutation is refused. Measure BFF stages using the task-1 timing shape, with clock implementation supplied by task 16.
 - [ ] Commit: `feat: add authenticated Rust browser edge for proxy management`.
 
 ## Task 4: Replace preview API with honest server state
@@ -142,7 +142,7 @@ POST CreateProxy with valid session/scope/CSRF -> generated CreateProxyResponse
 
 `proxyApi` exposes the task-1 generated management methods; inputs/outputs are generated types. UI-only form types may track unsaved editing state but cannot replace contract models. `getSession()` supplies authorized scopes; query keys include subject, workspace, namespace, proxy, revision and filters as applicable. `newRequestId(): string` creates tested UUIDv7 values and the same value is retained for a mutation retry.
 
-- [ ] Add Vitest/Testing Library tests for real fetch invocation, credentials/CSRF behavior, no-preview fallback, server error/offline state, scope-switch cache clearing and rejection of stale optimistic updates. Add scripts `test` and `test:watch` to the package with pinned dev dependencies.
+- [x] Add Vitest/Testing Library tests for real fetch invocation, credentials/CSRF behavior, no-preview fallback, server error/offline state, scope-switch cache clearing and rejection of stale optimistic updates. Add scripts `test` and `test:watch` to the package with pinned dev dependencies.
 
 ```ts
 import { expect, test } from "vitest";
@@ -152,9 +152,9 @@ test("uses lowercase UUIDv7 mutation identifiers", () => {
 });
 ```
 
-- [ ] Run `pnpm --dir apps/operator-ui test`; verify tests expose the preview implementation and UUIDv4 behavior before replacement.
-- [ ] Replace all production `previewProxyApi` imports; add same-origin generated client, route/session guard, scope selector, mutation errors, pagination and server-derived freshness. Display `Unavailable`, `Stale` and `Not configured` when appropriate. Remove “server-authoritative”/“healthy” claims unless backed by a current observation. Wire Vite's development proxy only to the local Rust edge; production uses the deployment HTTPS edge.
-- [ ] Run UI tests/typecheck/build. In the real harness, create a draft, reload the browser, stop the Rust API and verify data is not fabricated; restore it and verify the same server record appears. Log out and verify scoped query caches clear.
+- [x] Run `pnpm --dir apps/operator-ui test`; verify tests expose the preview implementation and UUIDv4 behavior before replacement.
+- [x] Replace all production `previewProxyApi` imports; add same-origin generated client, route/session guard, scope selector, mutation errors, pagination and server-derived freshness. Display `Unavailable`, `Stale` and `Not configured` when appropriate. Remove “server-authoritative”/“healthy” claims unless backed by a current observation. Wire Vite's development proxy only to the local Rust edge; production uses the deployment HTTPS edge.
+- [x] Run UI tests/typecheck/build. In the real harness, create a draft, reload the browser, stop the Rust API and verify data is not fabricated; restore it and verify the same server record appears. Log out and verify scoped query caches clear.
 - [ ] Commit: `feat: connect proxy UI to authenticated persistent control plane`.
 
 ## Task 5: Compile immutable revisions into runtime configurations
@@ -167,7 +167,7 @@ test("uses lowercase UUIDv7 mutation identifiers", () => {
 
 **Interfaces**
 
-`compile_runtime_config(revision: &McpProxyRevision, bindings: &RuntimeDeploymentBindings) -> Result<RuntimeConfiguration, ProxyError>` produces the task-1 generated runtime contract. `RuntimeDeploymentBindings` contains generation, allocated HTTPS resource URL, approved image reference, secret reference metadata, declared network grants, workload identity reference and telemetry policy. It contains no raw secrets. `runtime_manifest_hash(config) -> String` hashes the deterministic generated representation, excluding the hash field itself.
+`compile_runtime_config(revision: &McpProxyRevision, bindings: &RuntimeDeploymentBindings) -> Result<RuntimeConfiguration, ProxyError>` produces the task-1 generated runtime contract. `RuntimeDeploymentBindings` contains generation, allocated HTTPS resource URL, approved image reference, secret reference metadata, declared network grants, workload identity reference and telemetry policy. It contains no raw secrets. `runtime_manifest_hash(config) -> Result<String, ProxyError>` hashes the deterministic generated representation, excluding the hash field itself; unsupported generated values return a safe error, never a panic or substitute hash.
 
 - [ ] Add cross-language golden tests covering every field, nested array, enum, resource URL audience, distinct ingress/upstream URLs, CPU/memory units, network grants, schema/output profile, rate/approval settings and telemetry precision. Deliberately remove one security setting and assert compilation fails rather than defaulting open.
 

@@ -38,3 +38,27 @@ When a validated revision sets `ingress.transport` to `streamable-http`, the
 entrypoint requires live dependencies, discovers every declared HTTP upstream
 before binding, and starts the managed listener only after those checks pass.
 Stdio upstreams remain unavailable in this production slice.
+
+## Generated configuration and image checks
+
+The new strict generated runtime consumer is a compiler-boundary component.
+Production startup migration and runtime enforcement remain in progress; its
+manifest checksum is not proof of publication or deployment authorization.
+
+The contract tests require the actual Rust exporter artifact, not a copied
+handwritten fixture. Run `cargo test -p apex-control-plane-api --test
+export_runtime_fixture -- --nocapture` from the repository root and set
+`APEX_RUNTIME_FIXTURE_PATH` to its printed absolute artifact path before running
+gateway tests. CI collects that same generated file from its dedicated test
+temporary directory and transfers it from the Rust job to the gateway job.
+Missing or ambiguous artifacts fail the check.
+
+Build the image from the repository root:
+
+```powershell
+docker build -f apps/mcp-gateway/Dockerfile -t apex-mcp-gateway:working-test .
+```
+
+The image packages the generated JavaScript contracts and live gRPC schemas.
+This packaging check alone does not certify startup readiness, host egress
+enforcement, or a working deployed proxy.

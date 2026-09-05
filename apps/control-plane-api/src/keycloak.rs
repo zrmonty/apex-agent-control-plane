@@ -280,4 +280,4 @@ use jwks::{JwksCache, build_jwks_client, fetch_jwks, spawn_jwks_refresher};
 use verify::verify_token;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

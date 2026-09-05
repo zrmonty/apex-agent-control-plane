@@ -1,0 +1,68 @@
+{
+  "services": {
+    "keycloak": {
+      "image": "quay.io/keycloak/keycloak@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007",
+      "pull_policy": "never",
+      "command": ["start-dev", "--import-realm"],
+      "user": "0:0",
+      "cap_drop": ["ALL"],
+      "cap_add": ["DAC_OVERRIDE"],
+      "security_opt": ["no-new-privileges:true"],
+      "restart": "no",
+      "environment": {
+        "KC_DB": "dev-mem",
+        "KC_HTTP_ENABLED": "false",
+        "KC_HTTPS_PORT": "8443",
+        "KC_HTTPS_CERTIFICATE_FILE": "/run/browser-pki/server.pem",
+        "KC_HTTPS_CERTIFICATE_KEY_FILE": "/run/browser-pki/server.key",
+        "KC_HOSTNAME": "${APEX_BROWSER_KEYCLOAK_BASE:?required}",
+        "KC_HOSTNAME_STRICT": "true",
+        "KC_HOSTNAME_BACKCHANNEL_DYNAMIC": "false"
+      },
+      "labels": {
+        "io.apex.browser-fixture.kind": "working-browser-keycloak",
+        "io.apex.browser-fixture.owner": "${APEX_BROWSER_OWNED_ID:?required}"
+      },
+      "ports": [
+        {
+          "target": 8443,
+          "published": "${APEX_BROWSER_KEYCLOAK_PORT:?required}",
+          "host_ip": "127.0.0.1",
+          "protocol": "tcp"
+        }
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${APEX_BROWSER_KEYCLOAK_CERT_FILE:?required}",
+          "target": "/run/browser-pki/server.pem",
+          "read_only": true,
+          "bind": {"create_host_path": false}
+        },
+        {
+          "type": "bind",
+          "source": "${APEX_BROWSER_KEYCLOAK_KEY_FILE:?required}",
+          "target": "/run/browser-pki/server.key",
+          "read_only": true,
+          "bind": {"create_host_path": false}
+        },
+        {
+          "type": "bind",
+          "source": "${APEX_BROWSER_KEYCLOAK_REALM_FILE:?required}",
+          "target": "/opt/keycloak/data/import/apex-realm.json",
+          "read_only": true,
+          "bind": {"create_host_path": false}
+        }
+      ],
+      "networks": ["browser"]
+    }
+  },
+  "networks": {
+    "browser": {
+      "labels": {
+        "io.apex.browser-fixture.kind": "working-browser-keycloak",
+        "io.apex.browser-fixture.owner": "${APEX_BROWSER_OWNED_ID:?required}"
+      }
+    }
+  }
+}

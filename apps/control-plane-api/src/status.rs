@@ -2,6 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
+#[cfg(feature = "postgres")]
+mod browser;
+
 #[derive(Clone, Debug, Default)]
 pub struct GatewayShutdown {
     requested: Arc<AtomicBool>,
@@ -33,6 +36,8 @@ impl GatewayShutdown {
 /// control channel keeps its small, failure-tolerant dependency surface.
 #[derive(Debug)]
 pub struct GatewayRuntimeMetrics {
+    #[cfg(feature = "postgres")]
+    browser: Option<browser::BrowserObservations>,
     pub submissions: AtomicU64,
     pub duplicate_submissions: AtomicU64,
     pub polls: AtomicU64,
@@ -58,6 +63,8 @@ pub struct GatewayRuntimeMetrics {
 impl Default for GatewayRuntimeMetrics {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "postgres")]
+            browser: None,
             submissions: AtomicU64::new(0),
             duplicate_submissions: AtomicU64::new(0),
             polls: AtomicU64::new(0),
@@ -159,7 +166,7 @@ impl GatewayRuntimeMetrics {
     pub fn status_line(&self, accelerator_sidelined: bool) -> String {
         self.set_accelerator_sidelined(accelerator_sidelined);
         let snapshot = self.snapshot();
-        format!(
+        let line = format!(
             "apex_control_gateway_status submissions={} duplicate_submissions={} polls={} fanout_successes={} fanout_failures={} retention_failures={} reconciliation_repairs={} reconciliation_failures={} outbox_read_failures={} outbox_write_failures={} quarantined_rows={} quarantined_current={} outbox_pending={} inbox_pending={} inbox_undelivered={} shutdowns={} fanout_healthy={} storage_healthy={} accelerator_configured={} accelerator_sidelined={}",
             snapshot.submissions,
             snapshot.duplicate_submissions,
@@ -181,6 +188,9 @@ impl GatewayRuntimeMetrics {
             snapshot.storage_healthy,
             snapshot.accelerator_configured,
             snapshot.accelerator_sidelined,
-        )
+        );
+        #[cfg(feature = "postgres")]
+        let line = format!("{line}{}", self.browser_observation_status());
+        line
     }
 }

@@ -1,5 +1,6 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { Activity, Archive, Bell, Bot, Boxes, ChevronDown, ChevronRight, CircleAlert, Database, FileSearch, Network, Plus, Search, Settings, ShieldCheck, UsersRound } from "lucide-react";
+import { useOperatorSession } from "../api/session-context";
 
 const navItems = [
   ["Overview", "/", Activity],
@@ -13,20 +14,26 @@ const navItems = [
 ] as const;
 
 export function AppShell() {
+  const context = useOperatorSession();
+  const scopeValue = context.scope ? `${context.scope.workspaceId}/${context.scope.namespaceId}` : "";
   return <div className="app-frame">
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <aside className="sidebar" aria-label="Primary navigation">
       <Link to="/" className="apex-logo"><span className="apex-logo-mark" aria-hidden="true" /><span>apex</span></Link>
-      <button className="workspace-picker" type="button"><span className="workspace-square" aria-hidden="true" />Northstar research<ChevronDown size={15} /></button>
-      <nav>{navItems.map(([label, to, Icon]) => <Link key={to} to={to} className="side-link" activeProps={{ className: "side-link current" }}><Icon size={17} strokeWidth={1.9} /><span>{label}</span></Link>)}</nav>
-      <div className="sidebar-foot"><Link to="/settings" className="side-link"><Settings size={17} /><span>Settings</span></Link><div className="identity"><span>AM</span><div><strong>Alex Morgan</strong><small>Owner</small></div><ChevronRight size={15} /></div></div>
+      <div className="session-controls"><label className="workspace-picker"><span className="sr-only">Workspace and namespace</span><select value={scopeValue} onChange={event => {
+        const choice = context.session?.scopes.find(scope => `${scope.workspaceId}/${scope.namespaceId}` === event.target.value);
+        if (choice) context.selectScope(choice);
+      }}>{context.session?.scopes.map(scope => <option key={`${scope.workspaceId}/${scope.namespaceId}`} value={`${scope.workspaceId}/${scope.namespaceId}`}>{scope.workspaceId} / {scope.namespaceId}</option>)}</select></label><button className="secondary-button" type="button" onClick={() => void context.logout()}>Sign out</button></div>
+      <nav>{navItems.map(([label, to, Icon]) => <Link key={to} to={to} aria-label={label} className="side-link" activeProps={{ className: "side-link current" }}><Icon size={17} strokeWidth={1.9} aria-hidden="true" /><span>{label}</span></Link>)}</nav>
+      <div className="sidebar-foot"><Link to="/settings" aria-label="Settings" className="side-link"><Settings size={17} aria-hidden="true" /><span>Settings</span></Link><div className="identity"><div><strong>{context.session?.subject}</strong><small>Authenticated operator</small></div></div></div>
     </aside>
     <section className="app-workspace"><Outlet /></section>
   </div>;
 }
 
 function Header({ title }: { title: string }) {
-  return <header className="app-header"><div className="crumb"><span>Northstar research</span><ChevronRight size={14} /><b>{title}</b></div><div className="header-actions"><button type="button" aria-label="Search"><Search size={18} /></button><button className="notification" type="button" aria-label="Notifications"><Bell size={18} /><i /></button><button className="avatar" type="button" aria-label="Account menu">AM</button></div></header>;
+  const { scope } = useOperatorSession();
+  return <header className="app-header"><div className="crumb"><span>{scope?.workspaceId} / {scope?.namespaceId}</span><ChevronRight size={14} /><b>{title}</b></div><div className="header-actions"><button type="button" aria-label="Search unavailable" disabled><Search size={18} /></button><button type="button" aria-label="Notifications unavailable" disabled><Bell size={18} /></button></div></header>;
 }
 
 function SystemMap() {

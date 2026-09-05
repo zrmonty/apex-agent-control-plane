@@ -136,6 +136,10 @@ pub(crate) fn bounded_secs_value(
 }
 
 mod backends;
+mod browser;
+#[cfg(feature = "postgres")]
+pub(crate) use browser::BrowserEnv;
+pub(crate) use browser::browser_env;
 mod credentials;
 mod keycloak;
 mod limits;

@@ -15,6 +15,16 @@ type MessageIndex = HashMap<String, DescriptorProto>;
 static INDEX: OnceLock<Result<MessageIndex, InvalidContractJson>> = OnceLock::new();
 mod unique;
 
+/// Reuse the duplicate/complexity guard for bounded provider metadata. The
+/// caller applies its smaller provider-response ceiling before this boundary.
+#[cfg(feature = "postgres")]
+pub(crate) fn parse_unique_json(input: &[u8]) -> Result<Value, InvalidContractJson> {
+    if input.len() > MAX_BYTES {
+        return Err(InvalidContractJson);
+    }
+    unique::parse(input)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidContractJson;
 

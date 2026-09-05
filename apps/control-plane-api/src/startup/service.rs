@@ -20,9 +20,12 @@ use super::env::{
 };
 use super::fanout::prepare_control_fanout;
 
+#[cfg(feature = "postgres")]
+mod browser;
 mod proxy;
 mod resolvers;
 mod storage;
+mod supervisor;
 mod workers;
 
 use proxy::{build_runtime_provider, proxy_service_status};
@@ -49,6 +52,15 @@ use workers::{
 /// process serves on is therefore created at the end, once construction is
 /// complete.
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    run_until(wait_for_shutdown_signal())
+}
+
+pub(crate) fn run_until(
+    signal: impl std::future::Future<Output = ()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let browser_settings = super::env::browser_env()?;
+    #[cfg(not(feature = "postgres"))]
+    debug_assert!(browser_settings.is_none());
     let bind_addr = resolve_bind_addr()?;
     let metrics_addr = metrics_bind_addr()?;
     // Confines every configured secret path under one operator-owned
@@ -61,6 +73,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
     let proxy_store = open_proxy_store()?;
+    let proxy_root = Arc::clone(&proxy_store.backend);
     let command_retention = command_retention()?;
     let retention_millis = command_retention.as_millis().try_into().map_err(|_| {
         io::Error::new(
@@ -68,17 +81,19 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             "command retention is too large",
         )
     })?;
-    let resolver = build_operator_resolver(&trusted_base)?;
-    let proxy_resolver = build_operator_resolver(&trusted_base)?;
+    let resolver =
+        resolvers::SharedOperatorResolver(Arc::from(build_operator_resolver(&trusted_base)?));
+    #[cfg(feature = "postgres")]
+    let browser_resolver = Arc::clone(&resolver.0);
     let agent_resolver = build_agent_resolver(&trusted_base)?;
     let governance_service = build_governance_service(&trusted_base)?;
-    let auth = OperatorTokenAuthenticator::new(resolver);
+    let auth = OperatorTokenAuthenticator::new(resolver.clone());
     let proxy_events = Arc::new(apex_control_plane_api::DurableProxyEventSink::new(
         Arc::clone(&outbox),
     ));
     let runtime_provider = build_runtime_provider()?;
     let mut proxy_service = McpProxyService::new(
-        OperatorTokenAuthenticator::new(proxy_resolver),
+        OperatorTokenAuthenticator::new(resolver),
         proxy_store.backend,
     )
     .with_event_sink(proxy_events);
@@ -95,7 +110,22 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     // is synchronous and the wrapper around it must not be constructed on a
     // runtime thread any more than the Postgres client may be.
     let ephemeral = build_ephemeral_store(&trusted_base)?;
-    let metrics = Arc::new(GatewayRuntimeMetrics::new(fanout.is_some()));
+    #[cfg(feature = "postgres")]
+    let mut browser =
+        browser::prepare(browser_settings, &trusted_base, bind_addr, browser_resolver)?;
+    #[cfg(feature = "postgres")]
+    let browser_exporter = browser.as_mut().and_then(|browser| browser.exporter.take());
+    #[cfg(feature = "postgres")]
+    let browser_sessions = browser.as_ref().map(|browser| browser.sessions.clone());
+    let metrics = GatewayRuntimeMetrics::new(fanout.is_some());
+    #[cfg(feature = "postgres")]
+    let metrics = match browser.as_ref() {
+        Some(browser) => metrics.with_browser_observations(browser.telemetry.clone()),
+        None => metrics,
+    };
+    let metrics = Arc::new(metrics);
+    #[cfg(feature = "postgres")]
+    let final_metrics = Arc::clone(&metrics);
     metrics.set_accelerator_configured(ephemeral.is_some());
     let mut service =
         ControlGatewayService::with_inbox(auth, Arc::clone(&outbox), Arc::clone(&inbox))
@@ -116,11 +146,22 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Everything above is built without a runtime entered. Same comment, same
     // reason, as `event-ingest`'s own `run()`.
+    // These final owners must outlive ALL serving tasks and runtime teardown.
+    // PG/NATS clients own runtimes themselves, including lazily connected NATS.
+    let roots = (
+        Arc::clone(&outbox),
+        Arc::clone(&inbox),
+        proxy_root,
+        ephemeral.clone(),
+        fanout.clone(),
+    );
+    let shutdown = GatewayShutdown::default();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(async move {
+    let stop = supervisor::StopOnDrop(shutdown.clone());
+    let outcome = runtime.block_on(async move {
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_service_status(
@@ -160,7 +201,19 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tonic_health::ServingStatus::Serving,
             )
             .await;
-        let shutdown = GatewayShutdown::default();
+        // All listener binding and TLS construction precede worker spawning, so
+        // an early error cannot detach an already-running background task.
+        let incoming = tonic::transport::server::TcpIncoming::bind(bind_addr)?;
+        let server = Server::builder().tls_config(tls)?
+            .add_service(health_service)
+            .add_service(bounded_control_gateway_server(service))
+            .add_service(bounded_mcp_proxy_service_server(proxy_service))
+            .add_service(apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(governance_service));
+        #[cfg(feature = "postgres")]
+        let browser_listener = match browser.as_ref() {
+            Some(browser) => Some(tokio::net::TcpListener::bind(browser.bind_addr).await?),
+            None => None,
+        };
         #[cfg(feature = "postgres")]
         let proxy_evidence_worker = proxy_store.operations.map(|store| {
             workers::spawn_proxy_evidence_worker(
@@ -208,49 +261,71 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "apex-control-plane-api listening on {bind_addr} (mTLS, client certificate required)"
         );
-        let signal_shutdown = shutdown.clone();
-        let signal_reporter = health_reporter.clone();
-        let serve_result = Server::builder()
-            .tls_config(tls)?
-            .add_service(health_service)
-            .add_service(bounded_control_gateway_server(service))
-            .add_service(bounded_mcp_proxy_service_server(proxy_service))
-            .add_service(
-                apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(
-                    governance_service,
-                ),
-            )
-            .serve_with_shutdown(bind_addr, async move {
-                wait_for_shutdown_signal().await;
-                signal_reporter
-                    .set_service_status(
-                        "apex.v1.ControlGateway",
-                        tonic_health::ServingStatus::NotServing,
-                    )
-                    .await;
-                signal_shutdown.request();
-            })
-            .await;
+        let mut servers = tokio::task::JoinSet::new();
+        let server_shutdown = shutdown.clone();
+        servers.spawn(async move {
+            server.serve_with_incoming_shutdown(incoming, async move { server_shutdown.wait().await; }).await
+                .map_err(|_| io::Error::other("control mTLS listener failed"))
+        });
+        #[cfg(feature = "postgres")]
+        if let (Some(browser), Some(listener)) = (browser, browser_listener) {
+            // The already-bound gRPC accept loop is polled concurrently with
+            // this task's bounded mTLS connection; no self-connect deadlock.
+            servers.spawn(browser.serve(listener, shutdown.clone()));
+        }
+        let serve_result = supervisor::wait(&mut servers, signal, &shutdown).await;
         shutdown.request();
+        health_reporter.set_service_status("apex.v1.ControlGateway", tonic_health::ServingStatus::NotServing).await;
+        health_reporter.set_service_status("apex.v1.McpProxyService", tonic_health::ServingStatus::NotServing).await;
+        let drain_result = supervisor::drain(&mut servers).await;
         metrics
             .shutdowns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut worker_failed = false;
         if let Some(handle) = fanout_worker {
-            let _ = handle.await;
+            worker_failed |= handle.await.is_err();
         }
         #[cfg(feature = "postgres")]
         if let Some(handle) = proxy_evidence_worker {
-            let _ = handle.await;
+            worker_failed |= handle.await.is_err();
         }
-        let _ = inbox_retention_worker.await;
-        let _ = inbox_reconciliation_worker.await;
-        let _ = status_logger.await;
-        let _ = health_monitor.await;
+        worker_failed |= inbox_retention_worker.await.is_err();
+        worker_failed |= inbox_reconciliation_worker.await.is_err();
+        worker_failed |= status_logger.await.is_err();
+        worker_failed |= health_monitor.await.is_err();
         if let Some(handle) = metrics_server {
-            let _ = handle.await;
+            worker_failed |= handle.await.is_err();
         }
         serve_result?;
+        drain_result?;
+        if worker_failed { return Err(io::Error::other("control background worker failed").into()); }
         Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    });
+    drop(stop);
+    // Also runs after bind/TLS errors before the async cleanup tail was reached.
+    #[cfg(feature = "postgres")]
+    let session_result = runtime.block_on(async {
+        match browser_sessions.as_ref() {
+            Some(sessions) => sessions
+                .shutdown()
+                .await
+                .map_err(|_| io::Error::other("browser session worker shutdown failed")),
+            None => Ok(()),
+        }
+    });
+    drop(runtime);
+    // The observation worker is startup-owned, never implicitly joined by an
+    // async destructor. Loss/incomplete output is not an authorization result.
+    #[cfg(feature = "postgres")]
+    let observation_result = match browser_exporter {
+        Some(exporter) => browser::observations::finish(exporter, &final_metrics),
+        None => Ok(()),
+    };
+    drop(roots);
+    outcome?;
+    #[cfg(feature = "postgres")]
+    session_result?;
+    #[cfg(feature = "postgres")]
+    observation_result?;
     Ok(())
 }

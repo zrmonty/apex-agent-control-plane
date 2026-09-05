@@ -9,8 +9,8 @@ services:
   mcp-proxy-portfolio:
     image: apex-mcp-gateway:runtime-baseline
     build:
-      context: ../../apps/mcp-gateway
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: apps/mcp-gateway/Dockerfile
     environment:
       APEX_MCP_PROXY_REVISION_CONFIG_FILE: /run/secrets/proxy_revision_config
       APEX_MCP_PRINCIPAL: spiffe://apex/agent/mcp-proxy-runtime

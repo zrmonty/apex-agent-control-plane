@@ -3,6 +3,26 @@
   "enabled": true,
   "sslRequired": "external",
   "accessTokenLifespan": 300,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "users": [
+    {
+      "username": "apex-browser-lab",
+      "firstName": "Browser",
+      "lastName": "Lab",
+      "email": "apex-browser-lab@example.invalid",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "apex-browser-lab-password",
+          "temporary": false
+        }
+      ]
+    }
+  ],
   "roles": {
     "realm": [
       {
@@ -12,6 +32,63 @@
     ]
   },
   "clients": [
+    {
+      "clientId": "apex-browser",
+      "name": "Apex browser edge (LAB human code flow only)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "fullScopeAllowed": false,
+      "secret": "apex-browser-lab-client-secret",
+      "redirectUris": ["https://console.example/auth/callback"],
+      "webOrigins": [],
+      "defaultClientScopes": ["basic", "profile", "email"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "https://console.example/",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "access.token.lifespan": "300",
+        "client.session.idle.timeout": "600",
+        "client.session.max.lifespan": "1800"
+      },
+      "protocolMappers": [
+        {
+          "name": "apex-browser-control-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "apex-control-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "apex-browser-control-scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "apex_control_scopes",
+            "claim.value": "[\"acme/prod\"]",
+            "jsonType.label": "JSON",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "access.tokenResponse.claim": "false"
+          }
+        }
+      ]
+    },
     {
       "clientId": "apex-control-gateway",
       "name": "Apex OOB control gateway (scoped operator)",

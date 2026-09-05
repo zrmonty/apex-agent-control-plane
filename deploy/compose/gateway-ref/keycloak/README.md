@@ -1,8 +1,9 @@
 # Lab Keycloak realms for the control gateway's operator-credential verifier
 
 **Local/CI only.** Imported by `deploy/compose/compose.control-keycloak.yaml`
-into a `start-dev` Keycloak with an in-memory database, re-imported from source
-on every start. The client secrets in these files are fixtures; they authorize
+into a `start-dev` Keycloak with a container-local development database. Recreate
+the container to import a fresh realm; restarting an existing container does not
+replace an imported realm. The client secrets in these files are fixtures; they authorize
 nothing outside this profile and are not credentials in any deployment sense.
 A real deployment issues clients through Keycloak's own admin flow and never
 commits their secrets.
@@ -31,7 +32,7 @@ gateway additionally requires the token's `sub` to appear in its
 locally-configured `APEX_CONTROL_KEYCLOAK_GLOBAL_SUBJECTS` allow-list, which is
 the part the identity provider does not control.
 
-Every client below is service-accounts-only (`client_credentials`), so the live
+The six service clients in the table below are service-accounts-only (`client_credentials`), so the live
 test can mint real tokens without driving a browser flow. Each carries an
 audience mapper for `apex-control-gateway` and a hardcoded `apex_control_scopes`
 claim, because a scope claim is what a deployment's own protocol mapper would
@@ -45,6 +46,45 @@ produce from group membership.
 | `apex-control-shortlived` | `access.token.lifespan` of 1 second, so an expired-but-genuinely-Keycloak-signed token can be presented without waiting out the realm default. |
 | `apex-control-longlived` | `access.token.lifespan` of 12 hours. A real Keycloak signature on a credential that is simply not short-lived; the gateway's `exp - iat` ceiling must refuse it. |
 | `apex-control-wrong-audience` | Audience mapper for `some-other-service`. Proves the audience check bites against material Keycloak actually issued. |
+
+### Browser code-flow fixture
+
+`apex-browser` is a separate confidential client for the Task 3 Rust browser
+edge's real local/CI login acceptance. It permits Authorization Code with
+mandatory S256 PKCE, with exactly `https://console.example/auth/callback` as
+the login redirect and `https://console.example/` as the post-logout redirect.
+It has no web origins, implicit/password/service-account/device/CIBA grants,
+or optional client scopes. Never add wildcard or arbitrary redirects here.
+
+The only default scopes are `basic`, `profile`, and `email`; `basic` supplies
+the access-token subject on current Keycloak. No `roles` audience resolver or
+`offline_access` scope is linked. The ID token's audience is the browser client;
+dedicated access-token-only mappers add audience `apex-control-gateway` and
+`apex_control_scopes: ["acme/prod"]`. No browser mapper grants break-glass.
+
+The dedicated **LAB human** is `apex-browser-lab`, enabled with no required
+enrollment actions. The canonical fixture client secret is the `secret` field
+of `clients[clientId == "apex-browser"]`; the canonical human password is
+`users[username == "apex-browser-lab"].credentials[type == "password"].value`.
+Both are deliberately committed lab values, never production credentials.
+Acceptance code should read this JSON instead of duplicating those values.
+
+Realm refresh rotation is enabled with `revokeRefreshToken: true` and
+`refreshTokenMaxReuse: 0`. This affects interactive refresh sessions; the six
+existing client-credentials fixtures retain their mappers, roles and lifetimes.
+The real acceptance test must prove refresh reuse rejection against Keycloak.
+
+Use the dedicated [working-browser fixture](../../working-browser/README.md)
+for host Rust tests. It sets the issuer to the published HTTPS loopback address,
+uses the existing `APEX_BROWSER_TEST_PKI_DIR/trusted-host` material, and explicitly
+selects an in-memory `dev-mem` database. It is independent of the gateway-ref
+overlay, whose in-network issuer above remains intentional. Neither fixture is
+a production startup profile.
+
+Configuration references: Keycloak's [client, PKCE, audience and refresh settings](https://www.keycloak.org/docs/latest/server_admin/),
+[basic subject mapper migration](https://www.keycloak.org/docs/latest/upgrading/index.html),
+[realm representation](https://www.keycloak.org/docs-api/latest/rest-api/index.html#RealmRepresentation),
+and [OIDC attribute constants](https://www.keycloak.org/docs-api/latest/javadocs/constant-values.html#org.keycloak.protocol.oidc.OIDCConfigAttributes.PKCE_CODE_CHALLENGE_METHOD).
 
 ## `other-realm.json`
 
