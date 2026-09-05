@@ -27,7 +27,10 @@ selection and removal of unconditional Compose health success are committed
 Pure launch validation is committed in `0ba80dc`, with Rust health-wire checks
 in `79de522`. Image startup (`3679446`) passes eight cases and detects the older fallback.
 The bounded readiness monitor is committed in `6dafe00`, with 41 component
-tests and fresh full-suite verification. A shared report validator is next.
+tests and fresh full-suite verification. The shared bound report validator is
+committed in `09c04fa`, with 25 additional codec/presence tests and independent
+review. Its 8KiB boundary preserves exact integer timing and rejects mismatched
+identity/check/stage data; it does not authenticate the expected launch.
 The complete task remains open: no authenticated health
 listener or actual network/admission owners are composed into production yet.
 

@@ -85,3 +85,44 @@ the canonical fixture with synthetic values, not the real exporter artifact:
 its runtimeManifestHash differs. Real producer/agent compatibility and the legacy
 provider regression must be verified before provider replacement. Task 7, G1
 and aggregate release acceptance remain open; no merge/push/CI run is claimed.
+
+## Task 6F: bound report codec — 2026-09-05
+
+Source: `09c04fa56432d0649d7f04f237a8692b17dae809`. Fourteen files, 1,144
+physical lines total, maximum 316 per file. Eleven are new; existing changes
+are limited to monitor publication, the shared stage-name list, and explicit
+optional uint64 presence in descriptor validation.
+
+`ReadinessReportCodec` binds once to independently copied/revalidated generated
+configuration and launch metadata. Both encode and original-text decode share
+one semantic checker: exact six-field target and four digest/instance bindings,
+nine unique checks, valid status/reason pairs, and complete successful stages for
+ready reports. Non-ready initial/stale/shutdown reports remain representable.
+The trusted caller still owns launch authentication, current lease and freshness.
+
+Original UTF-8 is capped at 8,192 bytes before parsing, preserving duplicate,
+alias and strict integer-string checks. Generated data rejects active objects
+before descriptor/encoding work; final encoded text is also bounded. Optional
+uncertainty preserves absence versus zero, durationNs is required, and bigint
+division retains exact microseconds plus the original nanosecond remainder.
+Readiness has no trace-context owner yet; arbitrary trace/span IDs are refused,
+not replaced with fabricated IDs or advertised as end-to-end tracing.
+
+Independent review found a test-strength issue: later shape rejection could mask
+removal of the early size guard. The corrected test observes descriptor entry
+and all serialization, with restored instrumentation and a valid positive.
+Single-guard removal produced RED (0/1); exact source restoration produced GREEN
+(1/1). Re-review closed the finding; no production behavior correction was needed.
+
+Main reran the same actual Rust artifact and three gateway commands shown above
+after that final correction: **417 total, 416 passed, one existing Windows symlink
+skip, zero failures, 29.854s**; typecheck and production build passed. The 66
+readiness/codec tests include the existing real socket/direct-child ownership
+checks. The codec owner separately verified 27 existing consumer/preflight tests.
+The exact 8,192-byte incoming positive uses legal trailing whitespace; no claim
+is made that the fixed canonical report can reach that exact output size.
+
+This commit provides no HTTP listener/probe, secure credential loading, runtime
+authority, network enforcement or admission owner. Those integrations remain
+open and managed composition still refuses unavailable enforcement. No image
+rebuild, configured-health image acceptance, aggregate gate, merge or push claim.
