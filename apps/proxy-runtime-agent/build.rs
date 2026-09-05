@@ -12,7 +12,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .codec_path("apex_contract::RedactedProstCodec")
         .compile_with_config(
             config,
-            &["../../contracts/proto/apex/v1/proxy_runtime.proto"],
+            &[
+                "../../contracts/proto/apex/v1/proxy_runtime.proto",
+                "../../contracts/proto/apex/v1/proxy_runtime_authority.proto",
+            ],
             &["../../contracts/proto"],
         )?;
     pbjson_build::Builder::new()
@@ -20,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(&[".apex.v1"])?;
     for file in [
         "proxy_runtime.proto",
+        "proxy_runtime_authority.proto",
         "mcp_proxy.proto",
         "proxy_management.proto",
         "proxy_trace.proto",

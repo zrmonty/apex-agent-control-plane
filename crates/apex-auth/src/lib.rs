@@ -16,6 +16,6 @@ pub use ephemeral::{
 #[cfg(feature = "valkey")]
 pub use ephemeral::{ValkeyConfig, ValkeyEphemeralStore};
 pub use runtime_peer::{
-    AuthenticatedRuntimePeer, RuntimePeerError, RuntimePeerPolicy, RuntimePeerRole,
+    AuthenticatedRuntimePeer, RuntimePeerError, RuntimePeerPair, RuntimePeerPolicy, RuntimePeerRole,
 };
 pub use verifier::{BearerTokenResolver, BearerTokenVerifier, CallerVerifier, PeerIdentity};

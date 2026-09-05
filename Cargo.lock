@@ -82,6 +82,7 @@ name = "apex-control-plane-api"
 version = "0.1.0"
 dependencies = [
  "apex-auth",
+ "apex-contract",
  "apex-domain",
  "apex-durability",
  "apex-policy",

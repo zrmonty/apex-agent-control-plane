@@ -10,6 +10,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .build_transport(true)
+        // Shared static decoder failures; never expose malformed wire field paths.
+        .codec_path("apex_contract::RedactedProstCodec")
         .compile_with_config(
             config,
             &[
@@ -17,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../contracts/proto/apex/v1/governance.proto",
                 "../../contracts/proto/apex/v1/mcp_proxy.proto",
                 "../../contracts/proto/apex/v1/proxy_runtime.proto",
+                "../../contracts/proto/apex/v1/proxy_runtime_authority.proto",
             ],
             &["../../contracts/proto"],
         )?;

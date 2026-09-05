@@ -11,6 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::PeerIdentity;
 
 mod decode;
+mod pair;
+
+pub use pair::RuntimePeerPair;
 
 /// The two explicitly registered runtime roles; no operator/workload inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

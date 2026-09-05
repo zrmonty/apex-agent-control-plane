@@ -20,6 +20,7 @@ path = "src/main.rs"
 # application. The OOB control gateway is a distinct authentication boundary
 # and transport, not a distinct durability or event-contract story.
 apex-auth = { version = "0.1.0", path = "../../crates/apex-auth" }
+apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
 apex-domain = { version = "0.1.0", path = "../../crates/apex-domain" }
 apex-durability = { version = "0.1.0", path = "../../crates/apex-durability" }
 apex-policy = { version = "0.1.0", path = "../../crates/apex-policy" }

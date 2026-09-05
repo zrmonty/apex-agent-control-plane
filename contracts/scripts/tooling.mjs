@@ -9,7 +9,7 @@ export const contractsRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".
 export const generatedRoot = resolve(contractsRoot, "../packages/apex-contracts-ts/src/gen");
 // event.proto has a frozen, independently built ControlAction enum. Never merge
 // its descriptor namespace with the management API or alter its hash contract.
-export const sources = ["control", "governance", "mcp_proxy", "proxy_approval", "proxy_trace", "proxy_management", "proxy_runtime"];
+export const sources = ["control", "governance", "mcp_proxy", "proxy_approval", "proxy_trace", "proxy_management", "proxy_runtime", "proxy_runtime_authority"];
 export function buf(args) {
   const result = spawnSync(process.execPath, [require.resolve("@bufbuild/buf/bin/buf"), ...args], { cwd: contractsRoot, encoding: "utf8" });
   if (result.error) throw result.error;

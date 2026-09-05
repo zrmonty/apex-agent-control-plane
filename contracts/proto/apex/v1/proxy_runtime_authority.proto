@@ -1,0 +1,54 @@
+syntax = "proto3";
+package apex.v1;
+import "apex/v1/proxy_runtime.proto";
+import "apex/v1/proxy_management.proto";
+
+// Required workload mTLS callback, never exposed by the browser API. A checked
+// point-in-time snapshot is not a transferable permit or authorization to execute.
+// Production handlers must enforce current deployment enrollment/policy and the
+// exact PostgreSQL lease, with bounded request/response/work ownership.
+service RuntimeAuthorityService {
+  rpc CheckRuntimeAuthority(CheckRuntimeAuthorityRequest) returns (RuntimeAuthoritySnapshot);
+}
+
+enum RuntimeAuthorityAction {
+  RUNTIME_AUTHORITY_ACTION_UNSPECIFIED = 0;
+  // No Ensure, admission, drain, removal or placement permission is issued.
+  RUNTIME_AUTHORITY_ACTION_CHECK_CURRENT_OPERATION = 1;
+}
+
+message CheckRuntimeAuthorityRequest {
+  uint32 schema_version = 1; // Exactly 1 at the live boundary.
+  RuntimeTarget target = 2; // Current operation claims, not an older installed instance.
+  string operation_id = 3;
+  string command_id = 4; // Correlation only, not durable replay protection.
+  RuntimeAuthorityAction action = 5;
+  string installation_id = 6;
+  // Exactly 32 bytes. Only the authenticated, enrolled restricted agent can
+  // attest this leaf observation. Callback TLS authenticates the agent, NOT an
+  // end-to-end controller signature. No caller-provided worker or role fields.
+  bytes observed_controller_certificate_sha256 = 7;
+}
+
+// Bounded safe projection, built only after the real checks. No raw revision,
+// spec, secret reference, certificate, worker name, engine ID or readiness claim.
+message RuntimeAuthoritySnapshot {
+  uint32 schema_version = 1;
+  RuntimeTarget target = 2;
+  string operation_id = 3;
+  string command_id = 4;
+  RuntimeAuthorityAction action = 5;
+  string installation_id = 6;
+  string agent_identity_id = 7;
+  string observed_controller_identity_id = 8;
+  string peer_policy_version = 9;
+  string enrollment_version = 10;
+  string host_policy_version = 11;
+  ProxyDesiredState desired_state = 12;
+  ProxyObservedState observed_state = 13;
+  string config_hash = 14; // Historical control hash, not runtime manifest/image hash.
+  // Database times from the validated lookup; integer microseconds. Do not
+  // subtract remote wall clocks or treat receipt as an extension of the lease.
+  uint64 checked_at_unix_us = 15;
+  uint64 lease_expires_at_unix_us = 16;
+}
