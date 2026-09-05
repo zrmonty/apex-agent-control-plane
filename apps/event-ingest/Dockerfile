@@ -28,6 +28,7 @@ COPY crates ./crates
 COPY apps/event-ingest ./apps/event-ingest
 COPY apps/control-plane-api ./apps/control-plane-api
 COPY apps/agent-supervisor ./apps/agent-supervisor
+COPY apps/proxy-runtime-agent ./apps/proxy-runtime-agent
 COPY contracts ./contracts
 # `--features postgres` compiles deploy/postgres/*.sql into the binary with
 # include_str!. Without this the documented feature build fails outright:

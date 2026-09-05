@@ -355,10 +355,11 @@ jobs:
           echo "control gateway never began serving" >&2
           exit 1
 
-      # The managed proxy has its own provider-owned network and image cache.
-      # This gate is intentionally separate from the control gateway startup:
-      # a green gRPC port must not be mistaken for a green runtime boundary.
-      - name: Build and inspect the isolated MCP proxy runtime
+      # The managed overlay is a startup-refusal bootstrap, not a serving
+      # deployment. Verify the real image's packaging and startup boundaries,
+      # then inspect the created Compose container's isolation independently.
+      # These checks do not prove readiness or a managed MCP handshake.
+      - name: Build and verify the isolated MCP bootstrap
         working-directory: deploy/compose
         timeout-minutes: 20
         run: |
@@ -366,31 +367,13 @@ jobs:
           P="-p apex-mcp-proxy-ci -f compose.mcp-proxy.yaml -f compose.ci-cache.yaml"
           docker compose $P down -v --remove-orphans || true
           docker compose $P build mcp-proxy-portfolio
-          docker compose $P up -d --force-recreate mcp-proxy-portfolio mcp-proxy-test-upstream
-          for attempt in $(seq 1 30); do
-            state="$(docker compose $P ps -a --format '{{.Name}} {{.State}}' | grep mcp-proxy-portfolio || true)"
-            case "$state" in
-              *exited*)
-                docker compose $P logs --no-color mcp-proxy-portfolio >&2
-                echo "managed MCP proxy exited: $state" >&2
-                exit 1
-                ;;
-            esac
-            container="$(docker compose $P ps -q mcp-proxy-portfolio)"
-            health="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
-            if [ "$health" = healthy ]; then
-              echo "managed MCP proxy is healthy (attempt $attempt)"
-              break
-            fi
-            if [ "$attempt" = 30 ]; then
-              docker compose $P ps -a >&2
-              docker compose $P logs --no-color mcp-proxy-portfolio mcp-proxy-test-upstream >&2
-              echo "managed MCP proxy never became healthy" >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          container="$(docker compose $P ps -q mcp-proxy-portfolio)"
+          image="$(docker image inspect --format '{{.Id}}' apex-mcp-gateway:runtime-baseline)"
+          node --test ../../apps/mcp-gateway/scripts/verify-image/*.test.mjs
+          node ../../apps/mcp-gateway/scripts/verify-image.mjs --image "$image" --suite packaging
+          node ../../apps/mcp-gateway/scripts/verify-image.mjs --image "$image" --suite startup
+          docker compose $P create --no-build mcp-proxy-portfolio
+          container="$(docker compose $P ps -a -q mcp-proxy-portfolio)"
+          [ -n "$container" ] || { echo "MCP bootstrap container was not created" >&2; exit 1; }
           APEX_CONTROL_LIVE_MCP_PROXY_RUNTIME=1 \
           APEX_CONTROL_LIVE_MCP_PROXY_CONTAINER="$container" \
             cargo test -p apex-control-plane-api --test live_mcp_proxy_runtime -- --nocapture
@@ -521,6 +504,9 @@ jobs:
         working-directory: apps/mcp-gateway
         timeout-minutes: 15
         env:
+          # Explicit legacy stdio fixture; governance and event transport stay live.
+          NODE_ENV: development
+          APEX_MCP_PROFILE: development-standalone
           APEX_MCP_GOVERNANCE_MODE: live
           APEX_MCP_PRINCIPAL: spiffe://apex/agent/reference
           APEX_MCP_AGENT_ID: reference-agent
