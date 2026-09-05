@@ -38,6 +38,7 @@ jobs:
           node --test scripts/tests/verify-working-mcp-gateway.test.mjs
           node --test scripts/tests/runtime-agent-ci.test.mjs
           node --test scripts/tests/mcp-proxy-bootstrap.test.mjs
+          node --test scripts/tests/keycloak-ci-readiness.test.mjs
           node scripts/verify-working-mcp-gateway.mjs --list
 
   source-line-limits:

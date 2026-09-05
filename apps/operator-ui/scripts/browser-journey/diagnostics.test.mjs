@@ -33,3 +33,29 @@ test('non-errors and forged diagnostic strings cannot become output', () => {
 test('unknown early failures retain a static configuration category before any phase notification', () => {
   assert.equal(createDiagnostics().category(new Error('path-secret-canary')), 'configuration');
 });
+
+for (const operation of ['initial_inventory', 'create', 'detail_reload', 'inventory_reload', 'restored_inventory']) {
+  for (const stage of ['wait', 'status', 'cache', 'body', 'size', 'utf8', 'json']) {
+    test(`only the exact ${operation} ${stage} response category can cross the diagnostic boundary`, () => {
+      const category = `response_${operation}_${stage}`;
+      const diagnostics = createDiagnostics(); diagnostics.phase(category);
+      assert.equal(diagnostics.category(new Error('secret-canary')), category);
+      diagnostics.phase('identity');
+      assert.equal(diagnostics.category(new Error(category)), category);
+      for (const forged of [`${category}\nsecret-canary`, `${category} secret-canary`, `${category}_extra`]) {
+        assert.equal(diagnostics.category(new Error(forged)), 'identity');
+        diagnostics.phase(forged);
+        assert.equal(diagnostics.category(new Error('secret-canary')), 'internal');
+        diagnostics.phase('identity');
+      }
+    });
+  }
+}
+
+test('response vocabulary does not accept arbitrary operation or stage suffixes', () => {
+  const diagnostics = createDiagnostics(); diagnostics.phase('identity');
+  for (const label of ['response_secret-canary_body', 'response_create_secret-canary',
+    'response_create_body_502', 'response_detail_reload_url', 'response_create_body\r\n']) {
+    assert.equal(diagnostics.category(new Error(label)), 'identity');
+  }
+});

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { CONSOLE, KEYCLOAK, requireValue, allowedBrowserUrl, verifiedProxy, UUID7 } from './policy.mjs';
 import { observeLoginCookies } from './cookie-observer.mjs';
+import { jsonResponse } from './response.mjs';
 
 const SERVICE = '/api/apex/v1/McpProxyService/';
 const NAME = 'Browser journey draft';
@@ -17,16 +18,6 @@ function challenge(value) {
     && query.get('scope') === 'openid' && !query.has('client_secret') && !query.has('code_verifier'), 'login');
   for (const key of ['state', 'nonce', 'code_challenge']) requireValue(query.getAll(key).length === 1 && opaque(query.get(key)), 'login');
   requireValue(query.get('state') !== query.get('nonce'), 'login');
-}
-async function json(response, onPhase) {
-  onPhase('response');
-  requireValue(response.status() === 200, 'response');
-  requireValue(response.headers()['cache-control'] === 'no-store', 'response');
-  const bytes = await response.body();
-  requireValue(bytes.length <= 1024 * 1024, 'response');
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  requireValue(!/(?:access_token|refresh_token|id_token|accessToken|refreshToken|idToken)/.test(text), 'privacy');
-  return JSON.parse(text);
 }
 function matches(response, suffix) {
   return response.url() === CONSOLE + suffix && response.request().method() === (suffix === '/api/session' ? 'GET' : 'POST');
@@ -130,11 +121,10 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await page.getByLabel('Workspace and namespace').selectOption('acme/prod');
   requireValue(await page.getByLabel('Workspace and namespace').inputValue() === 'acme/prod', 'scope');
   requireValue(callbackSeen, 'login');
-  onPhase('response');
-  const empty = await json(await initialInventory, onPhase);
+  const { value: empty } = await jsonResponse('initial_inventory', () => initialInventory, onPhase);
   onPhase('inventory');
   // Protobuf JSON omits an empty repeated field. Never infer emptiness from an
-  // unavailable reply: json() above required an actual no-store HTTP 200.
+  // unavailable reply: jsonResponse() above required an actual no-store HTTP 200.
   requireValue((empty.proxies === undefined || (Array.isArray(empty.proxies) && empty.proxies.length === 0))
     && !empty.nextPageToken, 'inventory');
   await page.getByRole('heading', { name: 'No proxies yet', exact: true }).waitFor();
@@ -149,8 +139,8 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await page.getByLabel('Stable slug', { exact: true }).fill(SLUG);
   await screenshotPair(page, artifacts, 'draft', onPhase);
   onPhase('identity');
-  const createdResponse = await responseFor(page, SERVICE + 'CreateProxy', () => page.getByRole('button', { name: 'Create draft', exact: true }).click());
-  const created = await json(createdResponse, onPhase);
+  const { response: createdResponse, value: created } = await jsonResponse('create', () =>
+    responseFor(page, SERVICE + 'CreateProxy', () => page.getByRole('button', { name: 'Create draft', exact: true }).click()), onPhase);
   onPhase('identity');
   const id = verifiedProxy(created, NAME, SLUG);
   const input = createdResponse.request().postDataJSON();
@@ -159,12 +149,14 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await page.getByRole('heading', { name: NAME, exact: true }).waitFor();
   requireValue(new URL(page.url()).pathname === '/mcp-proxies/' + id, 'identity');
   // A hard detail reload proves a fresh actual GetProxy, not create cache data.
-  const detail = await json(await responseFor(page, SERVICE + 'GetProxy', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
+  const { value: detail } = await jsonResponse('detail_reload', () =>
+    responseFor(page, SERVICE + 'GetProxy', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('identity');
   requireValue(verifiedProxy(detail, NAME, SLUG) === id, 'identity');
   await page.getByRole('heading', { name: NAME, exact: true }).waitFor();
   onPhase('inventory');
-  const inventory = await json(await responseFor(page, SERVICE + 'ListProxies', () => page.goto(CONSOLE + '/mcp-proxies', { waitUntil: 'domcontentloaded' })), onPhase);
+  const { value: inventory } = await jsonResponse('inventory_reload', () =>
+    responseFor(page, SERVICE + 'ListProxies', () => page.goto(CONSOLE + '/mcp-proxies', { waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('inventory');
   verifyInventory(inventory, id);
   await page.getByRole('link', { name: 'Open ' + NAME, exact: true }).waitFor();
@@ -184,7 +176,8 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   onPhase('protocol');
   await protocol.exchange('R');
   onPhase('inventory');
-  const restored = await json(await responseFor(page, SERVICE + 'ListProxies', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
+  const { value: restored } = await jsonResponse('restored_inventory', () =>
+    responseFor(page, SERVICE + 'ListProxies', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('inventory');
   verifyInventory(restored, id);
   const link = page.getByRole('link', { name: 'Open ' + NAME, exact: true });

@@ -52,6 +52,43 @@ pub(super) fn ui_failure(line: &str) -> Option<&'static str> {
         "internal",
         "cleanup",
         "journey",
+        // Exact finite vocabulary shared with browser-journey/response.mjs.
+        // Return only these static literals, never a slice of child output.
+        "response_initial_inventory_wait",
+        "response_initial_inventory_status",
+        "response_initial_inventory_cache",
+        "response_initial_inventory_body",
+        "response_initial_inventory_size",
+        "response_initial_inventory_utf8",
+        "response_initial_inventory_json",
+        "response_create_wait",
+        "response_create_status",
+        "response_create_cache",
+        "response_create_body",
+        "response_create_size",
+        "response_create_utf8",
+        "response_create_json",
+        "response_detail_reload_wait",
+        "response_detail_reload_status",
+        "response_detail_reload_cache",
+        "response_detail_reload_body",
+        "response_detail_reload_size",
+        "response_detail_reload_utf8",
+        "response_detail_reload_json",
+        "response_inventory_reload_wait",
+        "response_inventory_reload_status",
+        "response_inventory_reload_cache",
+        "response_inventory_reload_body",
+        "response_inventory_reload_size",
+        "response_inventory_reload_utf8",
+        "response_inventory_reload_json",
+        "response_restored_inventory_wait",
+        "response_restored_inventory_status",
+        "response_restored_inventory_cache",
+        "response_restored_inventory_body",
+        "response_restored_inventory_size",
+        "response_restored_inventory_utf8",
+        "response_restored_inventory_json",
     ]
     .into_iter()
     .find(|known| *known == category)
@@ -139,6 +176,63 @@ fn ui_failure_diagnostics_never_reflect_untrusted_bytes() {
     ] {
         assert_eq!(ui_failure(line), None);
     }
+}
+
+#[test]
+fn response_diagnostics_accept_only_exact_static_operation_stage_pairs() {
+    for operation in [
+        "initial_inventory",
+        "create",
+        "detail_reload",
+        "inventory_reload",
+        "restored_inventory",
+    ] {
+        for stage in ["wait", "status", "cache", "body", "size", "utf8", "json"] {
+            let category = format!("response_{operation}_{stage}");
+            let line = format!("UI_JOURNEY_FAILED_{category}\n");
+            assert_eq!(ui_failure(&line), Some(category.as_str()));
+            for forged in [
+                format!("UI_JOURNEY_FAILED_{category} secret-canary\n"),
+                format!("UI_JOURNEY_FAILED_{category}_extra\n"),
+                format!("UI_JOURNEY_FAILED_{category}\r\n"),
+                format!("UI_JOURNEY_FAILED_{category}"),
+                format!("UI_JOURNEY_FAILED_{category}\nsecret-canary"),
+            ] {
+                assert_eq!(ui_failure(&forged), None);
+            }
+        }
+    }
+    for line in [
+        "UI_JOURNEY_FAILED_response_secret-canary_body\n",
+        "UI_JOURNEY_FAILED_response_create_secret-canary\n",
+        "UI_JOURNEY_FAILED_response_create_body_502\n",
+    ] {
+        assert_eq!(ui_failure(line), None);
+    }
+}
+
+#[test]
+fn response_diagnostics_forward_only_static_categories_through_both_readers() {
+    let input = b"UI_JOURNEY_FAILED_response_detail_reload_body secret-canary\n\
+        UI_JOURNEY_FAILED_response_detail_reload_body\n\
+        ROOT_BROWSER_PANIC secret-canary.rs:1\n";
+    let mut forwarded = Vec::new();
+    super::ui::read_diagnostics(input.as_slice(), |category| {
+        writeln!(forwarded, "UI_JOURNEY_FAILED_{category}").unwrap();
+    });
+    assert_eq!(
+        forwarded,
+        b"UI_JOURNEY_FAILED_response_detail_reload_body\n"
+    );
+    let state = Arc::new(Mutex::new(Diagnostics::default()));
+    drain(std::io::Cursor::new(forwarded), Arc::clone(&state))
+        .join()
+        .unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.ui_failure, Some("response_detail_reload_body"));
+    assert!(!state.panic);
+    assert!(state.panic_locations.is_empty());
+    assert!(!format!("{state:?}").contains("secret-canary"));
 }
 
 #[test]

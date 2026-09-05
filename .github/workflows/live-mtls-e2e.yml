@@ -783,26 +783,28 @@ jobs:
                 exit 1
                 ;;
             esac
-            if (echo > /dev/tcp/127.0.0.1/18449) >/dev/null 2>&1; then
+            # Docker's published port can accept before application startup.
+            # Require the deployed resolver marker too, inside this bounded wait.
+            # Capture first: grep -q on a live pipe can SIGPIPE Compose under
+            # pipefail even when the marker exists. A failed logs command must
+            # never count as a successful selection observation.
+            if (echo > /dev/tcp/127.0.0.1/18449) >/dev/null 2>&1 \
+              && resolver_logs="$(docker compose $P logs --no-color --tail 200 control-plane-api-oidc)" \
+              && grep -F 'operator credentials: keycloak' <<< "$resolver_logs" >/dev/null; then
               echo "the Keycloak-backed control gateway is serving (attempt $attempt)"
               break
             fi
             if [ "$attempt" = 90 ]; then
               docker compose $P ps -a >&2
               docker compose $P logs --no-color --tail 150 keycloak control-plane-api-oidc >&2
-              echo "the Keycloak-backed control gateway never began serving" >&2
+              echo "the control gateway never confirmed Keycloak resolver selection and TCP startup" >&2
               exit 1
             fi
             sleep 2
           done
-          # Proves the *deployed* selection path chose the Keycloak resolver,
-          # before any token is presented. This container is configured with no
-          # static table at all, so a wrong branch here means it authenticates
-          # nobody -- and every rejection below would then pass for the wrong
-          # reason.
-          docker compose $P logs --no-color control-plane-api-oidc \
-            | grep -q 'operator credentials: keycloak' \
-            || { echo "the OIDC replica did not select the Keycloak resolver" >&2; exit 1; }
+          # No static table is configured. The positive selection observation
+          # above prevents token-rejection tests from passing for the wrong
+          # reason; the next step still proves actual credential behavior.
 
       - name: Live Keycloak operator credential tests
         working-directory: apps/control-plane-api
