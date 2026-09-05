@@ -2,7 +2,7 @@
 // @generated from file apex/v1/proxy_runtime.proto (package apex.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 import type { McpProxySpec } from "./mcp_proxy_pb.js";
 import type { ProxyStageTiming, ProxyTelemetryPolicy } from "./proxy_trace_pb.js";
@@ -417,6 +417,14 @@ export declare type RuntimeObservation = Message<"apex.v1.RuntimeObservation"> &
    * @generated from field: repeated apex.v1.ProxyStageTiming stages = 10;
    */
   stages: ProxyStageTiming[];
+
+  /**
+   * Additive wire evidence, not authority. Validated owners must check target,
+   * outer/report consistency and bounded freshness; ready never implies admitting.
+   *
+   * @generated from field: apex.v1.ReadinessReport readiness = 11;
+   */
+  readiness?: ReadinessReport | undefined;
 };
 
 /**
@@ -470,6 +478,455 @@ export declare type UpstreamProbeObservation = Message<"apex.v1.UpstreamProbeObs
  * Use `create(UpstreamProbeObservationSchema)` to create a new message.
  */
 export declare const UpstreamProbeObservationSchema: GenMessage<UpstreamProbeObservation>;
+
+/**
+ * References and versions resolve through a deployment-owned scoped provider.
+ * Never raw secret bytes, host paths, user-supplied URLs or Docker options.
+ *
+ * @generated from message apex.v1.RuntimeMaterialBinding
+ */
+export declare type RuntimeMaterialBinding = Message<"apex.v1.RuntimeMaterialBinding"> & {
+  /**
+   * @generated from field: apex.v1.RuntimeMaterialRole role = 1;
+   */
+  role: RuntimeMaterialRole;
+
+  /**
+   * @generated from field: string reference = 2;
+   */
+  reference: string;
+
+  /**
+   * @generated from field: string version = 3;
+   */
+  version: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeMaterialBinding.
+ * Use `create(RuntimeMaterialBindingSchema)` to create a new message.
+ */
+export declare const RuntimeMaterialBindingSchema: GenMessage<RuntimeMaterialBinding>;
+
+/**
+ * Wire representation only. The later semantic profile requires loopback port
+ * 8081 and a dedicated health-token role; this cannot widen a listener or path.
+ *
+ * @generated from message apex.v1.RuntimeHealthBinding
+ */
+export declare type RuntimeHealthBinding = Message<"apex.v1.RuntimeHealthBinding"> & {
+  /**
+   * @generated from field: uint32 port = 1;
+   */
+  port: number;
+
+  /**
+   * @generated from field: string credential_ref = 2;
+   */
+  credentialRef: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeHealthBinding.
+ * Use `create(RuntimeHealthBindingSchema)` to create a new message.
+ */
+export declare const RuntimeHealthBindingSchema: GenMessage<RuntimeHealthBinding>;
+
+/**
+ * Separate deployment binding; RuntimeConfiguration v1 and its secret union
+ * remain unchanged. A digest is integrity data, never runtime authority.
+ * Only the Task 7 agent constructs/stages this after authenticated ownership
+ * and current-lease checks. Consumers must validate the original trusted target,
+ * hashes, image, process instance, authority profile and material versions.
+ *
+ * @generated from message apex.v1.RuntimeLaunchContext
+ */
+export declare type RuntimeLaunchContext = Message<"apex.v1.RuntimeLaunchContext"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.RuntimeTarget target = 2;
+   */
+  target?: RuntimeTarget | undefined;
+
+  /**
+   * @generated from field: string config_hash = 3;
+   */
+  configHash: string;
+
+  /**
+   * @generated from field: string runtime_manifest_hash = 4;
+   */
+  runtimeManifestHash: string;
+
+  /**
+   * @generated from field: string image_ref = 5;
+   */
+  imageRef: string;
+
+  /**
+   * @generated from field: string process_instance_id = 6;
+   */
+  processInstanceId: string;
+
+  /**
+   * @generated from field: apex.v1.RuntimeHealthBinding health = 7;
+   */
+  health?: RuntimeHealthBinding | undefined;
+
+  /**
+   * @generated from field: repeated apex.v1.RuntimeMaterialBinding materials = 8;
+   */
+  materials: RuntimeMaterialBinding[];
+
+  /**
+   * @generated from field: string launch_context_hash = 9;
+   */
+  launchContextHash: string;
+
+  /**
+   * Exact deployment-owned connection/trust profile, not a caller endpoint.
+   *
+   * @generated from field: string authority_profile_ref = 10;
+   */
+  authorityProfileRef: string;
+
+  /**
+   * @generated from field: string authority_profile_version = 11;
+   */
+  authorityProfileVersion: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeLaunchContext.
+ * Use `create(RuntimeLaunchContextSchema)` to create a new message.
+ */
+export declare const RuntimeLaunchContextSchema: GenMessage<RuntimeLaunchContext>;
+
+/**
+ * Bounded identifiers only; no free-text diagnostics or dynamic labels.
+ *
+ * @generated from message apex.v1.ReadinessCheck
+ */
+export declare type ReadinessCheck = Message<"apex.v1.ReadinessCheck"> & {
+  /**
+   * @generated from field: apex.v1.ReadinessCheckId id = 1;
+   */
+  id: ReadinessCheckId;
+
+  /**
+   * @generated from field: apex.v1.ReadinessCheckStatus status = 2;
+   */
+  status: ReadinessCheckStatus;
+
+  /**
+   * @generated from field: apex.v1.ReadinessReason reason = 3;
+   */
+  reason: ReadinessReason;
+};
+
+/**
+ * Describes the message apex.v1.ReadinessCheck.
+ * Use `create(ReadinessCheckSchema)` to create a new message.
+ */
+export declare const ReadinessCheckSchema: GenMessage<ReadinessCheck>;
+
+/**
+ * Generated wire data is not proof of readiness or authenticated launch.
+ * Missing/zero/unknown checks are never ready. Validated owners enforce complete
+ * target/hash/instance binding, outer observation consistency and freshness.
+ * They also enforce bounded checks (at most 16) and stages; protobuf defaults
+ * impose no such semantic policy. Readiness does not grant call admission.
+ *
+ * @generated from message apex.v1.ReadinessReport
+ */
+export declare type ReadinessReport = Message<"apex.v1.ReadinessReport"> & {
+  /**
+   * @generated from field: bool live = 1;
+   */
+  live: boolean;
+
+  /**
+   * @generated from field: bool ready = 2;
+   */
+  ready: boolean;
+
+  /**
+   * @generated from field: apex.v1.RuntimeTarget target = 3;
+   */
+  target?: RuntimeTarget | undefined;
+
+  /**
+   * @generated from field: uint64 observed_at_unix_us = 4;
+   */
+  observedAtUnixUs: bigint;
+
+  /**
+   * @generated from field: string config_hash = 5;
+   */
+  configHash: string;
+
+  /**
+   * @generated from field: string runtime_manifest_hash = 6;
+   */
+  runtimeManifestHash: string;
+
+  /**
+   * @generated from field: string process_instance_id = 7;
+   */
+  processInstanceId: string;
+
+  /**
+   * @generated from field: repeated apex.v1.ReadinessCheck checks = 8;
+   */
+  checks: ReadinessCheck[];
+
+  /**
+   * @generated from field: repeated apex.v1.ProxyStageTiming stages = 9;
+   */
+  stages: ProxyStageTiming[];
+
+  /**
+   * @generated from field: string launch_context_hash = 10;
+   */
+  launchContextHash: string;
+};
+
+/**
+ * Describes the message apex.v1.ReadinessReport.
+ * Use `create(ReadinessReportSchema)` to create a new message.
+ */
+export declare const ReadinessReportSchema: GenMessage<ReadinessReport>;
+
+/**
+ * Deployment material role identifiers, not grants or required-role policy.
+ *
+ * @generated from enum apex.v1.RuntimeMaterialRole
+ */
+export enum RuntimeMaterialRole {
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_HEALTH_TOKEN = 1;
+   */
+  HEALTH_TOKEN = 1,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_GOVERNANCE_CA = 2;
+   */
+  GOVERNANCE_CA = 2,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_GOVERNANCE_CERT = 3;
+   */
+  GOVERNANCE_CERT = 3,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_GOVERNANCE_KEY = 4;
+   */
+  GOVERNANCE_KEY = 4,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_GOVERNANCE_TOKEN = 5;
+   */
+  GOVERNANCE_TOKEN = 5,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_EVIDENCE_CA = 6;
+   */
+  EVIDENCE_CA = 6,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_EVIDENCE_CERT = 7;
+   */
+  EVIDENCE_CERT = 7,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_EVIDENCE_KEY = 8;
+   */
+  EVIDENCE_KEY = 8,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_EVIDENCE_TOKEN = 9;
+   */
+  EVIDENCE_TOKEN = 9,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_INBOUND_JWKS = 10;
+   */
+  INBOUND_JWKS = 10,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_WORKLOAD_CA = 11;
+   */
+  WORKLOAD_CA = 11,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_WORKLOAD_CERT = 12;
+   */
+  WORKLOAD_CERT = 12,
+
+  /**
+   * @generated from enum value: RUNTIME_MATERIAL_ROLE_WORKLOAD_KEY = 13;
+   */
+  WORKLOAD_KEY = 13,
+}
+
+/**
+ * Describes the enum apex.v1.RuntimeMaterialRole.
+ */
+export declare const RuntimeMaterialRoleSchema: GenEnum<RuntimeMaterialRole>;
+
+/**
+ * @generated from enum apex.v1.ReadinessCheckId
+ */
+export enum ReadinessCheckId {
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_CONFIG = 1;
+   */
+  CONFIG = 1,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_LAUNCH = 2;
+   */
+  LAUNCH = 2,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_MATERIAL = 3;
+   */
+  MATERIAL = 3,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_INBOUND_AUTH = 4;
+   */
+  INBOUND_AUTH = 4,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_UPSTREAM_CATALOG = 5;
+   */
+  UPSTREAM_CATALOG = 5,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_GOVERNANCE = 6;
+   */
+  GOVERNANCE = 6,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_EVIDENCE_ADMISSION = 7;
+   */
+  EVIDENCE_ADMISSION = 7,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_NETWORK = 8;
+   */
+  NETWORK = 8,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_ID_ADMISSION = 9;
+   */
+  ADMISSION = 9,
+}
+
+/**
+ * Describes the enum apex.v1.ReadinessCheckId.
+ */
+export declare const ReadinessCheckIdSchema: GenEnum<ReadinessCheckId>;
+
+/**
+ * @generated from enum apex.v1.ReadinessCheckStatus
+ */
+export enum ReadinessCheckStatus {
+  /**
+   * @generated from enum value: READINESS_CHECK_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_STATUS_PENDING = 1;
+   */
+  PENDING = 1,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_STATUS_PASS = 2;
+   */
+  PASS = 2,
+
+  /**
+   * @generated from enum value: READINESS_CHECK_STATUS_FAIL = 3;
+   */
+  FAIL = 3,
+}
+
+/**
+ * Describes the enum apex.v1.ReadinessCheckStatus.
+ */
+export declare const ReadinessCheckStatusSchema: GenEnum<ReadinessCheckStatus>;
+
+/**
+ * @generated from enum apex.v1.ReadinessReason
+ */
+export enum ReadinessReason {
+  /**
+   * @generated from enum value: READINESS_REASON_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: READINESS_REASON_OK = 1;
+   */
+  OK = 1,
+
+  /**
+   * @generated from enum value: READINESS_REASON_INVALID = 2;
+   */
+  INVALID = 2,
+
+  /**
+   * @generated from enum value: READINESS_REASON_UNAVAILABLE = 3;
+   */
+  UNAVAILABLE = 3,
+
+  /**
+   * @generated from enum value: READINESS_REASON_TIMEOUT = 4;
+   */
+  TIMEOUT = 4,
+
+  /**
+   * @generated from enum value: READINESS_REASON_CANCELLED = 5;
+   */
+  CANCELLED = 5,
+
+  /**
+   * @generated from enum value: READINESS_REASON_STALE = 6;
+   */
+  STALE = 6,
+
+  /**
+   * @generated from enum value: READINESS_REASON_MISMATCH = 7;
+   */
+  MISMATCH = 7,
+
+  /**
+   * @generated from enum value: READINESS_REASON_SHUTTING_DOWN = 8;
+   */
+  SHUTTING_DOWN = 8,
+}
+
+/**
+ * Describes the enum apex.v1.ReadinessReason.
+ */
+export declare const ReadinessReasonSchema: GenEnum<ReadinessReason>;
 
 /**
  * Workload mTLS-only host boundary. No arbitrary exec, mount or image pull RPC.

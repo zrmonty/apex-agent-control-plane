@@ -11,8 +11,8 @@
     "apex/v1/proxy_approval_pb.js": "36c774bd7261617302b90a5436f5e3ce422267e7ae63fc5f21197dc7c6f779fb",
     "apex/v1/proxy_management_pb.d.ts": "e6a7a40bc5ec7c2ba570bba89e0323cd437a7099def3199298724973f78c39a9",
     "apex/v1/proxy_management_pb.js": "f7ac8c4d6f6b04825d3dbd413c69d6f929451ef8fd9a94f3d52570b49c6538a4",
-    "apex/v1/proxy_runtime_pb.d.ts": "43fc911f5c89788507b5fc500c096a38944c75836b2c30bdd08d80c910152bb8",
-    "apex/v1/proxy_runtime_pb.js": "6b4ea1c174b76f224f79c7c2792435c20aa37c0a9edc64c7f0626d2e77849d20",
+    "apex/v1/proxy_runtime_pb.d.ts": "6a5c514b8453e86185d2c78bcebb0eef4bea346900958e3ed94951e9b9153991",
+    "apex/v1/proxy_runtime_pb.js": "774e1c3c93c38bc9a6b61ed8ae6957d0e6439bede10edf966fb01d48e17f3cd0",
     "apex/v1/proxy_trace_pb.d.ts": "b8aad6d8e7165bde46194a6c1fb947004509da7cb4e2168cb1c1141fc34782a7",
     "apex/v1/proxy_trace_pb.js": "45fb5c4b0f75cdd93dbb9abeda1de430a4e1ffdba1371f8dd83d0a430198cd6c"
   }

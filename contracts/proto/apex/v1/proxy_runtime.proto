@@ -93,6 +93,9 @@ message RuntimeObservation {
   string error_code = 8;
   string resource_url = 9;
   repeated ProxyStageTiming stages = 10;
+  // Additive wire evidence, not authority. Validated owners must check target,
+  // outer/report consistency and bounded freshness; ready never implies admitting.
+  ReadinessReport readiness = 11;
 }
 message UpstreamProbeObservation {
   RuntimeTarget target = 1;
@@ -102,4 +105,114 @@ message UpstreamProbeObservation {
   string server_identity = 5;
   string catalog_hash = 6;
   uint64 observed_at_unix_us = 7;
+}
+
+// Deployment material role identifiers, not grants or required-role policy.
+enum RuntimeMaterialRole {
+  RUNTIME_MATERIAL_ROLE_UNSPECIFIED = 0;
+  RUNTIME_MATERIAL_ROLE_HEALTH_TOKEN = 1;
+  RUNTIME_MATERIAL_ROLE_GOVERNANCE_CA = 2;
+  RUNTIME_MATERIAL_ROLE_GOVERNANCE_CERT = 3;
+  RUNTIME_MATERIAL_ROLE_GOVERNANCE_KEY = 4;
+  RUNTIME_MATERIAL_ROLE_GOVERNANCE_TOKEN = 5;
+  RUNTIME_MATERIAL_ROLE_EVIDENCE_CA = 6;
+  RUNTIME_MATERIAL_ROLE_EVIDENCE_CERT = 7;
+  RUNTIME_MATERIAL_ROLE_EVIDENCE_KEY = 8;
+  RUNTIME_MATERIAL_ROLE_EVIDENCE_TOKEN = 9;
+  RUNTIME_MATERIAL_ROLE_INBOUND_JWKS = 10;
+  RUNTIME_MATERIAL_ROLE_WORKLOAD_CA = 11;
+  RUNTIME_MATERIAL_ROLE_WORKLOAD_CERT = 12;
+  RUNTIME_MATERIAL_ROLE_WORKLOAD_KEY = 13;
+}
+
+// References and versions resolve through a deployment-owned scoped provider.
+// Never raw secret bytes, host paths, user-supplied URLs or Docker options.
+message RuntimeMaterialBinding {
+  RuntimeMaterialRole role = 1;
+  string reference = 2;
+  string version = 3;
+}
+
+// Wire representation only. The later semantic profile requires loopback port
+// 8081 and a dedicated health-token role; this cannot widen a listener or path.
+message RuntimeHealthBinding {
+  uint32 port = 1;
+  string credential_ref = 2;
+}
+
+// Separate deployment binding; RuntimeConfiguration v1 and its secret union
+// remain unchanged. A digest is integrity data, never runtime authority.
+// Only the Task 7 agent constructs/stages this after authenticated ownership
+// and current-lease checks. Consumers must validate the original trusted target,
+// hashes, image, process instance, authority profile and material versions.
+message RuntimeLaunchContext {
+  uint32 schema_version = 1;
+  RuntimeTarget target = 2;
+  string config_hash = 3;
+  string runtime_manifest_hash = 4;
+  string image_ref = 5;
+  string process_instance_id = 6;
+  RuntimeHealthBinding health = 7;
+  repeated RuntimeMaterialBinding materials = 8;
+  string launch_context_hash = 9;
+  // Exact deployment-owned connection/trust profile, not a caller endpoint.
+  string authority_profile_ref = 10;
+  string authority_profile_version = 11;
+}
+
+enum ReadinessCheckId {
+  READINESS_CHECK_ID_UNSPECIFIED = 0;
+  READINESS_CHECK_ID_CONFIG = 1;
+  READINESS_CHECK_ID_LAUNCH = 2;
+  READINESS_CHECK_ID_MATERIAL = 3;
+  READINESS_CHECK_ID_INBOUND_AUTH = 4;
+  READINESS_CHECK_ID_UPSTREAM_CATALOG = 5;
+  READINESS_CHECK_ID_GOVERNANCE = 6;
+  READINESS_CHECK_ID_EVIDENCE_ADMISSION = 7;
+  READINESS_CHECK_ID_NETWORK = 8;
+  READINESS_CHECK_ID_ADMISSION = 9;
+}
+
+enum ReadinessCheckStatus {
+  READINESS_CHECK_STATUS_UNSPECIFIED = 0;
+  READINESS_CHECK_STATUS_PENDING = 1;
+  READINESS_CHECK_STATUS_PASS = 2;
+  READINESS_CHECK_STATUS_FAIL = 3;
+}
+
+enum ReadinessReason {
+  READINESS_REASON_UNSPECIFIED = 0;
+  READINESS_REASON_OK = 1;
+  READINESS_REASON_INVALID = 2;
+  READINESS_REASON_UNAVAILABLE = 3;
+  READINESS_REASON_TIMEOUT = 4;
+  READINESS_REASON_CANCELLED = 5;
+  READINESS_REASON_STALE = 6;
+  READINESS_REASON_MISMATCH = 7;
+  READINESS_REASON_SHUTTING_DOWN = 8;
+}
+
+// Bounded identifiers only; no free-text diagnostics or dynamic labels.
+message ReadinessCheck {
+  ReadinessCheckId id = 1;
+  ReadinessCheckStatus status = 2;
+  ReadinessReason reason = 3;
+}
+
+// Generated wire data is not proof of readiness or authenticated launch.
+// Missing/zero/unknown checks are never ready. Validated owners enforce complete
+// target/hash/instance binding, outer observation consistency and freshness.
+// They also enforce bounded checks (at most 16) and stages; protobuf defaults
+// impose no such semantic policy. Readiness does not grant call admission.
+message ReadinessReport {
+  bool live = 1;
+  bool ready = 2;
+  RuntimeTarget target = 3;
+  uint64 observed_at_unix_us = 4;
+  string config_hash = 5;
+  string runtime_manifest_hash = 6;
+  string process_instance_id = 7;
+  repeated ReadinessCheck checks = 8;
+  repeated ProxyStageTiming stages = 9;
+  string launch_context_hash = 10;
 }
