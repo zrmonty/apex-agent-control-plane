@@ -85,7 +85,7 @@ where
             proxy_id: proxy_id(PROXY_ID),
             expected_revision_id: None,
             actor_id: "operator:proxy-admin".to_owned(),
-            spec: valid_proxy_spec(),
+            spec: publishable_portfolio_spec(),
         })
         .expect("store draft");
     let draft_revision_id = updated
@@ -100,7 +100,7 @@ where
                 proxy_id: proxy_id(PROXY_ID),
                 expected_revision_id: None,
                 actor_id: "operator:proxy-admin".to_owned(),
-                spec: valid_proxy_spec(),
+                spec: publishable_portfolio_spec(),
             })
             .expect("draft replay"),
         updated
@@ -112,7 +112,7 @@ where
             proxy_id: proxy_id(PROXY_ID),
             expected_revision_id: None,
             actor_id: "operator:other-admin".to_owned(),
-            spec: valid_proxy_spec(),
+            spec: publishable_portfolio_spec(),
         })
         .unwrap_err();
     assert_eq!(update_conflict.code(), "PROXY_IDEMPOTENCY_CONFLICT");
@@ -124,7 +124,7 @@ where
             proxy_id: proxy_id(PROXY_ID),
             expected_revision_id: Some(proxy_revision_id("018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e8d")),
             actor_id: "operator:proxy-admin".to_owned(),
-            spec: valid_proxy_spec(),
+            spec: publishable_portfolio_spec(),
         })
         .unwrap_err();
     assert_eq!(stale.code(), "PROXY_REVISION_CONFLICT");
@@ -455,4 +455,11 @@ fn valid_proxy_spec() -> ProxySpec {
             },
         },
     }
+}
+
+fn publishable_portfolio_spec() -> ProxySpec {
+    // Preserve the CLI-rich fixture for draft editing and argv-schema round trips.
+    let mut spec = valid_proxy_spec();
+    spec.cli_profiles.clear();
+    spec
 }

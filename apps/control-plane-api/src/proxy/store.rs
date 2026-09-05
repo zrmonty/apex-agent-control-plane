@@ -8,6 +8,7 @@ mod canonical;
 mod memory;
 #[cfg(feature = "postgres")]
 mod operations;
+mod publish_capabilities;
 mod shared;
 mod transitions;
 #[cfg(feature = "postgres")]
