@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Apex is a self-hosted, cloud-agnostic control plane for AI agents (observability, governance, evaluation, security, cost). Scope hierarchy: installation → workspace → namespace → AgentGroup → agent → run.
 
-**Status:** Phase 0 (event contract, Python SDK, hardened ingest admission, Security Alerts, durable outbox/fanout, storage contracts, Compose provider slots) is complete. The out-of-band (OOB) control gateway — originally scoped as Phase 0.5 — is also built and real: cooperative controls (`stop`/`pause`/`resume`/`inject`/`set_budget`/`resolve_hold`), a non-cooperative `force_stop` enacted by a dedicated supervisor process rather than the agent's own, durable per-command delivery tracking, and operator-facing bulk/list/cancel APIs. The thin TypeScript stdio MCP gateway and deterministic local/test-only `portfolio.read` path are now implemented in `apps/mcp-gateway`, but live Apex authorization/event clients and the narrow operator-visible vertical slice remain outstanding. Phase 1 live completion is not reached yet — the React UI is still a static preview with illustrative data and calls no backend. Don't assume the UI reflects real control-plane state.
+**Status:** Phase 0 (event contract, Python SDK, hardened ingest admission, Security Alerts, durable outbox/fanout, storage contracts, Compose provider slots) is complete. The out-of-band (OOB) control gateway — originally scoped as Phase 0.5 — is also built and real: cooperative controls (`stop`/`pause`/`resume`/`inject`/`set_budget`/`resolve_hold`), a non-cooperative `force_stop` enacted by a dedicated supervisor process rather than the agent's own, durable per-command delivery tracking, and operator-facing bulk/list/cancel APIs. The thin TypeScript MCP gateway in `apps/mcp-gateway` exposes one read-only `portfolio.read` tool, and its live authorization/event path (authorize via `control-plane-api`, admit metadata-only evidence via `event-ingest`, over real mTLS containers) has passed the narrow vertical-slice gate. The active milestone is now the managed MCP proxy platform (one hardened isolated container per proxy with lifecycle/governance controls in the operator UI); a usable managed product is not delivered yet. The React UI has real `MCP proxies` routes that call `control-plane-api`'s optional loopback browser edge (Keycloak login, Postgres-backed session, CSRF); every other route is a placeholder with an empty state. Don't assume anything outside the MCP proxy surface reflects real control-plane state.
 
-Five components have real, runnable implementations: `apps/event-ingest` (Rust gRPC ingest gateway), `apps/control-plane-api` (Rust gRPC OOB control gateway), `apps/agent-supervisor` (Rust process supervisor that enacts non-cooperative `force_stop`), `packages/sdk-python` (Python instrumentation SDK, including the reference agent runtime that consumes control-plane-api's control channel), and `apps/mcp-gateway` (thin TypeScript stdio MCP gateway with a deterministic local/test-only `portfolio.read` path). The Rust workspace now owns reusable contract, domain, auth, policy, security, and durability crates; applications depend on those shared boundaries rather than on one another. `apps/operator-ui` is still a static Vite preview with no backend calls.
+Six components have real, runnable implementations: `apps/event-ingest` (Rust gRPC ingest gateway), `apps/control-plane-api` (Rust gRPC OOB control gateway, MCP proxy management service, and optional browser edge for the UI), `apps/agent-supervisor` (Rust process supervisor that enacts non-cooperative `force_stop`), `packages/sdk-python` (Python instrumentation SDK, including the reference agent runtime that consumes control-plane-api's control channel), `apps/mcp-gateway` (thin TypeScript MCP gateway; local stdio path plus a managed Streamable HTTP mode whose production factory fails closed until live enforcement is connected), and `apps/operator-ui` (React app whose `MCP proxies` routes are wired to the browser edge). `apps/proxy-runtime-agent` is a Rust wire/inspection boundary for managed proxy runtimes with no listener or provisioning yet. The Rust workspace owns reusable contract, domain, auth, policy, security, durability, and telemetry crates; applications depend on those shared boundaries rather than on one another. `packages/apex-contracts-ts` holds the TypeScript Protobuf types shared by the MCP gateway and the UI.
 
 ## Current execution focus
 
-Follow [docs/roadmap.md](docs/roadmap.md) as the execution source of truth. The Rust workspace, shared-crate extraction, durable admission/fanout separation, Apex governance interfaces, thin TypeScript MCP gateway, and deterministic local/test-only `portfolio.read` path are complete. The only active work now is the remaining assessment-directed sequence: replace the local Apex authorization/event stubs with live clients and prove the narrow live operator-visible vertical slice. Treat all other feature and phase roadmaps as paused unless work is required to unblock this sequence or fix a security defect, regression, or data-integrity issue.
+Follow [docs/roadmap.md](docs/roadmap.md) as the execution source of truth. The Rust workspace, shared-crate extraction, durable admission/fanout separation, Apex governance interfaces, thin TypeScript MCP gateway, and the narrow live `portfolio.read` vertical slice are complete. The only active work now is roadmap step 7, the managed MCP proxy platform: versioned proxy resources in the control-plane contract, immutable content-addressed proxy revisions, one hardened OCI container per proxy, and create/deploy/pause/rotate/rollback/retire workflows in the operator UI's `MCP proxies` surface. Its first acceptance slice is a read-only `portfolio.read` proxy running through an isolated runtime and appearing in the UI as server-derived activity. The approved design and execution plans live under `docs/superpowers/specs/` and `docs/superpowers/plans/` (the `2026-09-04-*mcp-proxy*` and `2026-09-04-working-mcp-gateway*` files). Treat all other feature and phase roadmaps as paused unless work is required to unblock this sequence or fix a security defect, regression, or data-integrity issue.
 
 ## Commands
 
@@ -110,11 +110,26 @@ On Windows, a stale locked `%TEMP%\pytest-of-<user>` directory from a previous r
 
 ```bash
 pnpm install
-pnpm dev        # http://127.0.0.1:4173, illustrative data only
+pnpm dev        # http://127.0.0.1:4173; only the MCP proxy routes talk to a backend
+pnpm test       # vitest
 pnpm typecheck
 pnpm build
 pnpm audit      # not in CI yet; run manually for dependency CVEs
 ```
+
+To exercise the `MCP proxies` routes against a real backend, run `control-plane-api` with its browser edge enabled (`APEX_CONTROL_BROWSER_BIND_ADDR` + `APEX_CONTROL_BROWSER_CONFIG_FILE`, Postgres and Keycloak required — see `docs/operations/mcp-browser-edge.md`) and set `APEX_UI_BROWSER_EDGE=http://127.0.0.1:<port>` before `pnpm dev`. The Vite dev server then proxies `/api` and `/auth` to that origin without rewriting Origin, redirects, or cookies; the value must be an explicit loopback `http://127.0.0.1:port` origin or Vite refuses to start.
+
+### MCP gateway (`apps/mcp-gateway`)
+
+```bash
+pnpm install
+pnpm test       # needs APEX_RUNTIME_FIXTURE_PATH pointing at a Rust-generated runtime-revision.json (CI downloads it from the rust-control-plane job)
+pnpm typecheck
+pnpm build
+pnpm start      # standalone dev mode needs NODE_ENV=development and APEX_MCP_PROFILE=development-standalone; default profile is managed
+```
+
+Managed mode requires `APEX_MCP_GOVERNANCE_MODE=live` and a complete generated `RuntimeConfiguration` file, and currently refuses to start before secrets, clients, or listeners while live enforcement is unavailable. Do not treat the development-standalone path as a production fallback. See `apps/mcp-gateway/README.md`.
 
 ### Repo-wide checks
 
@@ -123,7 +138,7 @@ python3 scripts/check_lab_only_settings.py   # fails if a lab-only escape hatch 
 python3 deploy/compose/e2e/run_gates.py      # full deploy-time gate suite (Docker required): live mTLS, Postgres, MinIO Object-Lock, optional Azure/GCS
 ```
 
-CI (`.github/workflows/ci.yml`): `python-sdk`, `rust-ingest` (test + clippy), `rust-control-plane` (test + clippy), `rust-agent-supervisor` (test + clippy), `rust-sast` (cargo audit + cargo deny, matrixed across all three Rust crates — each carries its own `Cargo.lock`/`deny.toml`), `python-sast` (bandit + pip-audit), `lab-only-settings-gate`, `signed-bundles`. `.github/workflows/live-mtls-e2e.yml` runs the live-mTLS + Postgres + MinIO gates on a real Docker daemon (push to main/master or manual dispatch; not required on every PR since runner Docker networking can be flaky).
+CI (`.github/workflows/ci.yml`): `gateway-contracts` (contract compatibility), `source-line-limits` (`scripts/check_source_line_limits.py`, the 600-line rule below), `mcp-gateway` (test + typecheck + build, depends on `rust-control-plane` for the runtime-contract artifact), `operator-ui` (test + typecheck + build), `python-sdk`, `rust-ingest` (test + clippy), `rust-control-plane` (test + clippy), `rust-agent-supervisor` (test + clippy), `rust-sast` (cargo audit + cargo deny, matrixed across all three Rust binaries — each carries its own `Cargo.lock`/`deny.toml`), `python-sast` (bandit + pip-audit), `lab-only-settings-gate`, `signed-bundles`. `.github/workflows/live-mtls-e2e.yml` runs the live-mTLS + Postgres + MinIO gates on a real Docker daemon (push to main/master or manual dispatch; not required on every PR since runner Docker networking can be flaky).
 
 ## Conventions
 
@@ -184,16 +199,17 @@ A separate binary from `control-plane-api`, one instance per supervised agent ru
 ### Repository layout
 
 ```
-apps/            event-ingest, control-plane-api, agent-supervisor (all real), operator-ui (static preview, no backend calls), reference-providers (Python mTLS stub providers for local/CI)
-crates/           apex-contract, apex-domain, apex-auth, apex-security, apex-durability (shared Rust foundations), with later policy/telemetry/cost crates still reserved
-packages/         sdk-python
-contracts/        proto/apex/v1 (versioned protobuf), jsonschema
-config/           profiles, policies, pricebooks
-deploy/           compose/ (compose.yaml = production reference, requires operator-supplied digest-pinned images; compose.e2e.yaml + compose.gateway-ref.yaml = CI/dev reference topologies; live-mtls/ = real-TLS local harness), lab/, helm/, kubernetes/
-docs/             architecture/, api/, security/, operations/
-examples/         reference-agent, evaluation-flow
-tests/            contract/, integration/, e2e/, security/ (repo-root level; separate from apps/event-ingest/tests/)
+apps/            event-ingest, control-plane-api, agent-supervisor, mcp-gateway (all real), operator-ui (MCP proxy routes live, other routes placeholders), proxy-runtime-agent (Rust wire/inspection boundary only), reference-providers (Python mTLS stub providers for local/CI)
+crates/           apex-contract, apex-domain, apex-auth, apex-policy, apex-security, apex-durability, apex-telemetry (shared Rust foundations); a cost crate is still reserved
+packages/         sdk-python, apex-contracts-ts (TypeScript Protobuf types for mcp-gateway and operator-ui)
+contracts/        proto/apex/v1 (event, control, governance, mcp_proxy, proxy_* protos), jsonschema, clickhouse/, archive-provider/, postgres-*.md, compatibility-baseline.binpb
+deploy/           compose/ (compose.yaml = production reference, requires operator-supplied digest-pinned images; compose.e2e.yaml + compose.gateway-ref.yaml = CI/dev reference topologies; compose.control-{pg,valkey,keycloak}.yaml = control-plane overlays; compose.mcp-proxy.yaml + mcp-proxy-test/ = managed-proxy bootstrap fixture; working-browser/ = browser-edge journey; live-mtls/ = real-TLS local harness), lab/, clickhouse/, postgres/
+docs/             architecture/, security/, operations/, performance/, mcp-proxies/, superpowers/ (specs + plans), roadmap.md
+examples/         reference-agent
+scripts/          check_lab_only_settings.py, check_source_line_limits.py, browser/Keycloak prep and MCP gateway verification scripts
 ```
+
+There is no `config/`, `tests/`, `tools/`, `deploy/helm/`, or `deploy/kubernetes/` directory; do not reference them.
 
 ### Security conventions worth knowing before touching deploy/compose files
 
