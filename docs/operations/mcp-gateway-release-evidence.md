@@ -558,3 +558,38 @@ The image startup-profile suite and readiness lifecycle components are being
 added. No image startup/managed health result is inferred from host tests or
 packaging. No actual trusted launch producer, egress/admission enforcement,
 cross-process trace delivery or release gate is certified by this checkpoint.
+
+### Launch validation and original image entrypoint (September 5 UTC, 06:52)
+
+Pure launch metadata validation is committed as
+`0ba80dc670384736506ca63bc336d54d3e2c2c19`. The independent review's test-only
+amplification-spy gap is closed: removing the early guard produced the targeted
+failure, restoring the exact production bytes passed. Main's fresh frozen
+baseline-plus-parser run passed **350/351**, one existing Windows symlink skip,
+28.483s; active uncommitted readiness tests were explicitly excluded from that
+run. All-source typecheck and production-graph build passed. Hash/shape checks
+still do not authenticate a launch, current lease, image or material provider.
+
+New generated Rust health-wire coverage is committed as
+`79de522af44702cd726cb097428acdfc8eb1a4d3`: **6/6**, 0.01s, and targeted Clippy
+with warnings denied passed in 5.46s. It preserves 1/7/999-us stages, optional
+zero uncertainty and uint64 values above 2^53 through strict ProtoJSON and
+protobuf round trips. This is wire regression coverage, not a readiness owner.
+
+The new `--suite startup` initially passed both old and new images because its
+negative cases lacked caller identity. That result did not prove profile
+refusal. The corrected suite supplies five otherwise-valid fixed identity
+entries to every case. Main's actual old-image replay (`521d...` above) now
+fails correctly: default production expected exit1 but observed exit0; it
+cleans that exact owned container and starts no further cases. The actual
+new-image replay (`eebc...` above) passes **8/8**, with all confinement and
+owned cleanup checks. Corrected helper suite: **206/206**, 1.106s; independent
+spec/quality review closes the identity-confounding finding.
+
+The reviewed seven-file startup harness is committed as `3679446`.
+
+The suite preserves the original entrypoint and reports both
+`readinessVerified: false` and `protocolHandshakeVerified: false`.
+Configured managed health, authenticated launch ownership, real enforcement,
+end-to-end microsecond traces and release gates remain incomplete. No merge,
+push or GitHub CI result is claimed.

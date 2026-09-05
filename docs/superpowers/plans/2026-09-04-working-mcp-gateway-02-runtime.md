@@ -24,8 +24,10 @@ Checkpoint: production packaging and its owned-container harness are committed
 (`cc30a1c`, `24e3290`). Explicit development-only standalone/default-managed
 selection and removal of unconditional Compose health success are committed
 (`b973488`); additive launch/readiness wire contracts are in `a6fc19b`.
-Launch validation, bounded readiness components and image startup verification
-are being implemented. The complete task remains open: no authenticated health
+Pure launch validation is committed in `0ba80dc`, with Rust health-wire checks
+in `79de522`. Image startup (`3679446`) passes eight cases and detects the older fallback.
+Bounded readiness components are being implemented. The complete task remains
+open: no authenticated health
 listener or actual network/admission owners are composed into production yet.
 
 **Files**
@@ -43,14 +45,17 @@ listener or actual network/admission owners are composed into production yet.
 ```powershell
 docker build -f apps/mcp-gateway/Dockerfile -t apex-mcp-gateway:working-test .
 node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-test --suite packaging
+node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-test --suite startup
 ```
 
 `verify-image.mjs` must inspect the built image with `--network none --read-only`, import its actual live client module and assert both `existsSync(protoPath("governance.proto"))` and `existsSync(protoPath("event.proto"))`. It then exercises missing-config startup and a configured disposable runtime. It deletes only its own named containers.
 
 The implemented `packaging` suite verifies imports/descriptors, production
 output hygiene, confinement and cleanup only, and reports
-`readinessVerified: false`. Startup and configured-health acceptance are
-separate required checks; packaging success does not close those steps.
+`readinessVerified: false`. The separate `startup` suite checks eight original
+entrypoint/profile outcomes with valid fixture identity and exact owned cleanup,
+not MCP negotiation or configured health. Configured-health acceptance remains
+required; neither existing suite closes that gate.
 
 - [ ] Run against the current image first; confirm the missing schemas are a real red result.
 - [ ] Change the build context to repository root, copy required contracts into a fixed image path and make `protoPath` resolve that packaged path consistently. Keep multi-stage dependency caching/non-root/read-only settings. Add health probes reflecting actual startup; remove `process.exit(0)` health checks. Require live mode for managed runtime and fail startup on missing configuration/trust material.

@@ -76,6 +76,7 @@ Build the image from the repository root:
 ```powershell
 docker build -f apps/mcp-gateway/Dockerfile -t apex-mcp-gateway:working-test .
 node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-test --suite packaging
+node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-test --suite startup
 ```
 
 The packaging suite loads actual generated contracts and live gRPC descriptors,
@@ -85,3 +86,11 @@ It uses UID 10001, a read-only filesystem and no network. It is not a whole-imag
 secret audit. Missing Docker, failed inspection or unconfirmed cleanup fails.
 The suite explicitly reports `readinessVerified: false`: it does not certify
 startup readiness, host egress enforcement or a working deployed proxy.
+
+The startup suite runs the original image entrypoint through eight fixed
+profile/configuration cases. Every case supplies valid fixture identity so
+an unrelated missing-identity error cannot satisfy an expected refusal.
+It verifies process exit, confinement and owned cleanup, including explicit
+development startup with closed stdin. It does not perform an image-level MCP
+handshake or configured managed-health check; both corresponding report flags
+remain false. Source tests separately exercise real SDK initialization/listing.
