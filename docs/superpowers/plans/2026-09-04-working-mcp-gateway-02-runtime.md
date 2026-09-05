@@ -99,8 +99,13 @@ partial startup and cleanup. See the [operator guide](../../operations/mcp-runti
 The runtime-agent callback client now checks actual Controller TLS, exact snapshot
 bindings and whole monotonic lease intervals. Its two-hop test-only ingress calls
 the real control-plane process and PostgreSQL. Provisioning has started with strict,
-deployment-owned image-catalog selection. Production controller-ingress composition,
-actual signature verification, staging and engine effects remain required. See the
+deployment-owned image-catalog selection. The next checkpoint adds actual Linux
+Cosign verification, bounded child ownership and confined secret staging, with
+required real-signature/root-filesystem CI acceptance. The approved
+[deployment binding continuation](2026-09-05-runtime-deployment-binding.md) adds
+online published RuntimeConfiguration compilation and agent resolution over mTLS.
+Production ingress, launch-context/material binding, blocking-owner composition
+and engine effects remain required. These primitives are not wired to EnsureRuntime. See the
 [provisioning boundary](../../operations/mcp-runtime-provisioning.md).
 A snapshot is not authority
 to execute later, and callback deadlines do not physically preempt OS/database I/O.

@@ -10,9 +10,12 @@ use apex_auth::RuntimePeerPolicy;
 use apex_proxy_runtime_agent::{
     authority::{AuthorityOperation, RuntimeAuthorityClient},
     proto::{
-        CheckRuntimeAuthorityRequest, RuntimeAuthoritySnapshot,
+        CheckRuntimeAuthorityRequest, RuntimeAuthoritySnapshot, RuntimeDeploymentSnapshot,
         runtime_authority_service_server::{
             RuntimeAuthorityService, RuntimeAuthorityServiceServer,
+        },
+        runtime_deployment_service_server::{
+            RuntimeDeploymentService, RuntimeDeploymentServiceServer,
         },
     },
 };
@@ -27,6 +30,10 @@ use tonic::{
 
 use super::{pki::Pki, support::*};
 
+#[path = "deployment_server.rs"]
+mod deployment;
+pub use deployment::deployment_snapshot;
+
 pub struct Listener {
     pub endpoint: String,
     stop: Option<oneshot::Sender<()>>,
@@ -34,7 +41,11 @@ pub struct Listener {
 }
 
 impl Listener {
-    pub fn start(pki: &Pki, service: impl RuntimeAuthorityService, optional_client: bool) -> Self {
+    pub fn start(
+        pki: &Pki,
+        service: impl RuntimeAuthorityService + RuntimeDeploymentService + Clone,
+        optional_client: bool,
+    ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tls = ServerTlsConfig::new()
             .identity(pki.identity("trusted-host", "control-plane-server"))
@@ -52,10 +63,16 @@ impl Listener {
         let task = tokio::spawn(async move {
             server
                 .add_service(
-                    RuntimeAuthorityServiceServer::new(service)
+                    RuntimeAuthorityServiceServer::new(service.clone())
                         .max_decoding_message_size(4096)
                         // Oversized response case must reach the production client's decoder.
                         .max_encoding_message_size(8192),
+                )
+                .add_service(
+                    RuntimeDeploymentServiceServer::new(service)
+                        .max_decoding_message_size(4096)
+                        // Let oversized replies reach the production decoder.
+                        .max_encoding_message_size(540_672),
                 )
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = stopped.await;
@@ -92,6 +109,8 @@ impl Drop for Listener {
 
 pub struct CallbackState {
     pub snapshot: Mutex<RuntimeAuthoritySnapshot>,
+    pub deployment: Mutex<RuntimeDeploymentSnapshot>,
+    pub resolve_calls: AtomicUsize,
     pub refusal: Mutex<Option<Code>>,
     pub calls: AtomicUsize,
     pub active: AtomicUsize,
@@ -107,6 +126,8 @@ impl CallbackState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             snapshot: Mutex::new(snapshot()),
+            deployment: Mutex::new(deployment_snapshot()),
+            resolve_calls: AtomicUsize::new(0),
             refusal: Mutex::new(None),
             calls: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
@@ -142,6 +163,7 @@ impl Drop for Active {
     }
 }
 
+#[derive(Clone)]
 pub struct Callback {
     pub state: Arc<CallbackState>,
     pub policy: Arc<RuntimePeerPolicy>,
@@ -222,6 +244,7 @@ pub struct IngressState {
     pub cancel: Notify,
 }
 
+#[derive(Clone)]
 pub struct Ingress {
     pub client: Arc<RuntimeAuthorityClient>,
     pub state: Arc<IngressState>,

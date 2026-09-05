@@ -69,6 +69,9 @@ pub(super) fn valid_wall_time(selected: &SelectedPolicy) -> Result<(), RuntimeAu
     {
         return Err(RuntimeAuthorityError::Unavailable);
     }
+    if let Some(catalog) = &selected.deployment {
+        catalog.check_current(now)?;
+    }
     Ok(())
 }
 

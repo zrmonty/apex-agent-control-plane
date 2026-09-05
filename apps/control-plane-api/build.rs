@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../contracts/proto/apex/v1/mcp_proxy.proto",
                 "../../contracts/proto/apex/v1/proxy_runtime.proto",
                 "../../contracts/proto/apex/v1/proxy_runtime_authority.proto",
+                "../../contracts/proto/apex/v1/proxy_runtime_deployment.proto",
             ],
             &["../../contracts/proto"],
         )?;

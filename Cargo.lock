@@ -203,6 +203,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
@@ -213,6 +214,7 @@ dependencies = [
  "tonic-prost-build",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

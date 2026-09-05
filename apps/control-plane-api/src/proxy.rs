@@ -34,6 +34,7 @@ pub use runtime_authority::RuntimeAuthorityObservations;
 pub use runtime_authority::{
     RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
     RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
+    bounded_runtime_deployment_service_server,
 };
 pub use runtime_config::{
     RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash,

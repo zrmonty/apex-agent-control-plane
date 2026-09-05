@@ -1,6 +1,8 @@
 //! Real Controller TLS -> test agent -> production client -> Agent mTLS callback.
 //! Callback snapshots contain synthetic DB timestamps; main owns real PG proof.
 
+#[path = "runtime_authority_client/deployment_tests.rs"]
+mod deployment_tests;
 #[path = "runtime_authority_client/lifetime_tests.rs"]
 mod lifetime_tests;
 #[path = "runtime_peer_pair/pki.rs"]

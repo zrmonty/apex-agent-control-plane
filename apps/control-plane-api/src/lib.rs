@@ -119,6 +119,7 @@ pub use proxy::{ProxyEvidenceRelayStatus, spawn_proxy_evidence_relay};
 pub use proxy::{
     RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
     RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
+    bounded_runtime_deployment_service_server,
 };
 pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 pub use replay::{

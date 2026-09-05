@@ -2,7 +2,7 @@
 use super::{
     RuntimeAuthorityError, RuntimeAuthorityPolicyFiles,
     lifecycle::{Shared, StopOnExit, valid_wall_time},
-    material::read_document,
+    material::{read_document, read_document_with_limit},
 };
 use std::{
     sync::{Arc, mpsc},
@@ -50,7 +50,7 @@ fn read_pair(
     files: &RuntimeAuthorityPolicyFiles,
     shared: &Shared,
 ) -> Result<(), RuntimeAuthorityError> {
-    let started = Instant::now(); // Includes BOTH file reads, not time after I/O.
+    let started = Instant::now(); // Includes all configured reads, not time after I/O.
     let result = (|| {
         if shared.stopped() {
             return Err(RuntimeAuthorityError::Unavailable);
@@ -60,6 +60,11 @@ fn read_pair(
             return Err(RuntimeAuthorityError::Unavailable);
         }
         let enrollment = read_document(&files.trusted_base, &files.enrollment_file)?;
+        let deployment = files
+            .deployment_bindings_file
+            .as_ref()
+            .map(|path| read_document_with_limit(&files.trusted_base, path, 262_144))
+            .transpose()?;
         if shared.stopped() {
             return Err(RuntimeAuthorityError::Unavailable);
         }
@@ -67,7 +72,13 @@ fn read_pair(
             .policy
             .lock()
             .map_err(|_| RuntimeAuthorityError::Unavailable)?;
-        state.publish(&peer, &enrollment, started, Instant::now())?;
+        state.publish_with_deployment(
+            &peer,
+            &enrollment,
+            deployment.as_deref(),
+            started,
+            Instant::now(),
+        )?;
         valid_wall_time(state.current(Instant::now())?.as_ref())
     })();
     if result.is_err()

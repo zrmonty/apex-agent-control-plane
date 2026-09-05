@@ -2,6 +2,7 @@
 use crate::pki::Pki;
 use apex_control_plane_api::{
     RuntimeAuthorityService, bounded_runtime_authority_service_server,
+    bounded_runtime_deployment_service_server,
     proto::runtime_authority_service_client::RuntimeAuthorityServiceClient,
 };
 use std::{future::Future, time::Duration};
@@ -30,11 +31,18 @@ pub async fn client(
     endpoint: &str,
     leaf: &str,
 ) -> RuntimeAuthorityServiceClient<Channel> {
+    let channel = channel(pki, endpoint, leaf).await;
+    RuntimeAuthorityServiceClient::new(channel)
+        .max_decoding_message_size(4096)
+        .max_encoding_message_size(4096)
+}
+
+pub async fn channel(pki: &Pki, endpoint: &str, leaf: &str) -> Channel {
     let tls = ClientTlsConfig::new()
         .domain_name("control-plane-api")
         .ca_certificate(Certificate::from_pem(pki.read("trusted-host", "ca.pem")))
         .identity(pki.identity("trusted-host", leaf));
-    let channel = within(
+    within(
         Endpoint::from_shared(endpoint.to_owned())
             .unwrap()
             .tls_config(tls)
@@ -44,10 +52,7 @@ pub async fn client(
             .connect(),
     )
     .await
-    .expect("actual trusted TLS connection");
-    RuntimeAuthorityServiceClient::new(channel)
-        .max_decoding_message_size(4096)
-        .max_encoding_message_size(4096)
+    .expect("actual trusted TLS connection")
 }
 
 pub fn exercise<F, Fut, T>(service: RuntimeAuthorityService, pki: &Pki, body: F) -> T
@@ -70,6 +75,7 @@ where
         let router = Server::builder()
             .tls_config(tls)
             .unwrap()
+            .add_service(bounded_runtime_deployment_service_server(service.clone()))
             .add_service(bounded_runtime_authority_service_server(service));
         let mut server = Task(tokio::spawn(async move {
             router

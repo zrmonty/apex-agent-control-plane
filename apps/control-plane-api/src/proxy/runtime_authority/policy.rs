@@ -10,12 +10,13 @@ use std::{
 use apex_auth::RuntimePeerPolicy;
 use sha2::{Digest, Sha256};
 
-use super::{RuntimeAuthorityError, enrollment::Enrollment};
+use super::{RuntimeAuthorityError, deployment::DeploymentCatalog, enrollment::Enrollment};
 
 pub(super) struct PolicyState {
     active: Option<CurrentPair>,
     last_peer: Option<VersionContent>,
     last_enrollment: Option<VersionContent>,
+    last_deployment: Option<VersionContent>,
     serial: u64,
 }
 
@@ -33,6 +34,7 @@ pub(super) struct SelectedPolicy {
     pub generation: u64,
     pub peer: RuntimePeerPolicy,
     pub enrollment: Enrollment,
+    pub deployment: Option<DeploymentCatalog>,
 }
 
 impl PolicyState {
@@ -41,10 +43,12 @@ impl PolicyState {
             active: None,
             last_peer: None,
             last_enrollment: None,
+            last_deployment: None,
             serial: 0,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn publish(
         &mut self,
         peer_bytes: &[u8],
@@ -52,7 +56,24 @@ impl PolicyState {
         read_started: Instant,
         now: Instant,
     ) -> Result<(), RuntimeAuthorityError> {
-        let result = self.publish_checked(peer_bytes, enrollment_bytes, read_started, now);
+        self.publish_with_deployment(peer_bytes, enrollment_bytes, None, read_started, now)
+    }
+
+    pub(super) fn publish_with_deployment(
+        &mut self,
+        peer_bytes: &[u8],
+        enrollment_bytes: &[u8],
+        deployment_bytes: Option<&[u8]>,
+        read_started: Instant,
+        now: Instant,
+    ) -> Result<(), RuntimeAuthorityError> {
+        let result = self.publish_checked(
+            peer_bytes,
+            enrollment_bytes,
+            deployment_bytes,
+            read_started,
+            now,
+        );
         if result.is_err() {
             self.disable();
         }
@@ -63,6 +84,7 @@ impl PolicyState {
         &mut self,
         peer_bytes: &[u8],
         enrollment_bytes: &[u8],
+        deployment_bytes: Option<&[u8]>,
         read_started: Instant,
         now: Instant,
     ) -> Result<(), RuntimeAuthorityError> {
@@ -70,6 +92,16 @@ impl PolicyState {
         let peer = RuntimePeerPolicy::parse_json(peer_bytes)
             .map_err(|_| RuntimeAuthorityError::Unavailable)?;
         let enrollment = Enrollment::parse_json(enrollment_bytes)?;
+        let deployment = deployment_bytes
+            .map(DeploymentCatalog::parse_json)
+            .transpose()?;
+        let deployment_content = deployment
+            .as_ref()
+            .zip(deployment_bytes)
+            .map(|(catalog, bytes)| VersionContent::new(catalog.version(), bytes));
+        if let Some(content) = &deployment_content {
+            content.check_immutable(self.last_deployment.as_ref())?;
+        }
         if enrollment.peer_policy_version() != peer.version() {
             return Err(RuntimeAuthorityError::Unavailable);
         }
@@ -89,6 +121,11 @@ impl PolicyState {
                     .last_enrollment
                     .as_ref()
                     .is_some_and(|last| last.same(&enrollment_content))
+                && match (&self.last_deployment, &deployment_content) {
+                    (None, None) => true,
+                    (Some(last), Some(next)) => last.same(next),
+                    _ => false,
+                }
             {
                 // Identical rereads refresh age, never replace the in-flight pair.
                 active.read_started = read_started;
@@ -104,12 +141,14 @@ impl PolicyState {
                 generation,
                 peer,
                 enrollment,
+                deployment,
             }),
             read_started,
         });
         self.serial = generation;
         self.last_peer = Some(peer_content);
         self.last_enrollment = Some(enrollment_content);
+        self.last_deployment = deployment_content;
         Ok(())
     }
 

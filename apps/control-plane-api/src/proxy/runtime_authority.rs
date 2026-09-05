@@ -6,6 +6,8 @@ use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use zeroize::Zeroizing;
 
+mod deployment;
+mod deployment_service;
 mod enrollment;
 mod error;
 mod executor;
@@ -19,6 +21,7 @@ mod refresh;
 mod request;
 mod service;
 
+pub use deployment_service::bounded_runtime_deployment_service_server;
 pub use error::RuntimeAuthorityError;
 #[cfg(feature = "test-support")]
 pub use observations::RuntimeAuthorityObservations;
@@ -31,6 +34,7 @@ pub struct RuntimeAuthorityPolicyFiles {
     trusted_base: PathBuf,
     peer_policy_file: PathBuf,
     enrollment_file: PathBuf,
+    deployment_bindings_file: Option<PathBuf>,
 }
 
 impl RuntimeAuthorityPolicyFiles {
@@ -47,6 +51,7 @@ impl RuntimeAuthorityPolicyFiles {
             trusted_base,
             peer_policy_file,
             enrollment_file,
+            deployment_bindings_file: None,
         };
         files.validate()?;
         Ok(files)
@@ -60,6 +65,21 @@ impl RuntimeAuthorityPolicyFiles {
             return Err(RuntimeAuthorityError::Unavailable);
         }
         Ok(())
+    }
+
+    /// Add the deployment-owned resolution catalog; never a caller-selected path.
+    ///
+    /// # Errors
+    /// Refuses an empty path. Startup owns bounded reads and validation.
+    pub fn with_deployment_bindings_file(
+        mut self,
+        path: PathBuf,
+    ) -> Result<Self, RuntimeAuthorityError> {
+        if path.as_os_str().is_empty() {
+            return Err(RuntimeAuthorityError::Unavailable);
+        }
+        self.deployment_bindings_file = Some(path);
+        Ok(self)
     }
 }
 
@@ -130,6 +150,7 @@ impl RuntimeAuthorityOwner {
         Ok(RuntimeAuthorityService::new(
             client,
             Arc::clone(&self.workers.shared),
+            self.files.deployment_bindings_file.is_some(),
         ))
     }
 

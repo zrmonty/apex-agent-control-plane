@@ -13,6 +13,14 @@ use super::RuntimeAuthorityError;
 mod startup_secrets;
 
 pub(super) fn read_document(base: &Path, path: &Path) -> Result<Vec<u8>, RuntimeAuthorityError> {
+    read_document_with_limit(base, path, 65_536)
+}
+
+pub(super) fn read_document_with_limit(
+    base: &Path,
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<u8>, RuntimeAuthorityError> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -21,11 +29,11 @@ pub(super) fn read_document(base: &Path, path: &Path) -> Result<Vec<u8>, Runtime
     let path = startup_secrets::trusted_secret_path(
         &path,
         base,
-        65_536,
+        u64::try_from(limit).map_err(|_| RuntimeAuthorityError::Unavailable)?,
         false,
         "runtime authority metadata",
     )
     .map_err(|_| RuntimeAuthorityError::Unavailable)?;
-    startup_secrets::read_bounded(&path, 65_536, "runtime authority metadata")
+    startup_secrets::read_bounded(&path, limit, "runtime authority metadata")
         .map_err(|_| RuntimeAuthorityError::Unavailable)
 }

@@ -5,23 +5,43 @@ use std::{io, path::PathBuf};
 pub(crate) struct RuntimeAuthorityEnv {
     pub peer_policy_file: PathBuf,
     pub enrollment_file: PathBuf,
+    pub deployment_bindings_file: Option<PathBuf>,
 }
 
 const PEER: &str = "APEX_CONTROL_RUNTIME_PEER_POLICY_FILE";
 const ENROLLMENT: &str = "APEX_CONTROL_RUNTIME_ENROLLMENT_FILE";
+const DEPLOYMENT: &str = "APEX_CONTROL_RUNTIME_DEPLOYMENT_BINDINGS_FILE";
 
 pub(crate) fn runtime_authority_env() -> Result<Option<RuntimeAuthorityEnv>, io::Error> {
     let peer = read(PEER)?;
     let enrollment = read(ENROLLMENT)?;
-    if peer.is_none() && enrollment.is_none() {
+    let bindings = read(DEPLOYMENT)?;
+    if peer.is_none() && enrollment.is_none() && bindings.is_none() {
         return Ok(None);
     }
-    resolve(
+    let settings = resolve(
         peer.as_deref(),
         enrollment.as_deref(),
         cfg!(feature = "postgres"),
         super::control_postgres_url()?.is_some(),
-    )
+    )?;
+    deployment(settings, bindings.as_deref())
+}
+
+fn deployment(
+    mut settings: Option<RuntimeAuthorityEnv>,
+    path: Option<&str>,
+) -> Result<Option<RuntimeAuthorityEnv>, io::Error> {
+    if let Some(path) = path {
+        if path.trim().is_empty() {
+            return Err(invalid());
+        }
+        settings
+            .as_mut()
+            .ok_or_else(invalid)?
+            .deployment_bindings_file = Some(PathBuf::from(path));
+    }
+    Ok(settings)
 }
 
 fn read(name: &str) -> Result<Option<String>, io::Error> {
@@ -60,12 +80,26 @@ fn resolve(
     Ok(Some(RuntimeAuthorityEnv {
         peer_policy_file: PathBuf::from(peer),
         enrollment_file: PathBuf::from(enrollment),
+        deployment_bindings_file: None,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_requires_existing_authority_and_nonempty_path() {
+        assert!(deployment(None, Some("bindings.json")).is_err());
+        let base = || resolve(Some("peer.json"), Some("enrollment.json"), true, true).unwrap();
+        assert!(deployment(base(), Some(" ")).is_err());
+        let resolved = deployment(base(), Some("bindings.json")).unwrap().unwrap();
+        assert_eq!(
+            resolved.deployment_bindings_file,
+            Some(PathBuf::from("bindings.json"))
+        );
+        assert!(deployment(None, None).unwrap().is_none());
+    }
 
     #[test]
     fn absent_callback_configuration_stays_disabled_without_dependencies() {

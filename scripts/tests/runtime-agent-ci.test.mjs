@@ -129,3 +129,16 @@ test('source-only: gateway-contracts invokes this Node contract suite as an acti
   assert.doesNotMatch(verify, /^        (?:if|continue-on-error|working-directory|shell):/m);
   assert.doesNotMatch(gateway.slice(0, gateway.indexOf('    steps:')), /^    (?:if|continue-on-error|defaults):/m);
 });
+
+test('source-only: Linux staging and real signature verification are required acceptance gates', () => {
+  const gate = namedStep(job('rust-control-plane'), 'Verify Linux runtime provisioning boundaries');
+  assert.doesNotMatch(gate, /^        (?:if|continue-on-error):/m);
+  assert.match(gate, /--features staging-integration --lib --test secret_staging --no-run/);
+  assert.match(gate, /sudo -- "\$\{staging_test\}" --test-threads=1/);
+  assert.match(gate, /sudo -- "\$\{agent_test\}" signature::tests::live_cosign_accepts_exact_signer_and_rejects_wrong_identity --exact --ignored/);
+  assert.match(gate, /4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71/);
+  assert.match(gate, /sha256sum --check --strict/);
+  assert.match(gate, /signature::tests::filesystem:: --ignored --test-threads=1/);
+  assert.match(gate, /sudo -u '#1001' -g '#1001'/);
+  assert.match(gate, /signature::tests::dedicated_agent_uid_can_open_its_protected_cache --exact --ignored/);
+});

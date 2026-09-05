@@ -29,13 +29,22 @@ async fn observe_revocation(
         {
             return;
         }
-        assert!(matches!(
-            error.code(),
-            tonic::Code::DeadlineExceeded
-                | tonic::Code::Cancelled
-                | tonic::Code::Unavailable
-                | tonic::Code::FailedPrecondition
-        ));
+        // Timed-out probes retain queue entries until the held worker can drain
+        // them. Eight such probes can fill the real queue before the 1s refresh.
+        // Busy is only an intermediate observation, never proof of revocation.
+        let busy = error.code() == tonic::Code::ResourceExhausted
+            && error.message() == "RUNTIME_AUTHORITY_BUSY";
+        assert!(
+            busy || matches!(
+                error.code(),
+                tonic::Code::DeadlineExceeded
+                    | tonic::Code::Cancelled
+                    | tonic::Code::Unavailable
+                    | tonic::Code::FailedPrecondition
+            ),
+            "unexpected probe refusal category: {:?}",
+            error.code()
+        );
         assert!(
             std::time::Instant::now() < until,
             "revocation must be observed before PG lock timeout"
