@@ -44,6 +44,8 @@ The bounded readiness monitor is committed in `6dafe00` after shutdown/nested
 startup regression fixes, independent re-review, and fresh full gateway checks.
 The shared report validator and authenticated health transport remain unfinished;
 none of these checks yet establish managed serving or end-to-end tracing.
+Task 7's pure runtime-agent identity/configuration/inspection boundary is committed
+in `b5d0391` (43 tests); authenticated authority and provisioning remain open.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.
 Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
 the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)

@@ -65,6 +65,12 @@ required; neither existing suite closes that gate.
 
 ## Task 7: Restricted runtime agent, image catalog and secret staging
 
+Checkpoint: `b5d0391` adds the workspace library, separately generated runtime
+wire types, pure target/configuration relation checks and bounded inspection
+comparison (43 tests). It does not yet start a service, authenticate an owner,
+verify images, stage secrets or operate containers. The full task remains open;
+engine Running is never treated as application readiness.
+
 **Files**
 
 - Create `apps/proxy-runtime-agent/{Cargo.toml,build.rs}`, `src/{lib.rs,main.rs,service.rs,config.rs,docker.rs,secrets.rs,ownership.rs}`, `tests/runtime_boundary.rs`.
