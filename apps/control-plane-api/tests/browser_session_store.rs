@@ -282,6 +282,50 @@ fn malformed_lifetimes_and_colliding_identifiers_never_replace_existing_records(
     invalid.identity.absolute_expires_at = now() - 1;
     assert!(store.create_session(invalid).is_err());
     let mut invalid = session(digest(13), 300);
-    invalid.identity.absolute_expires_at = now() + 86401;
+    // A one-second excess can become valid during reconnect/lock work. Keep
+    // this store-path input invalid independently of the moving database clock.
+    invalid.identity.absolute_expires_at = i64::MAX;
+    invalid.envelope = envelope(digest(13), EnvelopePurpose::OperatorSession, i64::MAX);
     assert!(store.create_session(invalid).is_err());
+    assert!(store.load(digest(13)).unwrap().is_none());
+}
+
+#[test]
+fn database_session_lifetime_constraint_accepts_exact_day_and_rejects_one_second_more() {
+    let db = Database::new();
+    let mut store = PostgresSessionStore::connect(&db.url).unwrap();
+    store.create_session(session(digest(14), 300)).unwrap();
+    let mut client = db.client();
+    // Compare fixed row values in the real schema, not two separately sampled
+    // clocks. This proves the exact limit without racing a second boundary.
+    assert_eq!(
+        client
+            .execute(
+                "UPDATE apex_browser_sessions SET absolute_expires_at=created_at+86400",
+                &[],
+            )
+            .unwrap(),
+        1
+    );
+    let error = client
+        .execute(
+            "UPDATE apex_browser_sessions SET absolute_expires_at=created_at+86401",
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        Some(&postgres::error::SqlState::CHECK_VIOLATION)
+    );
+    let lifetime: i64 = client
+        .query_one(
+            "SELECT absolute_expires_at-created_at FROM apex_browser_sessions",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        lifetime, 86400,
+        "rejected update must leave the original row unchanged"
+    );
 }

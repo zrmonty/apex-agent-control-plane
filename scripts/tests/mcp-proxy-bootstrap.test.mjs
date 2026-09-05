@@ -61,6 +61,10 @@ function liveStepWith(command) {
 
 test('source-only: bootstrap CI runs real image safety checks and retains container isolation inspection', () => {
   const step = liveStepWith('docker compose $P build mcp-proxy-portfolio');
+  const install = 'pnpm --dir ../../apps/mcp-gateway install --frozen-lockfile --ignore-scripts';
+  const harnessTests = 'node --test ../../apps/mcp-gateway/scripts/verify-image/*.test.mjs';
+  assert.ok(step.indexOf(install) >= 0 && step.indexOf(install) < step.indexOf(harnessTests),
+    'host descriptor tests require installed gateway dependencies before they run');
   assert.match(step, /node .*verify-image\.mjs --image "\$image" --suite packaging/);
   assert.match(step, /node .*verify-image\.mjs --image "\$image" --suite startup/);
   assert.match(step, /docker compose \$P create --no-build mcp-proxy-portfolio/);
