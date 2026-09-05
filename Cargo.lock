@@ -186,6 +186,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-proxy-runtime-agent"
+version = "0.1.0"
+dependencies = [
+ "apex-contract",
+ "pbjson",
+ "pbjson-build",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "apex-security"
 version = "0.1.0"
 dependencies = [
