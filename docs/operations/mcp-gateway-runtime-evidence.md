@@ -126,3 +126,78 @@ This commit provides no HTTP listener/probe, secure credential loading, runtime
 authority, network enforcement or admission owner. Those integrations remain
 open and managed composition still refuses unavailable enforcement. No image
 rebuild, configured-health image acceptance, aggregate gate, merge or push claim.
+
+## Task 7B1/7C: peer policy and shared manifest — 2026-09-05
+
+Source: `d65227683dbb69d611dd32844a76dd9ce2bd5286`. Twenty-three source,
+test and dependency files; 2,760 insertions and 28 deletions. Largest changed
+handwritten file is 374 lines. The lock adds nine dependency edges without
+changing existing package versions. Both slices passed independent review.
+
+The compiler and separately generated runtime-agent wrapper share the existing
+v1 manifest algorithm: recursively sorted generated ProtoJSON, array/schema-text
+order preserved, only the root self-hash omitted. Encoding failures stay static
+and fallible. Publication, image signatures and authority are separate checks.
+Main observed shared-helper RED (1 pass/7 fail) and agent RED (1 pass/5 fail),
+then verified compiler delegation without changing the actual exported bytes.
+
+Fresh post-delegation producer artifact:
+`C:/Users/zrmon/AppData/Local/Temp/apex-runtime-fixture-01a070bb-3c74-7c33-8cf8-dbfeecbab8fb/runtime-revision.json`,
+3,632 bytes, SHA-256
+`970cfd7a059a4761fc8b4ad6f8f9d5dd4f4f4f4c4f2d16995cde807d20fdd554`.
+Manifest: `db5ddc4670e5f901240e1c2910d9f78dd8a65237c86f197d13938be967afe5da`.
+Producer tests: 18/18; actual-artifact TypeScript consumer/preflight: 27/27,
+250.285ms. The repository fixture was not substituted for that artifact.
+
+The new shared peer policy strictly parses original JSON under a 64KiB/depth32
+bound and rejects ambiguous fields, malformed pins/identifiers, conflicting
+rotations and noncanonical integer timestamps. Authorization uses the actual
+TLS leaf, exact registered role and one installation/workspace/namespace tuple.
+Every public check samples local integer Unix microseconds with checked overflow
+and inclusive-start/exclusive-expiry semantics. The borrowed result cannot outlive
+its policy, but holding it does not keep that policy current.
+
+Main semantic RED: 31 pure cases, 14 pass/17 fail; eight actual TLS cases,
+0 pass/8 fail. Valid policies hit the refusal stub and real TLS reached its
+handler; most deeper assertions were not independently RED at that checkpoint.
+Fresh GREEN: full auth49/49 plus lifetime compile-fail doc1/1; agent boundary43,
+manifest6 and actual TLS8 all passed with zero ignored. Tests cover valid peers,
+wrong/no certificates, wrong roles, revoked/unlisted leaves, exact-scope isolation,
+spoofed metadata and stale/future policies. Test acknowledgments never claim
+ready/admitting/connected. Existing PKI was reused without regeneration.
+
+Scoped formatting and warnings-denied Clippy passed; the tracked-source 600-line
+checker passed after staging. Existing supervisor verification also passed:
+23 unit tests, one real credential-isolation case and one Windows direct-child
+termination case. This does not establish Unix process-group behavior on Windows.
+
+These libraries do not load current deployment policies, enroll an installation,
+authenticate a current operation/worker/fence, verify image signatures, stage
+secrets or operate containers. Microsecond representation is preserved here,
+not certified as calibrated cross-host accuracy or an end-to-end MCP trace.
+Task7, managed serving and aggregate release gates remain open.
+
+## Task 7D: CI coverage for shared boundaries — 2026-09-05
+
+Source: `68d8d7767d065261b56864044cb5737e981bff7d`. Twelve workflow lines
+and a 131-line dependency-free Node source-contract suite. The existing cached
+Rust control-plane job runs domain/auth/runtime-agent package tests and all-target
+Clippy after collecting the real export, reusing its PKI. No extra Rust job,
+exporter run, certificate generation, dependency upgrade or policy waiver.
+
+Owner source-contract RED: 2 pass/5 fail; unchanged tests then passed7/7.
+Main rerun: 7/7, 50.7842ms, plus full YAML parse: 12jobs/four added Cargo commands.
+Main executed those exact commands from the configured application directory,
+with local fixture/target paths:
+
+```powershell
+cargo test --locked -p apex-domain
+cargo test --locked -p apex-auth
+cargo test --locked -p apex-proxy-runtime-agent
+cargo clippy --locked -p apex-domain -p apex-auth -p apex-proxy-runtime-agent --all-targets -- -D warnings
+```
+
+Results: domain17, auth49+doc1, agent43+6+8 = **124 passed, zero ignored**;
+combined Clippy passed (0.51s). This is local Windows execution, not a GitHub
+Actions run, all-feature/full-workspace proof or a pipeline speed benchmark.
+No merge or push was performed; unrelated runtime work remains separate.

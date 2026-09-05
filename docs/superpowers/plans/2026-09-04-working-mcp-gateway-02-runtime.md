@@ -74,6 +74,14 @@ comparison (43 tests). It does not yet start a service, authenticate an owner,
 verify images, stage secrets or operate containers. The full task remains open;
 engine Running is never treated as application readiness.
 
+`d652276` adds a shared fallible manifest implementation with actual Rust-export
+parity, plus strict deployment-owned certificate policy and real mTLS role/grant
+tests. Policy checks retain integer microseconds and return borrowed point-in-time
+identity evidence, not enrollment or a current operation permit. The existing
+cached CI job now runs the shared packages and agent tests (`68d8d77`).
+Policy loading/revocation delivery, current PostgreSQL operation proof, image
+verification, staging and engine effects remain required before this task closes.
+
 **Files**
 
 - Create `apps/proxy-runtime-agent/{Cargo.toml,build.rs}`, `src/{lib.rs,main.rs,service.rs,config.rs,docker.rs,secrets.rs,ownership.rs}`, `tests/runtime_boundary.rs`.

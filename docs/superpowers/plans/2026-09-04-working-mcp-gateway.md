@@ -47,6 +47,11 @@ and fresh full-suite/typecheck/build checks. Authenticated health transport is n
 none of these checks yet establish managed serving or end-to-end tracing.
 Task 7's pure runtime-agent identity/configuration/inspection boundary is committed
 in `b5d0391` (43 tests); authenticated authority and provisioning remain open.
+Shared producer/agent manifest hashing and exact certificate-role/scope policy
+are committed in `d652276` after independent review and real local mTLS tests.
+Their CI coverage reuses the existing Rust job and fixtures (`68d8d77`).
+Current-operation lookup, policy loading/enrollment and actual runtime effects
+remain open; a peer check is not an execution permit.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.
 Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
 the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)
