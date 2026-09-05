@@ -26,9 +26,16 @@ for the deployment contract and recovery guidance.
 
 ## Local usage
 
-1. Copy `.env.example` into your local environment.
-2. Build the package with `pnpm build` or a direct TypeScript runner if policy wrappers block `pnpm`.
+1. Export the development settings in `.env.example` into your local environment;
+   copying a file alone does not load it into the Node process.
+2. Build the package with `pnpm build`.
 3. Start the gateway with `pnpm start`.
+
+Standalone requires both exact selectors `NODE_ENV=development` and
+`APEX_MCP_PROFILE=development-standalone`, with both
+`APEX_MCP_PROXY_REVISION_CONFIG` and `APEX_MCP_PROXY_REVISION_CONFIG_FILE`
+absent (even an empty supplied value is rejected). The default profile is
+`managed`; setting only `NODE_ENV=development` does not enable standalone.
 
 Local mode uses `StaticLocalApex` and `LocalPortfolioAdapter`. Live mode
 selects the same seeded read-only portfolio adapter but obtains authorization
@@ -40,9 +47,15 @@ Managed startup accepts only a bounded file containing the complete generated
 `RuntimeConfiguration`, not the old handwritten revision model or inline JSON.
 It checks the generated metadata, executable capabilities and caller scope,
 then refuses before secrets, clients, discovery or listeners while enforcement
-is unavailable. Managed stdio/CLI remain disabled. Task 6 is also replacing the
-old no-config standalone selection with an explicit development-only profile;
-do not use the development path as a production fallback.
+is unavailable. Managed startup requires exact `APEX_MCP_GOVERNANCE_MODE=live`;
+inline configuration, missing files and unsupported selectors fail closed.
+Managed stdio/CLI remain disabled. Do not use the development path as a
+production fallback.
+
+The legacy Compose overlay explicitly selects managed/live and has its old
+always-success healthcheck disabled. It is a bootstrap/startup-refusal fixture,
+not a ready deployment. Authenticated health and actual enforcement are still
+being implemented; a disabled healthcheck does not establish readiness.
 
 ## Generated configuration and image checks
 

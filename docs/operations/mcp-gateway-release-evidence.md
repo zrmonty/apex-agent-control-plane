@@ -518,3 +518,43 @@ unchanged: health and authority bootstrap belong to a separate agent-owned
 deployment binding. That choice requires strict cross-binding validation later;
 neither a generated message nor matching hashes establish authority or readiness.
 Full health, admission, egress, trace delivery and G0-G3 gates remain open.
+
+### Explicit profiles and additive health contracts (September 5 UTC, 06:30)
+
+Local development checkpoints, not a release, merge, push or GitHub CI result:
+packaging harness `24e329092d82f690ceef4a720ed9c96beb4a7a20`;
+additive launch/readiness wire `a6fc19b0f1894b205a75d51f2fc74e24283f5595`;
+explicit profiles and bootstrap health configuration `b973488`.
+Independent spec/quality reviews passed and frozen candidate hashes matched
+before these commits. RuntimeConfiguration remains v1; launch metadata and
+readiness reports are generated contracts, not authentication or lease proof.
+
+- Fresh contracts: **85/85**, 0.218s; regeneration/compatibility verification
+  passed. Corrected Rust library run: **576/576**, 11.31s, plus **3/3** JSON
+  contract tests. An initial run omitted the required TLS fixture-directory
+  variable; its 544/32 result was setup failure, not a contract regression.
+- Fresh real Rust export: **18/18**, followed by generated TS consumer **27/27**.
+  Artifact: `C:/Users/zrmon/AppData/Local/Temp/apex-health-wire-1123e8d8aa224f4d89f1365cd70a3cc1/collected-runtime-revision.json`,
+  SHA-256 `970cfd7a059a4761fc8b4ad6f8f9d5dd4f4f4f4c4f2d16995cde807d20fdd554`.
+  These are existing-v1 compatibility checks, not new health Rust semantics.
+- Fresh gateway suite: **223 total, 222 passed, zero failed, one existing
+  Windows symlink skip**, 29.414s; all-source typecheck and production build
+  passed. The actual SDK initializes and lists tools through the directly
+  owned entrypoint under both explicit development selectors. Default/missing
+  managed configuration refuses; valid generated metadata still refuses
+  unavailable enforcement before clients or listeners.
+- Bootstrap source-policy tests: **3/3**. Actual resolved Docker Compose JSON
+  confirms exact managed/live profile, disabled healthcheck (no success
+  command), UID10001/read-only/all capabilities dropped/no published ports.
+  This checks configuration only and launches no Compose containers.
+- Rebuilt image in 8.65s: inspect ID
+  `sha256:eebcc8a6953bbece333b81076be5e1ddcd734b5a2ebcbd9dee7a5d1ec8dff6ba`.
+  Actual packaging passed: 35 files, 131401 bytes, zero compiled test artifacts
+  or private-key markers in the app output; two protos, three services, four
+  expected RPC methods and three generated schemas. Confinement and removal
+  of the exact owned container were verified. `readinessVerified: false`.
+
+The image startup-profile suite and readiness lifecycle components are being
+added. No image startup/managed health result is inferred from host tests or
+packaging. No actual trusted launch producer, egress/admission enforcement,
+cross-process trace delivery or release gate is certified by this checkpoint.
