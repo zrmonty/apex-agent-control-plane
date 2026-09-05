@@ -1,11 +1,13 @@
-//! Pure runtime wire/inspection boundary, not a provisioning agent.
+//! Runtime wire/inspection, current-operation client and image catalog boundary.
 //!
-//! No listener, engine call, secret resolution, persistence or admission exists
-//! here. Relation checks do not establish published-config integrity, approved
-//! executable/image/signature policy, authenticated ownership or a current lease.
-//! Those independent gates must be settled before any future Ensure side effect.
+//! The mTLS authority client returns a point-in-time snapshot, not an execution
+//! permit. There is no production listener, engine call, secret staging or
+//! admission here. Catalog selection does not verify image signatures. These
+//! independent gates must be settled before any future Ensure side effect.
 
+pub mod authority;
 mod error;
+pub mod image_catalog;
 mod inspect;
 mod inspect_decode;
 mod manifest;

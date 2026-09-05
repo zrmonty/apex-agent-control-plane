@@ -63,7 +63,10 @@ check and redacted generated decoder are reviewed and verified. The 2026-09-05
 continuation implements the server-side callback, paired metadata reader, owned
 bounded PostgreSQL worker and explicit startup registration. Actual mTLS/PG and
 production-root tests pass on Windows and Linux. The runtime-agent callback
-client, real controller-ingress composition, staging and engine effects remain
+client now validates actual Controller TLS and every snapshot binding; a test-only
+two-hop ingress reaches the real production control root and PostgreSQL.
+Provisioning starts with strict image-catalog selection, not signature verification.
+Production agent ingress, trusted staging and engine effects remain
 open; no production provisioning or Serving claim follows from this read-only
 snapshot. See the [callback guide](../../operations/mcp-runtime-authority.md) and
 [runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)

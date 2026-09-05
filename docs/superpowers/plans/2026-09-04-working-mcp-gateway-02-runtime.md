@@ -96,8 +96,13 @@ explicit paired policy/enrollment files, one bounded PostgreSQL worker and optio
 registration on the existing mTLS control listener. Real Windows/Linux tests cover
 current operations, revocation and invalid metadata, blocked queries, cancellation,
 partial startup and cleanup. See the [operator guide](../../operations/mcp-runtime-authority.md).
-The runtime-agent callback client and real controller-ingress composition, image
-verification, staging and engine effects remain required. A snapshot is not authority
+The runtime-agent callback client now checks actual Controller TLS, exact snapshot
+bindings and whole monotonic lease intervals. Its two-hop test-only ingress calls
+the real control-plane process and PostgreSQL. Provisioning has started with strict,
+deployment-owned image-catalog selection. Production controller-ingress composition,
+actual signature verification, staging and engine effects remain required. See the
+[provisioning boundary](../../operations/mcp-runtime-provisioning.md).
+A snapshot is not authority
 to execute later, and callback deadlines do not physically preempt OS/database I/O.
 The check-only authority protobuf and shared Agent/observed-Controller pair
 check are now independently reviewed, with strict integer wire tests, actual
