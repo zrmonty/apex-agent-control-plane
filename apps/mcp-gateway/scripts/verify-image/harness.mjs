@@ -102,6 +102,11 @@ async function cleanup(command, state) {
   require(removed.ok && remainingId.length === 0 && remainingOwned.length === 0);
 }
 
+// Shared with the startup suite: keep the reviewed ownership, confinement and
+// uncertain-create cleanup implementation identical for both command paths.
+export { cleanup, confined, containerFormat, containerPattern, docker, imageFormat,
+  imagePattern, json, owned, require, runLabel };
+
 // Explicit command injection is for imported component tests only. The CLI has
 // no fake mode, environment bypass, executable override, or acceptance override.
 export async function verifyPackaging(image, run = docker) {

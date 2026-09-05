@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 import { validImageReference, verifyPackaging } from './verify-image/harness.mjs';
+import { verifyStartup } from './verify-image/startup.mjs';
 
 export async function main(args, boundary) {
   let code = 'INVALID_ARGUMENTS';
@@ -15,7 +16,8 @@ export async function main(args, boundary) {
       values.set(flag, value);
     }
     if (!validImageReference(values.get('--image'))) throw new Error();
-    if (values.get('--suite') !== 'packaging') { code = 'UNSUPPORTED_SUITE'; throw new Error(); }
+    if (!['packaging', 'startup'].includes(values.get('--suite'))) { code = 'UNSUPPORTED_SUITE'; throw new Error(); }
+    if (values.get('--suite') === 'startup') return await verifyStartup(values.get('--image'), boundary);
     return await verifyPackaging(values.get('--image'), boundary);
   } catch {
     return { type: 'image-packaging-verification', ok: false, code, readinessVerified: false };
