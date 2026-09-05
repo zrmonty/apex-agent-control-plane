@@ -466,3 +466,55 @@ Development tree based on `33a053a`, not a release or GitHub CI result.
 The packaging probe is not an entrypoint readiness or serving test. Explicit
 development-only stdio, authenticated health transitions, durable MCP traces,
 host network enforcement and G0-G3 remain open. No merge/push was performed.
+
+The reviewed browser/UI foundation, pure generated-config compiler/consumer,
+Rust clock primitives, fixture/CI preparation and production build-selection
+changes are committed locally as
+`cc30a1c31a288535ec35db7cd4bddd195ed3a871` (263 files). The generated runtime
+chain and reusable image harness are excluded pending their separate review.
+This is a development checkpoint, not a validated release image or completed G0.
+
+### Generated chain and real packaging gate (September 5 UTC, 05:56)
+
+The independently reviewed generated runtime migration and its bounded startup
+regressions are committed as `2ec12975565aae2c41ca18bb3e03979794de19aa` (28 files).
+The test helper now owns Node directly, caps retained output at 16 KiB per
+stream, latches timeout/overflow failures and bounds cleanup independently.
+Focused 16/16 passed; main's fresh full run passed **210/211 tests, 12.110s**,
+with zero failures and one existing Windows private-material symlink skip.
+All-source typecheck and production build passed. Independent rereview closed
+the startup process-lifetime finding; no production authority fallback was added.
+
+The reusable packaging harness now runs against actual Docker images:
+
+```powershell
+node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-contract-check --suite packaging
+node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-production-check --suite packaging
+```
+
+The first command correctly exited 1 with `PACKAGING_ARTIFACTS_REJECTED`:
+189 files, 619069 bytes, 84 test/fixture artifacts and one test-only private key.
+This broader artifact count includes fixture paths/directories; the earlier 78
+count covered compiled tests only. The second exited 0 with `PACKAGING_OK`:
+34 files, 129977 bytes, zero test artifacts and zero private-key markers.
+Both loaded two real proto entrypoints, three service descriptors, four expected
+RPC methods and three generated schemas under the fixed confinement policy.
+Both confirmed removal of their exact owned containers; combined runtime 3.80s.
+Image IDs remain the `521d...` and `f89a...` values recorded above. Each report
+explicitly says `readinessVerified: false`. Full helper suite: **62/62, 1.087s**.
+Independent spec/quality review passed for the reusable packaging harness;
+all nine frozen source hashes match. Full Task 6 readiness remains open.
+
+Actual checks first exposed omitted image `Volumes` and nullable container
+collection fields in Docker's templates. The corrected projections retain
+strict zero-volume/mount/bind/port/device checks. Cleanup verifies only exact
+ID/name/image/run-label ownership and no longer depends on confinement-only
+fields. Main verified and removed the two never-started containers left by the
+initial failing check; no shared container, volume or installation data was removed.
+
+Task 6 now adds explicit process profiles and additive launch/readiness wire
+contracts. RuntimeConfiguration v1 and its existing tool-secret union stay
+unchanged: health and authority bootstrap belong to a separate agent-owned
+deployment binding. That choice requires strict cross-binding validation later;
+neither a generated message nor matching hashes establish authority or readiness.
+Full health, admission, egress, trace delivery and G0-G3 gates remain open.

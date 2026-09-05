@@ -128,7 +128,7 @@ POST CreateProxy with valid session/scope/CSRF -> generated CreateProxyResponse
 - [x] Run `cargo test -p apex-control-plane-api --features postgres --test browser_session_flow`; expect failure while the routes/session store are absent.
 - [x] Add the Rust HTTP edge (Axum/tower modules, with dependencies pinned by lockfile), OIDC code flow, encrypted server-side sessions and strict allowlisted RPC mapping. Reuse scope verification in Rust, not browser claims. Apply request bounds, secure headers/CSP, no-store, safe error mapping (401/403/409/429/503), and audit metadata. No wildcard credentialed CORS, arbitrary redirect URL or provider endpoint supplied by the browser.
 - [x] Run the suite and a real Keycloak login in the growing acceptance harness. Confirm browser responses/storage contain no token; revoke/expire the server session and confirm the next mutation is refused. Measure BFF stages using the task-1 timing shape, with clock implementation supplied by task 16.
-- [ ] Commit: `feat: add authenticated Rust browser edge for proxy management`.
+- [x] Commit checkpoint: Rust browser management foundation included in `cc30a1c`.
 
 ## Task 4: Replace preview API with honest server state
 
@@ -155,7 +155,7 @@ test("uses lowercase UUIDv7 mutation identifiers", () => {
 - [x] Run `pnpm --dir apps/operator-ui test`; verify tests expose the preview implementation and UUIDv4 behavior before replacement.
 - [x] Replace all production `previewProxyApi` imports; add same-origin generated client, route/session guard, scope selector, mutation errors, pagination and server-derived freshness. Display `Unavailable`, `Stale` and `Not configured` when appropriate. Remove “server-authoritative”/“healthy” claims unless backed by a current observation. Wire Vite's development proxy only to the local Rust edge; production uses the deployment HTTPS edge.
 - [x] Run UI tests/typecheck/build. In the real harness, create a draft, reload the browser, stop the Rust API and verify data is not fabricated; restore it and verify the same server record appears. Log out and verify scoped query caches clear.
-- [ ] Commit: `feat: connect proxy UI to authenticated persistent control plane`.
+- [x] Commit checkpoint: authenticated persistent UI included in `cc30a1c`.
 
 ## Task 5: Compile immutable revisions into runtime configurations
 
@@ -169,7 +169,7 @@ test("uses lowercase UUIDv7 mutation identifiers", () => {
 
 `compile_runtime_config(revision: &McpProxyRevision, bindings: &RuntimeDeploymentBindings) -> Result<RuntimeConfiguration, ProxyError>` produces the task-1 generated runtime contract. `RuntimeDeploymentBindings` contains generation, allocated HTTPS resource URL, approved image reference, secret reference metadata, declared network grants, workload identity reference and telemetry policy. It contains no raw secrets. `runtime_manifest_hash(config) -> Result<String, ProxyError>` hashes the deterministic generated representation, excluding the hash field itself; unsupported generated values return a safe error, never a panic or substitute hash.
 
-- [ ] Add cross-language golden tests covering every field, nested array, enum, resource URL audience, distinct ingress/upstream URLs, CPU/memory units, network grants, schema/output profile, rate/approval settings and telemetry precision. Deliberately remove one security setting and assert compilation fails rather than defaulting open.
+- [x] Add cross-language golden tests covering every field, nested array, enum, resource URL audience, distinct ingress/upstream URLs, CPU/memory units, network grants, schema/output profile, rate/approval settings and telemetry precision. Deliberately remove one security setting and assert compilation fails rather than defaulting open.
 
 ```powershell
 cargo test -p apex-control-plane-api --test export_runtime_fixture
@@ -178,10 +178,10 @@ pnpm --dir apps/mcp-gateway exec tsx --test src/managed/config-contract.test.ts
 
 The Rust test writes only its temporary test directory; the checked-in golden fixture is updated intentionally. The TypeScript test must consume the Rust-produced artifact in CI, not a separately handwritten lookalike.
 
-- [ ] Run the commands and capture the current enum/audience/shape mismatch as the red result.
-- [ ] Implement the compiler and strict generated runtime parsing. Compare control hash and runtime-manifest hash separately. Resolve image IDs through the approved catalog; do not treat arbitrary `sha256:` text as a pullable image reference. Add read-only/config-version startup validation and reject unknown/unimplemented capabilities at publish time.
-- [ ] Re-run both sides, contract verify and full gateway tests. Ensure a modified fixture cannot silently widen egress, tools, credential scope or approval policy. Reuse the unchanged portfolio behavior as a regression case.
-- [ ] Commit: `feat: compile and verify complete managed runtime configurations`.
+- [x] Run the commands and capture the current enum/audience/shape mismatch as the red result.
+- [x] Implement the compiler and strict generated runtime parsing. Compare control hash and runtime-manifest hash separately. Resolve image IDs through the approved catalog; do not treat arbitrary `sha256:` text as a pullable image reference. Add read-only/config-version startup validation and reject unknown/unimplemented capabilities at publish time.
+- [x] Re-run both sides, contract verify and full gateway tests. Ensure a modified fixture cannot silently widen egress, tools, credential scope or approval policy. Reuse the unchanged portfolio behavior as a regression case.
+- [x] Commit checkpoint: publication guard `33a053a`, compiler/consumer `cc30a1c`, generated runtime chain `2ec1297`. Managed startup remains deliberately unavailable pending real enforcement; explicit development-only profile selection is Task 6.
 
 ## Stage gate G0
 

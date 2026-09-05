@@ -3,14 +3,16 @@
 Thin TypeScript MCP gateway for governed, read-only `portfolio.read` access
 over stdio or a managed Streamable HTTP revision.
 
-The thin stdio gateway and deterministic local `portfolio.read` path are
-implemented. Managed Streamable HTTP mode uses the official MCP server/client
-transports, dedicated inbound verification, outbound credentials, live Apex
-governance, and the existing certificate-bound event-ingest admission client.
+The deterministic local `portfolio.read` development path is implemented.
+Managed HTTP components use the official MCP transports, separate inbound and
+outbound credentials, Apex governance and certificate-bound event admission.
+The production managed factory deliberately refuses construction until real
+network and admission enforcement are connected; it does not supply permissive
+defaults. Component availability is not a working deployed gateway.
 See [`docs/operations/mcp-proxy-live-integrations.md`](../../docs/operations/mcp-proxy-live-integrations.md)
 for the deployment contract and recovery guidance.
 
-## Behavior
+## Existing read-only components
 
 - Exposes exactly one MCP tool: `portfolio.read`
 - Parses strict input before authorization
@@ -34,16 +36,19 @@ and policy metadata from `control-plane-api` and admits metadata-only TOOL
 evidence through `event-ingest`. Live mode fails closed when any required
 client credential is missing.
 
-When a validated revision sets `ingress.transport` to `streamable-http`, the
-entrypoint requires live dependencies, discovers every declared HTTP upstream
-before binding, and starts the managed listener only after those checks pass.
-Stdio upstreams remain unavailable in this production slice.
+Managed startup accepts only a bounded file containing the complete generated
+`RuntimeConfiguration`, not the old handwritten revision model or inline JSON.
+It checks the generated metadata, executable capabilities and caller scope,
+then refuses before secrets, clients, discovery or listeners while enforcement
+is unavailable. Managed stdio/CLI remain disabled. Task 6 is also replacing the
+old no-config standalone selection with an explicit development-only profile;
+do not use the development path as a production fallback.
 
 ## Generated configuration and image checks
 
-The new strict generated runtime consumer is a compiler-boundary component.
-Production startup migration and runtime enforcement remain in progress; its
-manifest checksum is not proof of publication or deployment authorization.
+The strict generated consumer now feeds the complete managed runtime path.
+Publication rejects unsupported executable capabilities before mutation.
+A manifest checksum still does not prove publication or deployment authority.
 
 The contract tests require the actual Rust exporter artifact, not a copied
 handwritten fixture. Run `cargo test -p apex-control-plane-api --test
@@ -57,8 +62,13 @@ Build the image from the repository root:
 
 ```powershell
 docker build -f apps/mcp-gateway/Dockerfile -t apex-mcp-gateway:working-test .
+node apps/mcp-gateway/scripts/verify-image.mjs --image apex-mcp-gateway:working-test --suite packaging
 ```
 
-The image packages the generated JavaScript contracts and live gRPC schemas.
-This packaging check alone does not certify startup readiness, host egress
-enforcement, or a working deployed proxy.
+The packaging suite loads actual generated contracts and live gRPC descriptors,
+rejects compiled test/fixture artifacts and embedded private-key markers in
+the app dist tree, and verifies confinement and exact owned-container cleanup.
+It uses UID 10001, a read-only filesystem and no network. It is not a whole-image
+secret audit. Missing Docker, failed inspection or unconfirmed cleanup fails.
+The suite explicitly reports `readinessVerified: false`: it does not certify
+startup readiness, host egress enforcement or a working deployed proxy.

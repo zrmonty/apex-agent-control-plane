@@ -26,7 +26,21 @@
 
 ## Status and authorization
 
-Execution was authorized by the subsequent request to execute this plan. Tasks 1 and 2 are implemented, verified and reviewed. The Task 16 TypeScript and Rust clock primitives are implemented, but end-to-end tracing is not. Tasks 3 and 4 have reviewed real authentication, persistent management and UI implementations. The independently reviewed browser-test correction validates the actual cookie lifetime instruction and preserves the browser's original expiry, replacing an invalid cross-process clock comparison; three consecutive actual journeys and all 79 startup tests pass. The UI passes 305 tests and real Keycloak/PostgreSQL integration checks pass. Task 5's publication restrictions are reviewed and committed as `33a053a`; the pure compiler/consumer pass cross-language tests. The generated runtime chain passes 199 gateway tests (one existing Windows symlink skip), with a startup-test process-lifetime review fix pending. Task 6's rebuilt production image excludes compiled tests/test keys and loads generated contracts/live schemas; explicit profiles and the complete readiness gate remain open. Remaining tasks and G0-G3 are incomplete. See the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md) for tested checkpoints and limitations. Execution authorization does not supply production credentials or enable real mutating business tools.
+Execution was authorized by the subsequent request to execute this plan.
+Tasks 1-5 are implemented, verified and independently reviewed: publication
+restrictions are in `33a053a`, the browser/UI and compiler foundation in
+`cc30a1c`, and the complete generated runtime chain in `2ec1297`.
+Fresh evidence includes 305 UI tests, three consecutive actual browser journeys,
+all 79 startup tests and 210 gateway tests with one existing Windows symlink
+skip. The startup subprocess finding is closed. Managed composition remains
+deliberately unavailable until real network/admission enforcement is connected.
+Task 6's rebuilt image passes the independently reviewed packaging harness;
+explicit profiles and additive launch/readiness contracts are in progress.
+The Task 16 integer clock primitives are implemented, not end-to-end tracing.
+Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
+the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)
+for tested checkpoints and limitations. Execution authorization does not supply
+production credentials or enable real mutating business tools.
 
 The assessment baseline is `1a6df0908de0a604415fd5c1631f697656d679ee`. Existing components should be repaired/reused, not rewritten automatically. Earlier plans are context; this task sequence resolves the observed usability gaps and includes the subsequent explicit microsecond-tracing requirement.
 
