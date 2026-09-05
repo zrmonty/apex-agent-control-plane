@@ -56,12 +56,17 @@ are committed in `d652276` after independent review and real local mTLS tests.
 Their CI coverage reuses the existing Rust job and fixtures (`68d8d77`).
 The current PostgreSQL operation/lease/publication lookup is committed in
 `aff8ae3` after real database tests and independent review. The authenticated
-callback, policy loading/enrollment and actual runtime effects remain open;
+callback and actual runtime effects remained open at that store checkpoint;
 neither a peer check nor a point-in-time store snapshot is an execution permit.
 The additive check-only authority wire, shared Agent/observed-Controller pair
-check and redacted generated decoder are reviewed and verified. Actual service
-implementation and startup registration remain unfinished and are excluded
-from this merge checkpoint. See the [runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)
+check and redacted generated decoder are reviewed and verified. The 2026-09-05
+continuation implements the server-side callback, paired metadata reader, owned
+bounded PostgreSQL worker and explicit startup registration. Actual mTLS/PG and
+production-root tests pass on Windows and Linux. The runtime-agent callback
+client, real controller-ingress composition, staging and engine effects remain
+open; no production provisioning or Serving claim follows from this read-only
+snapshot. See the [callback guide](../../operations/mcp-runtime-authority.md) and
+[runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)
 for the exact slice boundaries and post-review verification.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.
 Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See

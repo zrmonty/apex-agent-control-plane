@@ -32,7 +32,7 @@ mod harness;
 #[path = "root_browser/pg.rs"]
 mod pg;
 #[path = "root_browser/support.rs"]
-mod support;
+pub(super) mod support;
 #[path = "root_browser/ui.rs"]
 mod ui;
 

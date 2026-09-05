@@ -17,9 +17,10 @@ use super::{PostgresProxyStore, query_revision_row};
 use crate::ExactScope;
 use crate::proto::{ProxyDesiredState, ProxyObservedState, ProxyOperation, RuntimeTarget};
 use crate::proxy::{McpProxyRevision, ProxyError, ProxyId, ProxyRevisionId};
-use apex_durability::{PostgresClientOps, PostgresTransaction};
+use apex_durability::{PostgresClientOps, PostgresConnection, PostgresTransaction};
 use postgres::{Row, types::FromSql};
 use prost::Message;
+use std::sync::MutexGuard;
 use uuid::Uuid;
 
 /// Copied PostgreSQL operation/revision metadata, not an authority capability.
@@ -45,6 +46,28 @@ impl std::fmt::Debug for RuntimeOperationSnapshot {
 }
 
 impl PostgresProxyStore {
+    /// Cooperative checkpoint sibling for the dedicated runtime-authority owner.
+    ///
+    /// The owner checks cancellation, elapsed deadline and current policy. A
+    /// refusal is propagated unchanged after any transaction cleanup completes.
+    /// An in-flight query still uses the existing transport bounds; this does
+    /// not physically preempt PostgreSQL or grant future execution authority.
+    pub(crate) fn read_current_runtime_operation_checked(
+        &self,
+        target: &RuntimeTarget,
+        operation_id: &str,
+        worker_id: &str,
+        check: &impl Fn() -> Result<(), ProxyError>,
+    ) -> Result<RuntimeOperationSnapshot, ProxyError> {
+        read_checked(
+            || self.client.try_lock_checked(check),
+            target,
+            operation_id,
+            worker_id,
+            check,
+        )
+    }
+
     /// Read exact current operation data using generated target fields as claims.
     ///
     /// This synchronous store seam has no RPC or runtime-effect caller. It does
@@ -60,75 +83,108 @@ impl PostgresProxyStore {
         operation_id: &str,
         worker_id: &str,
     ) -> Result<RuntimeOperationSnapshot, ProxyError> {
-        let scope = ExactScope {
-            workspace_id: target.workspace_id.clone(),
-            namespace_id: target.namespace_id.clone(),
-        };
-        validate_scope(&scope).map_err(|_| invalid_claims())?;
-        let proxy_id = ProxyId::new(&target.proxy_id).map_err(|_| invalid_claims())?;
-        let revision_id =
-            ProxyRevisionId::new(&target.revision_id).map_err(|_| invalid_claims())?;
-        let operation_id = request_uuid(operation_id).map_err(|_| invalid_claims())?;
-        let generation = positive_sql(target.generation)?;
-        let fence = positive_sql(target.fencing_token)?;
-        if !bounded_identifier(worker_id) {
-            return Err(invalid_claims());
-        }
-        let scoped = Target {
-            scope: &scope,
-            proxy_id: &proxy_id,
-        };
-        let mut client = self.client.try_lock().map_err(|_| configuration_error())?;
-        let mut tx = client.transaction().map_err(|_| configuration_error())?;
-        let locked = lock_proxy(&mut tx, scoped).map_err(stored_error)?;
-        let now = database_now(&mut tx)?;
-        let expiry = exact_live_lease_expiry(
-            &mut tx,
-            scoped,
-            &operation_id,
-            generation,
+        read_checked(
+            || self.client.try_lock().map_err(|_| configuration_error()),
+            target,
+            operation_id,
             worker_id,
-            fence,
-            now,
-        )?
-        .ok_or_else(not_current)?;
-        let operation = read_operation(&mut tx, scoped, target, &operation_id)?;
-        if !matches_live_target(&locked, &operation).map_err(stored_error)? {
-            return Err(not_current());
-        }
-        // Unlike load_revision/get_revision, this retains the publication flag.
-        // The real publisher stamps lifecycle Draft; it is not publication proof.
-        let stored = query_revision_row(&mut tx, &proxy_id, &revision_id)
-            .map_err(stored_error)?
-            .ok_or_else(not_current)?;
-        if !stored.published
-            || stored.revision.proxy_id != proxy_id
-            || stored.revision.revision_id != revision_id
-        {
-            return Err(not_current());
-        }
-        validate_publish_capabilities(&stored.revision.spec).map_err(|_| not_current())?;
-        if hash_hex(spec_json(&stored.revision.spec).as_bytes()) != stored.revision.config_hash {
-            return Err(not_current());
-        }
-        let lease_expires_at_unix_us = u64::try_from(expiry).map_err(|_| not_current())?;
-        // Last database sample follows every read/validation. Never authorize
-        // with the earlier lease-check time if the lease expired during a query.
-        let checked_at_unix_us =
-            u64::try_from(database_now(&mut tx)?).map_err(|_| configuration_error())?;
-        if checked_at_unix_us >= lease_expires_at_unix_us {
-            return Err(not_current());
-        }
-        tx.commit().map_err(|_| configuration_error())?;
-        Ok(RuntimeOperationSnapshot {
-            operation,
-            revision: stored.revision,
-            worker_id: worker_id.to_owned(),
-            fencing_token: target.fencing_token,
-            checked_at_unix_us,
-            lease_expires_at_unix_us,
-        })
+            &|| Ok(()),
+        )
     }
+}
+
+// The private acquisition seam can only yield the existing real connection
+// guard. Tests can refuse/panic before acquisition without constructing a DB;
+// this does not accept an alternative SQL backend or arbitrary job executor.
+fn read_checked<'a>(
+    acquire_connection: impl FnOnce() -> Result<MutexGuard<'a, PostgresConnection>, ProxyError>,
+    target: &RuntimeTarget,
+    operation_id: &str,
+    worker_id: &str,
+    check: &impl Fn() -> Result<(), ProxyError>,
+) -> Result<RuntimeOperationSnapshot, ProxyError> {
+    let scope = ExactScope {
+        workspace_id: target.workspace_id.clone(),
+        namespace_id: target.namespace_id.clone(),
+    };
+    validate_scope(&scope).map_err(|_| invalid_claims())?;
+    let proxy_id = ProxyId::new(&target.proxy_id).map_err(|_| invalid_claims())?;
+    let revision_id = ProxyRevisionId::new(&target.revision_id).map_err(|_| invalid_claims())?;
+    let operation_id = request_uuid(operation_id).map_err(|_| invalid_claims())?;
+    let generation = positive_sql(target.generation)?;
+    let fence = positive_sql(target.fencing_token)?;
+    if !bounded_identifier(worker_id) {
+        return Err(invalid_claims());
+    }
+    let scoped = Target {
+        scope: &scope,
+        proxy_id: &proxy_id,
+    };
+    check()?;
+    let mut client = acquire_connection()?;
+    check()?;
+    let mut tx = client.transaction().map_err(|_| configuration_error())?;
+    // On any early return, tx drops before client and completes synchronous
+    // rollback/transport cleanup under the lock. Cleanup is never checkpointed.
+    check()?;
+    let locked = lock_proxy(&mut tx, scoped).map_err(stored_error)?;
+    check()?;
+    let now = database_now(&mut tx)?;
+    check()?;
+    let expiry = exact_live_lease_expiry(
+        &mut tx,
+        scoped,
+        &operation_id,
+        generation,
+        worker_id,
+        fence,
+        now,
+    )?
+    .ok_or_else(not_current)?;
+    check()?;
+    let operation = read_operation(&mut tx, scoped, target, &operation_id)?;
+    if !matches_live_target(&locked, &operation).map_err(stored_error)? {
+        return Err(not_current());
+    }
+    // Unlike load_revision/get_revision, this retains the publication flag.
+    // The real publisher stamps lifecycle Draft; it is not publication proof.
+    check()?;
+    let stored = query_revision_row(&mut tx, &proxy_id, &revision_id)
+        .map_err(stored_error)?
+        .ok_or_else(not_current)?;
+    if !stored.published
+        || stored.revision.proxy_id != proxy_id
+        || stored.revision.revision_id != revision_id
+    {
+        return Err(not_current());
+    }
+    validate_publish_capabilities(&stored.revision.spec).map_err(|_| not_current())?;
+    if hash_hex(spec_json(&stored.revision.spec).as_bytes()) != stored.revision.config_hash {
+        return Err(not_current());
+    }
+    let lease_expires_at_unix_us = u64::try_from(expiry).map_err(|_| not_current())?;
+    // Last database sample follows every read/validation. Never authorize
+    // with the earlier lease-check time if the lease expired during a query.
+    check()?;
+    let checked_at_unix_us =
+        u64::try_from(database_now(&mut tx)?).map_err(|_| configuration_error())?;
+    if checked_at_unix_us >= lease_expires_at_unix_us {
+        return Err(not_current());
+    }
+    check()?;
+    tx.commit().map_err(|_| configuration_error())?;
+    let snapshot = RuntimeOperationSnapshot {
+        operation,
+        revision: stored.revision,
+        worker_id: worker_id.to_owned(),
+        fencing_token: target.fencing_token,
+        checked_at_unix_us,
+        lease_expires_at_unix_us,
+    };
+    drop(client);
+    // A cancellation racing read-only commit cannot produce a late snapshot.
+    check()?;
+    Ok(snapshot)
 }
 
 fn read_operation(
@@ -236,3 +292,6 @@ fn not_current() -> ProxyError {
         "The stored runtime operation is not current or valid.",
     )
 }
+
+#[cfg(test)]
+mod store_cancellation_tests;

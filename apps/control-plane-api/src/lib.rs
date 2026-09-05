@@ -90,9 +90,8 @@ pub use keycloak::{
 #[cfg(feature = "postgres")]
 pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
-#[cfg(feature = "postgres")]
-pub use proxy::{PostgresProxyStore, RuntimeOperationSnapshot};
-pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
+#[cfg(all(feature = "postgres", feature = "test-support"))]
+pub use proxy::RuntimeAuthorityObservations;
 pub use proxy::{
     ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, CreateProxy,
     CreateProxyResult, DataClassification, DockerCommandRunner, DockerProxyProvider,
@@ -113,7 +112,15 @@ pub use proxy::{
 #[cfg(feature = "postgres")]
 pub use proxy::{LeasedProxyOperation, SubmitProxyOperation};
 #[cfg(feature = "postgres")]
+pub use proxy::{PostgresProxyStore, RuntimeOperationSnapshot};
+#[cfg(feature = "postgres")]
 pub use proxy::{ProxyEvidenceRelayStatus, spawn_proxy_evidence_relay};
+#[cfg(feature = "postgres")]
+pub use proxy::{
+    RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
+    RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
+};
+pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 pub use replay::{
     spawn_fanout_worker, spawn_fanout_worker_with_metrics,
     spawn_fanout_worker_with_metrics_and_shutdown,

@@ -49,3 +49,7 @@ include!("tests/browser.rs");
 #[cfg(feature = "postgres")]
 #[path = "tests/root_browser.rs"]
 mod root_browser;
+
+#[cfg(feature = "postgres")]
+#[path = "tests/root_runtime_authority.rs"]
+mod root_runtime_authority;

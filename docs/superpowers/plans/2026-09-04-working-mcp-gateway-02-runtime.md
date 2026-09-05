@@ -91,15 +91,19 @@ cached CI job now runs the shared packages and agent tests (`68d8d77`).
 row/blob consistency, active target, published revision and historical control
 hash are checked in one transaction, including a final expiry recheck. Eighteen
 real PostgreSQL cases and the existing journal/recovery regressions pass.
-The authenticated callback, policy loading/revocation delivery, enrollment,
-image verification, staging and engine effects remain required. A snapshot is
-not authority to execute later, and per-query deadlines are not a whole-job bound.
+The 2026-09-05 server-side continuation adds the authenticated check-only callback,
+explicit paired policy/enrollment files, one bounded PostgreSQL worker and optional
+registration on the existing mTLS control listener. Real Windows/Linux tests cover
+current operations, revocation and invalid metadata, blocked queries, cancellation,
+partial startup and cleanup. See the [operator guide](../../operations/mcp-runtime-authority.md).
+The runtime-agent callback client and real controller-ingress composition, image
+verification, staging and engine effects remain required. A snapshot is not authority
+to execute later, and callback deadlines do not physically preempt OS/database I/O.
 The check-only authority protobuf and shared Agent/observed-Controller pair
 check are now independently reviewed, with strict integer wire tests, actual
 mTLS controls and malformed-RPC decoder regressions. The Agent's observation
-is not an end-to-end Controller signature. The unfinished live authority-service
-implementation is excluded from this checkpoint; no callback is registered by
-production startup. All listed integration and runtime-effect gates stay open.
+is not an end-to-end Controller signature. Server-side registration is now explicit
+and tested; the agent-ingress and runtime-effect gates listed below stay open.
 
 **Files**
 

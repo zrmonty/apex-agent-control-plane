@@ -413,3 +413,90 @@ Final authority codec/contract tests passed3/3 and9/9; control-plane
 all-feature/all-target Clippy passed with warnings denied. The durability
 all-feature library suite passed116/116, subject to its existing optional-live
 environment gates. Local checks do not claim a completed GitHub Actions run.
+
+## Task 7B3B: owned server-side current-operation callback — 2026-09-05
+
+Source: server-side callback checkpoint on `codex/working-mcp-gateway`, based on
+`b7de8c0b67b4c4b55a6247cab62524f0ad313f1a`. The base identifies the parent of this
+checkpoint, not a verified release containing it.
+The [callback operator guide](mcp-runtime-authority.md) describes its exact
+configuration, trust boundaries and limitations.
+
+The generated callback now combines actual Agent mTLS, its attested Controller
+leaf, current paired deployment policy/enrollment and the existing exact published
+PostgreSQL operation lookup. It returns the sixteen-field, integer-microsecond
+snapshot; it grants no execution permission. One reader, one named database owner,
+eight queued jobs, one request deadline and retained shutdown handles replace the
+earlier refusal scaffolds. Startup registration is explicitly opt-in and uses the
+existing required-client-certificate control listener. Provider health is unchanged.
+
+Main-observed test-first sequence:
+
+- Reader/elapsed semantics: five expected failures, then the full component suite
+  passed. Shared document-currentness check: one positive control and one expected
+  failure, followed by both tests passing.
+- Cooperative store checkpoints: four expected failures, followed by four passes.
+- Private queue/ownership: 50 component controls passed and 25 ownership tests
+  failed, followed by all 75 passing after implementation.
+- Real PostgreSQL owner: four expected failures, then four passes. Real mTLS/PG
+  callback: those four controls passed while five handlers failed with the intended
+  static `Unavailable`; all nine passed after handler composition.
+- Actual production root: disabled/occupied positive controls passed while four
+  missing-wiring cases failed; all six passed after optional registration/cleanup.
+- A review-discovered combined-error reporting defect produced two expected
+  failures; the fix reports cleanup uncertainty before returning a primary error,
+  without logging either underlying error. Both tests then passed.
+
+Verification, after implementation and review corrections:
+
+| Scope | Observed result |
+| --- | --- |
+| Windows, Rust 1.98, full control library, all features | 655 passed, 0 failed/ignored; 75.98s |
+| Windows, shared auth library, all features | 68 passed, 0 failed/ignored; 0.08s |
+| Existing real PostgreSQL current-operation regressions | 18 passed, 0 failed/ignored; 28.55s |
+| Windows, real callback suite with scheduling witness | 10 passed, 0 failed/ignored; 21.13s |
+| Windows, authority configuration/report/root suite | 11 passed, 0 failed/ignored; 5.77s |
+| Linux, Rust 1.95, authority component suite | 76 passed, 0 failed/ignored; 5.62s |
+| Linux, real callback suite with scheduling witness | 10 passed, 0 failed/ignored; 15.21s |
+| Linux, authority configuration/report/root suite | 11 passed, 0 failed/ignored; 1.97s |
+| Control/auth all-target, all-feature Clippy, warnings denied | Passed |
+| Control/auth all-target, no-default-feature Clippy, warnings denied | Passed |
+| Existing authority decoder/contract regression suites | 3 and 9 passed, 0 failed/ignored |
+| Tracked and newly added handwritten Rust line bounds | Passed; largest changed file 535 lines after integration formatting |
+
+The Linux verification image is
+`sha256:840597a304679b11dafae6e06f878cd3662d3e0b6c68bb499b9ed88210722374`.
+Only the freshly compiled exact integration/root executables were run, not older
+executables retained in the build cache. The disposable test container used a
+read-only filesystem, temporary writable test space and read-only existing PKI.
+It shared only the disposable PG fixture's network namespace; no Docker socket was
+mounted. Its removal and absence were verified. Existing shared fixtures and build
+caches were retained. Linux exercised Unix symlink and private-key mode checks;
+the Windows `test-support` ACL waiver is not production Windows permission proof.
+
+The real race tests hold an actual second-connection PostgreSQL row lock. They
+verify revocation before releasing an old request, actual rollback before recovery,
+and expired queued work reaching a settled FIFO boundary without store dispatch.
+The bounded scheduling counters exist only in `test-support` builds. Wrong-role
+and wrong-scope cases prove no admission using an otherwise-valid database target.
+Broken metadata remains invalid beyond the maximum policy age and through a refusal
+window; recovery requires a distinct new version. Observer I/O uses the existing
+bounded database transport. Root cleanup is observed by both child and parent while
+the child remains alive, before its exit acknowledgement.
+
+Independent component, production and fixture review passed within their bounded
+source scopes after corrections. The final fixture pass samples counters only after
+the completion fence and uses short revocation probes plus a new still-blocked PG
+observation immediately before intentional lock release. Database lock timeout
+cannot substitute for that release. No aggregate release verdict follows.
+The first full-library command omitted the mandatory PKI setting and failed 32
+fixture preconditions; supplying the existing PKI produced the 655-pass result.
+The disposable Linux build also initially omitted compile-time browser fixture
+files; correcting only that build context resolved setup. Neither is recorded as
+a product defect or semantic implementation failure.
+
+Remaining: runtime-agent callback client, real controller-ingress composition,
+approved image verification and secret staging, restricted engine effects, enforced
+routing/egress, actual runtime lifecycle and subsequent roadmap tasks. Tasks 6/7,
+production `Serving`, end-to-end microsecond tracing and aggregate G0–G3 gates stay
+open. These local results are not a new GitHub Actions run.
