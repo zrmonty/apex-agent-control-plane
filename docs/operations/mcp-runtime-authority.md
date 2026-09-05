@@ -5,10 +5,11 @@ callback. It checks an agent's request against current deployment metadata and a
 published PostgreSQL operation. It does **not** authorize an engine action, renew a
 lease, establish container ownership, or change a proxy to `Serving`.
 
-This is the Task 7B3B server-side slice of the
+This covers the Task 7B3B server and 7B3C client slices of the
 [working gateway plan](../superpowers/plans/2026-09-04-working-mcp-gateway.md).
-The runtime-agent callback client and its integration with actual authenticated
-controller ingress remain separate work. Do not enable provisioning on the strength
+The runtime-agent client is implemented and exercised through real authenticated
+controller ingress in a test-only probe. A production agent listener and its
+provisioning owner remain separate work. Do not enable provisioning on the strength
 of this snapshot alone.
 
 ## Deployment opt-in
@@ -145,6 +146,45 @@ serialize as ProtoJSON strings. Their interval is compared conservatively with t
 whole local monotonic elapsed request time; remote wall clocks are not subtracted.
 This cannot guarantee a lease remains current after the reply. Integer timestamp
 precision is not calibrated cross-host clock accuracy or completed end-to-end tracing.
+
+## Runtime-agent client boundary
+
+`apex_proxy_runtime_agent::authority::RuntimeAuthorityClient` owns a bounded mTLS
+channel. `connect(AuthorityClientConfig)` accepts only deployment-owned settings:
+HTTPS origin, explicit TLS server name and CA, client certificate/key, installation
+ID, agent identity, enrollment version and host-policy version. It does not infer
+system roots, use proxy environment variables or accept an unchecked caller channel.
+PEM inputs are nonempty and at most 65,536 bytes each; the origin is at most 2,048
+bytes. Connection setup has a five-second total observation budget.
+
+For each `check`, the production caller must supply the **original tonic request**,
+its current `RuntimePeerPolicy`, exact `AuthorityOperation` and remaining budget.
+The client authenticates the request's actual Controller TLS leaf for the exact
+installation and scope. It derives the pin from TLS, not the request body or headers.
+The fresh outbound request carries only bounded operation claims and that pin.
+Inbound metadata and credentials are not forwarded.
+
+The client admits at most eight checks per instance and refuses a ninth immediately;
+it does not wait for a semaphore slot. Each call has one monotonic budget capped at
+five seconds, covering readiness, RPC, decoding, validation and handoff. Cancellation
+drops the RPC future and releases the slot; it does not physically preempt a remote
+database call. All sixteen snapshot fields are checked against independently expected
+values or strict enum/time bounds. The original caller policy is rechecked at handoff.
+The policy owner remains responsible for loading and replacing current policy; the
+client does not refresh a file or combine metadata generations itself.
+
+Errors expose static `RUNTIME_AUTHORITY_CLIENT_*` codes, without transport sources or
+remote messages. A successful `connect` alone is not server acceptance of the client
+identity: TLS 1.3 may deliver a server's client-certificate rejection on the first RPC.
+No successful check is cached, renewed or converted into a reusable execution permit.
+
+`examples/runtime_authority_probe` is only a cross-process test harness, gated by
+`APEX_RUNTIME_AUTHORITY_PROBE=1`. It is not the production runtime agent. The control
+test requires `APEX_RUNTIME_AUTHORITY_CLIENT_PROBE` to name the freshly built example
+executable. CI obtains that exact path from Cargo's artifact output before running
+control-plane tests; missing prerequisites fail, rather than skip, the test.
+
+The next boundary is [restricted provisioning](mcp-runtime-provisioning.md).
 
 ## Verification
 

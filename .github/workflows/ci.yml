@@ -265,6 +265,21 @@ jobs:
           appendFileSync(process.env.GITHUB_ENV,
             `APEX_BROWSER_REFRESH_OWNED_ID=${fixture.ownedId}\nAPEX_BROWSER_REFRESH_TEST_ISSUER=${fixture.env.APEX_BROWSER_KEYCLOAK_ISSUER}\n`);
           NODE
+      - name: Build the cross-process runtime authority client probe
+        working-directory: .
+        run: |
+          cargo build --locked -p apex-proxy-runtime-agent --example runtime_authority_probe --message-format=json > "${RUNNER_TEMP}/authority-client-build.jsonl"
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync, statSync } from 'node:fs';
+          import path from 'node:path';
+          const messages = readFileSync(path.join(process.env.RUNNER_TEMP, 'authority-client-build.jsonl'), 'utf8')
+            .trim().split('\n').map(line => JSON.parse(line));
+          const artifacts = messages.filter(message => message.reason === 'compiler-artifact'
+            && message.target?.name === 'runtime_authority_probe'
+            && message.target.kind.includes('example') && message.executable);
+          if (artifacts.length !== 1 || !statSync(artifacts[0].executable).isFile()) throw new Error('one actual agent probe executable required');
+          appendFileSync(process.env.GITHUB_ENV, `APEX_RUNTIME_AUTHORITY_CLIENT_PROBE=${artifacts[0].executable}\n`);
+          NODE
       - name: Test (control gateway)
         env:
           # Dedicated test-owned root; the exporter creates its UUID directory here.

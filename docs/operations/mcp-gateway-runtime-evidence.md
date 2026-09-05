@@ -500,3 +500,64 @@ approved image verification and secret staging, restricted engine effects, enfor
 routing/egress, actual runtime lifecycle and subsequent roadmap tasks. Tasks 6/7,
 production `Serving`, end-to-end microsecond tracing and aggregate G0–G3 gates stay
 open. These local results are not a new GitHub Actions run.
+
+## Task 7B3C client and initial provisioning catalog — 2026-09-05
+
+Working-tree continuation after `ce61061`; no commit or push is claimed here.
+The runtime-agent authority client uses actual Controller mTLS at ingress and
+Agent mTLS for its callback, validates all sixteen snapshot fields and retains
+whole monotonic timing with exact integer microseconds. It has eight immediate
+admission slots and a five-second maximum budget. It returns no execution permit.
+
+The real cross-process test launches the production control-plane binary against
+disposable PostgreSQL, then a separately built agent-client probe. It verifies a
+valid published lease, ignored forged body pin, wrong fence, wrong caller role,
+healthy follow-up and expired lease, with unchanged bytes in seven application
+tables. Its Controller ingress is test-only, not a production runtime agent.
+CI builds the example and exports its exact Cargo artifact path before control tests.
+
+Main observed semantic RED for three snapshot validators, eleven of twelve initial
+TLS client cases, and the real-root client probe. Catalog selection initially failed
+three positive tests; the implementation passed those controls. A later regression
+proved Serde would accept positional arrays for policy objects; object-only decoding
+fixed it while preserving duplicate decoded-key checks.
+
+Two integration-fixture corrections were independently reviewed: TLS 1.3 server
+client-certificate rejection may arrive on the first RPC, so the negative test now
+requires actual RPC refusal and zero callback handler entries, followed by a positive
+RPC on the same listener. The root's existing evidence relay legitimately consumed
+the fixture's pending intent; setup now relays it to a real durable outbox before
+capturing the byte baseline. No worker is disabled and no equality check is weakened.
+
+Fresh local results:
+
+- Windows/Rust 1.98: **102 agent tests passed**, zero failures/ignored: 77 existing,
+  three snapshot timing, fourteen actual TLS client and eight catalog tests. The
+  client suite took 12.68s. The real-root/PostgreSQL client test passed in 1.44s.
+- Linux/Rust 1.95: **101 agent tests passed**, zero failures/ignored, plus the actual
+  control-root/PostgreSQL client test (0.59s). This run includes seven catalog tests;
+  the eighth, additional exact-limit/duplicate-key test was subsequently run on
+  Windows. Production catalog code is identical between these runs.
+- Independent source/spec/quality review approved the client, cross-process fixture,
+  CI wiring, catalog parser and capability documentation after the corrections.
+- Existing Windows real callback regressions: **10 passed** (21.02s); current-operation
+  PostgreSQL regressions: **18 passed** (29.31s), zero failures/ignored.
+- Final agent/control all-target Clippy with warnings denied passed with all features
+  (2.82s) and without default features (6.54s). Scoped formatting, diff whitespace
+  and tracked/new source bounds passed; the largest new handwritten file is 321 lines.
+
+The Linux image is
+`sha256:03dd40cae784b048b86e030ec4594b44edd05b7e9a175690b6a0ab882962c7a9`.
+Executables were selected from fresh Cargo artifact records, not cache filename
+guesses. Only a disposable verification container shared the existing disposable
+PG network namespace. Existing PKI and runtime-manifest mounts were read-only;
+private PKI was copied to container-owned temporary storage with restrictive Unix
+permissions. No Docker socket was mounted. The container's automatic removal and
+absence were verified; shared fixtures and build caches were retained. This is not
+a production image or hardened-host proof.
+
+[Catalog selection](mcp-runtime-provisioning.md) is the first provisioning prerequisite,
+not cryptographic signature verification. Production agent ingress, Cosign verification,
+trusted per-revision staging, durable effect ownership/fencing and constrained engine
+effects remain open. Routing, admission/lifecycle, production readiness and complete
+end-to-end microsecond tracing remain open too. No new `Serving` path is enabled.
