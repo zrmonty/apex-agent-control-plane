@@ -13,7 +13,9 @@ import {
   type OutboundCredentialProvider,
   type SecretCredentialResolver,
 } from "./auth.js";
-import type { UpstreamConfig } from "./config.js";
+import { McpProxyTransport } from "@apex/contracts";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { runtimeSpec, upstreamGrant, type RuntimeUpstream as UpstreamConfig } from "./runtime-types.js";
 import { validateHttpsDestination, validateResolvedAddresses } from "./network.js";
 import type { UpstreamTransport } from "./upstream.js";
 
@@ -58,6 +60,7 @@ export class McpHttpUpstreamTransport implements UpstreamTransport {
   private readonly addressCache = new Map<string, AddressCacheEntry>();
 
   constructor(
+    private readonly config: ReadonlyRuntimeConfiguration,
     private readonly credentials: OutboundCredentialProvider,
     options: McpHttpUpstreamTransportOptions = {},
   ) {
@@ -73,10 +76,11 @@ export class McpHttpUpstreamTransport implements UpstreamTransport {
   }
 
   static fromSecretResolver(
+    config: ReadonlyRuntimeConfiguration,
     resolver: SecretCredentialResolver,
     options?: McpHttpUpstreamTransportOptions,
   ): McpHttpUpstreamTransport {
-    return new McpHttpUpstreamTransport(createOutboundCredentialProvider(resolver), options);
+    return new McpHttpUpstreamTransport(config, createOutboundCredentialProvider(resolver), options);
   }
 
   async discover(upstream: UpstreamConfig): Promise<unknown> {
@@ -116,8 +120,11 @@ export class McpHttpUpstreamTransport implements UpstreamTransport {
   }
 
   private async clientFor(upstream: UpstreamConfig): Promise<ClientSession> {
-    if (upstream.transport !== "streamable-http") {
+    if (upstream.transport !== McpProxyTransport.STREAMABLE_HTTP) {
       throw new GatewayError("ADAPTER_FAILED", "stdio upstream transport is unavailable safely");
+    }
+    if (!runtimeSpec(this.config).upstreams.includes(upstream)) {
+      throw new GatewayError("INVALID_INPUT", "upstream snapshot rejected safely");
     }
     const existing = this.sessions.get(upstream.upstreamId);
     if (existing !== undefined) {
@@ -145,7 +152,8 @@ export class McpHttpUpstreamTransport implements UpstreamTransport {
     } catch {
       throw new GatewayError("INVALID_INPUT", "upstream destination rejected safely");
     }
-    const validated = validateHttpsDestination(endpoint.toString(), [endpoint.hostname]);
+    const grant = upstreamGrant(this.config, upstream);
+    const validated = validateHttpsDestination(endpoint.toString(), [grant.host]);
     await this.resolveValidatedAddresses(validated.hostname).catch((error: unknown) => {
       if (error instanceof GatewayError) {
         throw error;
@@ -153,19 +161,18 @@ export class McpHttpUpstreamTransport implements UpstreamTransport {
       throw new GatewayError("ADAPTER_FAILED", "upstream destination is unavailable safely");
     });
 
-    const credential = upstream.credentialRef === undefined
-      ? undefined
-      : await this.credentials.resolve(upstream.credentialRef);
+    const credential = await this.credentials.resolve(upstream.credentialRef);
     const transportOptions: StreamableHTTPClientTransportOptions = {
       fetch: this.fetchFor(validated.hostname),
-      requestInit: credential === undefined
-        ? undefined
-        : { headers: { authorization: `Bearer ${credential}` } },
+      requestInit: { headers: { authorization: `Bearer ${credential}` } },
     };
     const transport = new StreamableHTTPClientTransport(validated, transportOptions);
     const client = new Client({ name: "apex-managed-mcp-proxy", version: "0.1.0" });
     try {
       await client.connect(transport);
+      if (transport.protocolVersion !== runtimeSpec(this.config).ingress!.protocolRevision) {
+        throw new GatewayError("ADAPTER_FAILED", "upstream protocol revision rejected safely");
+      }
     } catch (error: unknown) {
       await transport.close().catch(() => undefined);
       throw toAdapterError(error);

@@ -6,12 +6,10 @@ import test from "node:test";
 
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
-import type { ProxyRevisionConfig } from "../managed/config.js";
+import { componentFixture } from "../managed/testing/runtime-fixture.js";
 import { createInboundTokenVerifier } from "./inbound-auth.js";
 
-const config = {
-  authBindings: [{ bindingId: "inbound", direction: "inbound", issuer: "https://issuer.example.test", audience: "apex-mcp-proxy" }],
-} as unknown as ProxyRevisionConfig;
+const config = componentFixture();
 
 test("verifies local-JWKS inbound tokens and returns only bounded claims", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "apex-mcp-auth-"));
@@ -24,7 +22,7 @@ test("verifies local-JWKS inbound tokens and returns only bounded claims", async
     const token = await new SignJWT({ scope: "mcp:proxy:invoke", proxy_id: "proxy-1" })
       .setProtectedHeader({ alg: "RS256", kid: "fixture" })
       .setIssuer("https://issuer.example.test")
-      .setAudience("apex-mcp-proxy")
+      .setAudience("https://proxy.example.test/mcp")
       .setSubject("operator:alice")
       .setIssuedAt()
       .setExpirationTime("5m")
@@ -33,7 +31,7 @@ test("verifies local-JWKS inbound tokens and returns only bounded claims", async
     const claims = await verifier.verify(token);
 
     assert.equal(claims.issuer, "https://issuer.example.test");
-    assert.equal(claims.audience, "apex-mcp-proxy");
+    assert.equal(claims.audience, "https://proxy.example.test/mcp");
     assert.equal(claims.subject, "operator:alice");
     assert.equal(claims.scope, "mcp:proxy:invoke");
     assert.equal(claims.proxyId, "proxy-1");

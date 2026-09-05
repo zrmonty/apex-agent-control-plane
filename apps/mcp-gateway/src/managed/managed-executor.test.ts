@@ -3,25 +3,14 @@ import test from "node:test";
 
 import type { AuthenticatedContext } from "../contracts.js";
 import { portfolioResourceReference } from "../context.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
+import { GatewayError } from "../contracts.js";
 import { ManagedExecutor, type ManagedAuthorizationRequest, type ManagedEvidenceEvent, type ManagedGovernance } from "./managed-executor.js";
 import type { InboundTokenClaims } from "./auth.js";
 import type { UpstreamSession } from "./upstream.js";
 
 const proxyId = "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84";
-const tool = { upstreamId: "portfolio", toolName: "portfolio.read", alias: "portfolio.read", classification: "read" } as const;
-const config = {
-  proxyId,
-  revisionId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e85",
-  configHash: "a".repeat(64),
-  ingress: { transport: "stdio", allowedOrigins: [] },
-  upstreams: [{ upstreamId: "portfolio", transport: "streamable-http", endpointOrCommandRef: "https://portfolio.example.test/mcp", credentialRef: "secret://portfolio/read" }],
-  exposedTools: [tool],
-  cliProfiles: [],
-  authBindings: [{ bindingId: "inbound", direction: "inbound", issuer: "https://issuer.example.test", audience: "apex-mcp-proxy" }],
-  governance: { policyId: "policy-read", approvalMode: "none", classification: "confidential" },
-  runtime: { imageDigest: "sha256:" + "b".repeat(64), cpuMillis: 500, memoryBytes: 268_435_456, pidLimit: 128, readOnlyRootfs: true, networkMode: "declared-egress", noNewPrivileges: true, droppedCapabilities: ["ALL"] },
-} as unknown as ProxyRevisionConfig;
+const config = componentFixture();
 
 const caller: AuthenticatedContext = {
   principal: "spiffe://apex/agent/research",
@@ -33,7 +22,7 @@ const caller: AuthenticatedContext = {
 
 const claims: InboundTokenClaims = {
   issuer: "https://issuer.example.test",
-  audience: "apex-mcp-proxy",
+  audience: "https://proxy.example.test/mcp",
   subject: "operator:alice",
   expiresAt: Math.floor(Date.now() / 1000) + 300,
   scope: "mcp:proxy:invoke",
@@ -109,9 +98,9 @@ test("uses the filter's measured output size without serializing the output agai
 test("denials and approval failures never call the upstream", async () => {
   const approved = executor();
   approved.governance.outcome = "requires_approval";
-  await approved.instance.execute("portfolio.read", {}, headers);
-  assert.equal(approved.session.calls, 1);
-  assert.equal(approved.order.includes("approval"), true);
+  await assert.rejects(() => approved.instance.execute("portfolio.read", {}, headers), /APPROVAL_REQUIRED/);
+  assert.equal(approved.session.calls, 0);
+  assert.equal(approved.order.includes("approval"), false, "NONE must not consume an injected auto-approval callback");
 
   const denied = executor();
   denied.governance.outcome = "denied";
@@ -135,17 +124,11 @@ test("evidence admission failure prevents an allowed result", async () => {
 test("routes each exposed alias to its configured upstream session", async () => {
   const primary = new Session();
   const secondary = new Session();
-  const multiConfig = {
-    ...config,
-    upstreams: [
-      ...config.upstreams,
-      { upstreamId: "secondary", transport: "streamable-http", endpointOrCommandRef: "https://secondary.example.test/mcp" },
-    ],
-    exposedTools: [
-      ...config.exposedTools,
-      { upstreamId: "secondary", toolName: "portfolio.read", alias: "secondary.read", classification: "read" },
-    ],
-  } as unknown as ProxyRevisionConfig;
+  const multiConfig = componentFixture(value => {
+    value.spec!.upstreams.push({ ...value.spec!.upstreams[0], upstreamId: "secondary" });
+    value.spec!.exposedTools.push({ ...value.spec!.exposedTools[0], upstreamId: "secondary", alias: "secondary.read" });
+    value.toolSchemas.push({ ...value.toolSchemas[0], upstreamId: "secondary" });
+  });
   const evidence: ManagedEvidenceEvent[] = [];
   const instance = new ManagedExecutor({
     config: multiConfig,
@@ -173,4 +156,21 @@ test("a missing upstream session fails closed without fallback", async () => {
 
   await assert.rejects(() => instance.execute("portfolio.read", {}, headers), /ADAPTER_FAILED/);
   assert.equal(session.calls, 0);
+});
+
+test("managed execution rejects process scope mismatch before authentication or any authority call", () => {
+  let authenticated = false;
+  assert.throws(() => executor({ caller: { ...caller, namespaceId: "wrong" },
+    verifier: { async verify() { authenticated = true; return claims; } } }),
+    (error: unknown) => error instanceof GatewayError && error.code === "AUTHORIZATION_DENIED");
+  assert.equal(authenticated, false);
+});
+
+test("managed evidence preserves integer microseconds from monotonic samples", async () => {
+  const samples = [100000n, 1334999n];
+  const { instance, evidence } = executor({ clock: { now: () => ({ monotonicNs: samples.shift()!,
+    unixUs: 0n, resolutionNs: 1000n, source: "component monotonic clock" }) } });
+  await instance.execute("portfolio.read", {}, headers);
+  assert.equal(evidence[0].latencyUs, 1234n);
+  assert.equal("latencyMs" in evidence[0], false);
 });

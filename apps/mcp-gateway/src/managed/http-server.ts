@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 
 import {
   CallToolRequestSchema,
+  InitializeRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
   type Tool,
@@ -20,7 +21,9 @@ import {
   type HeaderValues,
   type InboundTokenVerifier,
 } from "./auth.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { runtimeSpec } from "./runtime-types.js";
+import { assertExecutableRuntimeConfiguration } from "./executable-capabilities.js";
 import {
   buildProtectedResourceMetadata,
   validateHttpIngressRequest,
@@ -36,7 +39,7 @@ export interface ManagedCallExecutor {
 }
 
 export type ManagedHttpServerOptions = Readonly<{
-  config: ProxyRevisionConfig;
+  config: ReadonlyRuntimeConfiguration;
   verifier: InboundTokenVerifier;
   executor: ManagedCallExecutor;
   host?: string;
@@ -165,6 +168,10 @@ export class ManagedHttpServer {
         await session.transport.handleRequest(request as IncomingMessage & { auth?: never }, response, body.value);
         return;
       }
+      const initialize = InitializeRequestSchema.safeParse(body.value);
+      if (!initialize.success || initialize.data.params.protocolVersion !== runtimeSpec(this.options.config).ingress!.protocolRevision) {
+        throw new GatewayError("INVALID_INPUT", "HTTP ingress protocol rejected safely");
+      }
       const session = await this.createSession();
       await session.transport.handleRequest(request as IncomingMessage & { auth?: never }, response, body.value);
       const sessionId = session.transport.sessionId;
@@ -224,23 +231,16 @@ function createManagedMcpServer(
   return server;
 }
 
-export function buildManagedToolCatalog(config: ProxyRevisionConfig): Tool[] {
-  const tools = config.exposedTools.map((tool) => managedTool(tool.alias));
+export function buildManagedToolCatalog(config: ReadonlyRuntimeConfiguration): Tool[] {
+  assertExecutableRuntimeConfiguration(config);
+  const tools = runtimeSpec(config).exposedTools.map(tool => {
+    const schema = config.toolSchemas.find(value => value.upstreamId === tool.upstreamId && value.toolName === tool.toolName)!;
+    return { name: tool.alias, description: `Governed managed tool ${tool.alias}`,
+      inputSchema: JSON.parse(schema.inputSchemaJson) as Tool["inputSchema"],
+      outputSchema: JSON.parse(schema.outputSchemaJson) as Tool["outputSchema"] };
+  });
   Object.freeze(tools);
   return tools;
-}
-
-function managedTool(alias: string): Tool {
-  return {
-    name: alias,
-    description: `Governed managed tool ${alias}`,
-    inputSchema: {
-      type: "object",
-      ...(alias === "portfolio.read"
-        ? { properties: { portfolioId: { type: "string" } }, required: ["portfolioId"] }
-        : {}),
-    },
-  };
 }
 
 function successResult(output: unknown): CallToolResult {
@@ -276,7 +276,7 @@ function requestUrl(request: IncomingMessage, headers: HeaderValues): string {
 function isProtectedResourceMetadataRequest(
   request: IncomingMessage,
   headers: HeaderValues,
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
 ): boolean {
   if (request.method !== "GET") {
     return false;
@@ -357,7 +357,7 @@ function respondJson(
   response.end(serialized);
 }
 
-function respondUnauthorized(response: ServerResponse, config: ProxyRevisionConfig): void {
+function respondUnauthorized(response: ServerResponse, config: ReadonlyRuntimeConfiguration): void {
   const metadata = buildProtectedResourceMetadata(config);
   respondJson(response, 401, { error: "unauthorized" }, {
     "www-authenticate": buildBearerChallenge(metadataUrl(metadata.resource)),

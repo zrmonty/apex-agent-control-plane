@@ -1,6 +1,8 @@
 import { GatewayError } from "../contracts.js";
 import { readHeaderValues, type HeaderValues } from "./auth.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import { McpProxyTransport } from "@apex/contracts";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { runtimeAuth, runtimeSpec } from "./runtime-types.js";
 
 const MAX_BODY_BYTES = 1_048_576;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -18,22 +20,22 @@ export type ProtectedResourceMetadata = Readonly<{
   resource: string;
   authorization_servers: readonly string[];
   bearer_methods_supported: readonly ["header"];
-  scopes_supported: readonly ["mcp:proxy:invoke"];
+  scopes_supported: readonly string[];
 }>;
 
 export function validateHttpIngressRequest(
   request: HttpIngressRequest,
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
 ): ValidatedHttpIngress {
   if (
-    config.ingress.transport !== "streamable-http" ||
+    runtimeSpec(config).ingress!.transport !== McpProxyTransport.STREAMABLE_HTTP ||
     !Number.isSafeInteger(request.bodyBytes) ||
     request.bodyBytes < 0 ||
     request.bodyBytes > MAX_BODY_BYTES
   ) {
     throw rejected();
   }
-  const endpoint = parseHttpsUrl(config.ingress.endpoint);
+  const endpoint = parseHttpsUrl(config.resourceUrl);
   let target: URL;
   try {
     target = new URL(request.url);
@@ -46,7 +48,7 @@ export function validateHttpIngressRequest(
     host === undefined ||
     origin === undefined ||
     host.toLowerCase() !== endpoint.host.toLowerCase() ||
-    !config.ingress.allowedOrigins.includes(origin) ||
+    !runtimeSpec(config).ingress!.allowedOrigins.includes(origin) ||
     (target.protocol !== "https:" && !isLocalhost(host)) ||
     target.host.toLowerCase() !== endpoint.host.toLowerCase() ||
     target.pathname !== endpoint.pathname ||
@@ -69,20 +71,22 @@ export function validateHttpIngressRequest(
   if (sessionId !== undefined && !SESSION_PATTERN.test(sessionId)) {
     throw rejected();
   }
+  const versions = readHeaderValues(request.headers, "mcp-protocol-version");
+  if ((sessionId !== undefined || versions.length > 0) &&
+    (versions.length !== 1 || versions[0] !== runtimeSpec(config).ingress!.protocolRevision)) throw rejected();
   return { sessionId };
 }
 
 export function buildProtectedResourceMetadata(
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
 ): ProtectedResourceMetadata {
-  const resource = parseHttpsUrl(config.ingress.endpoint);
-  const inbound = config.authBindings.find((binding) => binding.direction === "inbound");
-  const authorizationServer = inbound?.issuer ?? resource.origin;
+  const resource = parseHttpsUrl(config.resourceUrl);
+  const auth = runtimeAuth(config);
   return {
     resource: resource.toString(),
-    authorization_servers: [authorizationServer],
+    authorization_servers: [auth.issuer],
     bearer_methods_supported: ["header"],
-    scopes_supported: ["mcp:proxy:invoke"],
+    scopes_supported: auth.requiredScopes,
   };
 }
 

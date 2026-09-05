@@ -1,3 +1,6 @@
+/** @deprecated Dormant CLI component fixture only. Production startup and the
+ * active managed chain use runtime-config.ts and generated nested types. This
+ * legacy parser is never a fallback for a supplied generated configuration. */
 import { z } from "zod";
 
 import { GatewayError } from "../contracts.js";

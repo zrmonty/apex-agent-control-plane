@@ -1,9 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { GatewayError } from "../contracts.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { runtimeAuth } from "./runtime-types.js";
 
-const SCOPE = "mcp:proxy:invoke";
 const SUBJECT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$/;
 const SECRET_REF_PATTERN = /^secret:\/\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]{1,8192}$/;
@@ -39,7 +39,7 @@ export interface InboundTokenVerifier {
 export type InboundIdentity = Readonly<{
   subject: string;
   proxyId: string;
-  scope: typeof SCOPE;
+  scopes: readonly string[];
 }>;
 
 export interface SecretCredentialResolver {
@@ -52,13 +52,10 @@ export interface OutboundCredentialProvider {
 
 export async function authenticateInbound(
   headers: HeaderValues,
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
   verifier: InboundTokenVerifier,
 ): Promise<InboundIdentity> {
-  const binding = config.authBindings.find((candidate) => candidate.direction === "inbound");
-  if (binding === undefined) {
-    throw rejected();
-  }
+  const binding = runtimeAuth(config);
   const token = extractBearerToken(headers);
   let claims: InboundTokenClaims;
   try {
@@ -67,17 +64,17 @@ export async function authenticateInbound(
     throw rejected();
   }
   if (
-    (binding.issuer !== undefined && claims.issuer !== binding.issuer) ||
-    (binding.audience !== undefined && !audienceMatches(claims.audience, binding.audience)) ||
+    claims.issuer !== binding.issuer ||
+    !audienceMatches(claims.audience, binding.audience) ||
     !Number.isSafeInteger(claims.expiresAt) ||
     claims.expiresAt <= Math.floor(Date.now() / 1000) ||
     !SUBJECT_PATTERN.test(claims.subject) ||
     claims.proxyId !== config.proxyId ||
-    !hasScope(claims.scope, SCOPE)
+    !binding.requiredScopes.every(scope => hasScope(claims.scope, scope))
   ) {
     throw rejected();
   }
-  return { subject: claims.subject, proxyId: claims.proxyId, scope: SCOPE };
+  return { subject: claims.subject, proxyId: claims.proxyId, scopes: binding.requiredScopes };
 }
 
 export function createOutboundCredentialProvider(

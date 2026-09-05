@@ -5,30 +5,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import type { InboundTokenClaims } from "./auth.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
+import { loopbackFetch } from "./testing/loopback-fetch.js";
 import { buildManagedToolCatalog, ManagedHttpServer, type ManagedCallExecutor } from "./http-server.js";
 
 const proxyId = "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84";
-const config = {
-  proxyId,
-  revisionId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e85",
-  configHash: "a".repeat(64),
-  ingress: {
-    transport: "streamable-http",
-    endpoint: "https://127.0.0.1:18443/mcp",
-    allowedOrigins: ["https://console.example.test"],
-  },
-  upstreams: [{ upstreamId: "portfolio", transport: "streamable-http", endpointOrCommandRef: "https://portfolio.example.test/mcp" }],
-  exposedTools: [{ upstreamId: "portfolio", toolName: "portfolio.read", alias: "portfolio.read", classification: "read" }],
-  cliProfiles: [],
-  authBindings: [{ bindingId: "inbound", direction: "inbound", issuer: "https://issuer.example.test", audience: "apex-mcp-proxy" }],
-  governance: { policyId: "policy-read", approvalMode: "none", classification: "confidential" },
-  runtime: { imageDigest: "sha256:" + "b".repeat(64), cpuMillis: 500, memoryBytes: 268_435_456, pidLimit: 128, readOnlyRootfs: true, networkMode: "declared-egress", noNewPrivileges: true, droppedCapabilities: ["ALL"] },
-} as unknown as ProxyRevisionConfig;
+const config = componentFixture();
 
 const claims: InboundTokenClaims = {
   issuer: "https://issuer.example.test",
-  audience: "apex-mcp-proxy",
+  audience: "https://proxy.example.test/mcp",
   subject: "operator:alice",
   expiresAt: Math.floor(Date.now() / 1000) + 300,
   scope: "mcp:proxy:invoke",
@@ -54,12 +40,12 @@ test("serves a governed MCP call over Streamable HTTP with session isolation", a
   });
   const address = await server.start();
   const client = new Client({ name: "fixture-client", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(config.ingress.endpoint!), {
-    fetch: async (_url, init) => fetch(`http://127.0.0.1:${address.port}/mcp`, {
+  const transport = new StreamableHTTPClientTransport(new URL(config.resourceUrl), {
+    fetch: async (_url, init) => loopbackFetch(`http://127.0.0.1:${address.port}/mcp`, {
       ...init,
       headers: {
         ...Object.fromEntries(new Headers(init?.headers).entries()),
-        origin: "https://console.example.test",
+        origin: "https://console.example.test", host: "proxy.example.test",
       },
     }),
     requestInit: { headers: { authorization: "Bearer signed-token" } },
@@ -101,10 +87,11 @@ test("returns a bearer challenge before MCP processing for invalid auth", async 
   const address = await server.start();
 
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+    const response = await loopbackFetch(`http://127.0.0.1:${address.port}/mcp`, {
       method: "POST",
       headers: {
         origin: "https://console.example.test",
+        host: "proxy.example.test",
         "content-type": "application/json",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
@@ -128,11 +115,11 @@ test("serves protected-resource metadata at the advertised challenge URL", async
   const address = await server.start();
 
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/.well-known/oauth-protected-resource`);
+    const response = await loopbackFetch(`http://127.0.0.1:${address.port}/.well-known/oauth-protected-resource`, { headers: { host: "proxy.example.test" } });
 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
-      resource: config.ingress.endpoint,
+      resource: config.resourceUrl,
       authorization_servers: ["https://issuer.example.test"],
       bearer_methods_supported: ["header"],
       scopes_supported: ["mcp:proxy:invoke"],
@@ -140,4 +127,26 @@ test("serves protected-resource metadata at the advertised challenge URL", async
   } finally {
     await server.close();
   }
+});
+
+test("refuses unsupported initialize body protocols before creating an MCP session", async () => {
+  let calls = 0;
+  const server = new ManagedHttpServer({ config, host: "127.0.0.1", port: 0,
+    verifier: { async verify() { return claims; } },
+    executor: { async execute() { calls++; }, async close() {} } });
+  const address = await server.start();
+  try {
+    for (const protocolVersion of ["2025-06-18", "SENSITIVE-unsupported", undefined]) {
+      const response = await loopbackFetch(`http://127.0.0.1:${address.port}/mcp`, {
+        method: "POST", headers: { host: "proxy.example.test", origin: "https://console.example.test",
+          authorization: "Bearer signed-token", "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+          protocolVersion, capabilities: {}, clientInfo: { name: "fixture-client", version: "1" } } }),
+      });
+      assert.equal(response.status, 400);
+      assert.equal(response.headers.get("mcp-session-id"), null);
+      assert.deepEqual(await response.json(), { error: "request rejected safely" });
+    }
+    assert.equal(calls, 0);
+  } finally { await server.close(); }
 });
