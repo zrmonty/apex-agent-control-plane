@@ -109,6 +109,20 @@ impl RuntimePeerPolicy {
         &self.version
     }
 
+    /// Check only the document validity window against the real local clock.
+    /// This does not authenticate any peer, grant or installation. The returned
+    /// Unix microseconds allow the owner to check a paired enrollment document.
+    ///
+    /// # Errors
+    /// Refuses a stale/future policy or an unrepresentable local clock.
+    pub fn check_current(&self) -> Result<u64, RuntimePeerError> {
+        let now = checked_clock(SystemTime::now().duration_since(UNIX_EPOCH).ok())?;
+        if now < self.valid_from_unix_us || now >= self.expires_at_unix_us {
+            return Err(RuntimePeerError::PolicyNotCurrent);
+        }
+        Ok(now)
+    }
+
     /// Authenticate only the leaf obtained by `PeerIdentity::from_request`.
     /// Claimed role/installation/scope are selectors, never transport identity.
     /// The public API has no caller-selected clock or pin override.

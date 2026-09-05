@@ -11,6 +11,8 @@ mod lifecycle;
 mod operation_worker;
 mod provider;
 mod reconciler;
+#[cfg(feature = "postgres")]
+mod runtime_authority;
 mod runtime_config;
 mod service;
 mod store;
@@ -26,7 +28,16 @@ pub use provider::{
     RuntimeCommandRunner, RuntimeHandle,
 };
 pub use reconciler::{ProxyRuntimeReconciler, RuntimeOperations};
-pub use runtime_config::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
+#[cfg(all(feature = "postgres", feature = "test-support"))]
+pub use runtime_authority::RuntimeAuthorityObservations;
+#[cfg(feature = "postgres")]
+pub use runtime_authority::{
+    RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
+    RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
+};
+pub use runtime_config::{
+    RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash,
+};
 
 #[allow(unused_imports)]
 pub use lifecycle::{LifecycleCommand, LifecycleTransition, transition_state};
@@ -35,8 +46,6 @@ pub use service::{
     ProxyLifecycleEvent, ProxyRuntimeProvider, bounded_mcp_proxy_service_server,
 };
 
-#[cfg(feature = "postgres")]
-pub use store::{PostgresProxyStore, RuntimeOperationSnapshot};
 pub use store::{
     CreateProxy, CreateProxyResult, InMemoryProxyStore, ListProxies, ListProxiesPage,
     ListProxyActivity, ListProxyActivityPage, McpProxy, McpProxySummary, ProxyActivity,
@@ -45,6 +54,8 @@ pub use store::{
 };
 #[cfg(feature = "postgres")]
 pub use store::{LeasedProxyOperation, SubmitProxyOperation};
+#[cfg(feature = "postgres")]
+pub use store::{PostgresProxyStore, RuntimeOperationSnapshot};
 use validation::{bounded_host, bounded_required_string, is_lowercase_uuidv7, is_scope_identifier};
 pub use validation::{validate_mcp_proxy_revision, validate_proxy_spec};
 pub use wire::{parse_proxy_spec_wire_json, validate_proxy_spec_wire_json};

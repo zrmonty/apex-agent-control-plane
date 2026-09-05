@@ -10,7 +10,7 @@ use postgres::{Client, types::ToSql};
 use prost::Message;
 use uuid::Uuid;
 
-use crate::recovery::{Database, another_submission};
+use super::recovery::{Database, another_submission};
 #[path = "spec.rs"]
 mod spec;
 

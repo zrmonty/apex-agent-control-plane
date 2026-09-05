@@ -21,6 +21,8 @@ use super::env::{
 use super::fanout::prepare_control_fanout;
 
 #[cfg(feature = "postgres")]
+mod authority;
+#[cfg(feature = "postgres")]
 mod browser;
 mod proxy;
 mod resolvers;
@@ -58,9 +60,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
 pub(crate) fn run_until(
     signal: impl std::future::Future<Output = ()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let authority_settings = super::env::runtime_authority_env()?;
     let browser_settings = super::env::browser_env()?;
     #[cfg(not(feature = "postgres"))]
-    debug_assert!(browser_settings.is_none());
+    debug_assert!(browser_settings.is_none() && authority_settings.is_none());
     let bind_addr = resolve_bind_addr()?;
     let metrics_addr = metrics_bind_addr()?;
     // Confines every configured secret path under one operator-owned
@@ -70,6 +73,8 @@ pub(crate) fn run_until(
     // trust boundaries and, in Compose, separate mounts.
     let trusted_base = PathBuf::from(required("APEX_CONTROL_TRUSTED_SECRET_BASE")?);
     let tls = load_server_tls(&trusted_base)?;
+    #[cfg(feature = "postgres")]
+    let mut authority = authority::prepare(authority_settings, &trusted_base)?;
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
     let proxy_store = open_proxy_store()?;
@@ -160,8 +165,16 @@ pub(crate) fn run_until(
         .worker_threads(4)
         .enable_all()
         .build()?;
+    // Connect and wait only outside entered Tokio. Keep even a failed start as
+    // a value so the common cleanup tail observes every partially started owner.
+    #[cfg(feature = "postgres")]
+    let authority_service = authority.as_mut().map(|owner| owner.start()).transpose();
+    #[cfg(feature = "postgres")]
+    let authority_stop = authority.as_ref();
     let stop = supervisor::StopOnDrop(shutdown.clone());
     let outcome = runtime.block_on(async move {
+        #[cfg(feature = "postgres")]
+        let authority_service = authority_service?;
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_service_status(
@@ -201,14 +214,17 @@ pub(crate) fn run_until(
                 tonic_health::ServingStatus::Serving,
             )
             .await;
-        // All listener binding and TLS construction precede worker spawning, so
-        // an early error cannot detach an already-running background task.
+        // Listener binding precedes async worker spawning. The synchronous
+        // authority workers remain root-owned through any bind/TLS failure.
         let incoming = tonic::transport::server::TcpIncoming::bind(bind_addr)?;
         let server = Server::builder().tls_config(tls)?
             .add_service(health_service)
             .add_service(bounded_control_gateway_server(service))
             .add_service(bounded_mcp_proxy_service_server(proxy_service))
             .add_service(apex_control_plane_api::proto::governance_gateway_server::GovernanceGatewayServer::new(governance_service));
+        #[cfg(feature = "postgres")]
+        let server = server.add_optional_service(authority_service.map(
+            apex_control_plane_api::bounded_runtime_authority_service_server));
         #[cfg(feature = "postgres")]
         let browser_listener = match browser.as_ref() {
             Some(browser) => Some(tokio::net::TcpListener::bind(browser.bind_addr).await?),
@@ -275,6 +291,8 @@ pub(crate) fn run_until(
         }
         let serve_result = supervisor::wait(&mut servers, signal, &shutdown).await;
         shutdown.request();
+        #[cfg(feature = "postgres")]
+        if let Some(owner) = authority_stop { owner.request_shutdown(); }
         health_reporter.set_service_status("apex.v1.ControlGateway", tonic_health::ServingStatus::NotServing).await;
         health_reporter.set_service_status("apex.v1.McpProxyService", tonic_health::ServingStatus::NotServing).await;
         let drain_result = supervisor::drain(&mut servers).await;
@@ -302,6 +320,10 @@ pub(crate) fn run_until(
         Ok::<(), Box<dyn std::error::Error>>(())
     });
     drop(stop);
+    #[cfg(feature = "postgres")]
+    if let Some(owner) = authority.as_ref() {
+        owner.request_shutdown();
+    }
     // Also runs after bind/TLS errors before the async cleanup tail was reached.
     #[cfg(feature = "postgres")]
     let session_result = runtime.block_on(async {
@@ -314,6 +336,8 @@ pub(crate) fn run_until(
         }
     });
     drop(runtime);
+    #[cfg(feature = "postgres")]
+    let authority_result = authority::finish(authority.as_mut());
     // The observation worker is startup-owned, never implicitly joined by an
     // async destructor. Loss/incomplete output is not an authorization result.
     #[cfg(feature = "postgres")]
@@ -321,6 +345,8 @@ pub(crate) fn run_until(
         Some(exporter) => browser::observations::finish(exporter, &final_metrics),
         None => Ok(()),
     };
+    #[cfg(feature = "postgres")]
+    let outcome = authority::report_cleanup(outcome, authority_result, &mut std::io::stderr());
     drop(roots);
     outcome?;
     #[cfg(feature = "postgres")]

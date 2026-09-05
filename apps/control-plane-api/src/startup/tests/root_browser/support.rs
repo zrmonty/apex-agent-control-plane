@@ -18,7 +18,7 @@ pub(super) fn required(name: &str) -> String {
         .expect("required root-browser fixture setting is absent")
 }
 
-pub(super) fn require_platform() {
+pub(in crate::startup::tests) fn require_platform() {
     #[cfg(all(windows, not(feature = "test-support")))]
     panic!(
         "Windows root tests require test-support: its explicit ACL waiver is not production permission proof"
@@ -69,7 +69,7 @@ impl Pki {
     }
 }
 
-pub(super) struct OwnedDir {
+pub(in crate::startup::tests) struct OwnedDir {
     pub path: PathBuf,
     parent: PathBuf,
     name: String,

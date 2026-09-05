@@ -144,7 +144,11 @@ mod credentials;
 mod keycloak;
 mod limits;
 mod proxy_profile;
+mod runtime_authority;
 pub(crate) use proxy_profile::proxy_storage_profile_value;
+#[cfg(feature = "postgres")]
+pub(crate) use runtime_authority::RuntimeAuthorityEnv;
+pub(crate) use runtime_authority::runtime_authority_env;
 
 pub(crate) use backends::{control_postgres_url, control_valkey_env, nats_config};
 pub(crate) use credentials::{
