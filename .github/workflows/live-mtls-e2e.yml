@@ -368,6 +368,8 @@ jobs:
           docker compose $P down -v --remove-orphans || true
           docker compose $P build mcp-proxy-portfolio
           image="$(docker image inspect --format '{{.Id}}' apex-mcp-gateway:runtime-baseline)"
+          # Descriptor unit tests run on the host, outside the built image.
+          pnpm --dir ../../apps/mcp-gateway install --frozen-lockfile --ignore-scripts
           node --test ../../apps/mcp-gateway/scripts/verify-image/*.test.mjs
           node ../../apps/mcp-gateway/scripts/verify-image.mjs --image "$image" --suite packaging
           node ../../apps/mcp-gateway/scripts/verify-image.mjs --image "$image" --suite startup
