@@ -37,6 +37,7 @@ jobs:
           pnpm --dir contracts test
           node --test scripts/tests/verify-working-mcp-gateway.test.mjs
           node --test scripts/tests/runtime-agent-ci.test.mjs
+          node --test scripts/tests/mcp-proxy-bootstrap.test.mjs
           node scripts/verify-working-mcp-gateway.mjs --list
 
   source-line-limits:
@@ -56,8 +57,6 @@ jobs:
   mcp-gateway:
     needs: rust-control-plane
     runs-on: ubuntu-latest
-    env:
-      APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-contract/runtime-revision.json
     defaults:
       run:
         working-directory: apps/mcp-gateway
@@ -80,6 +79,8 @@ jobs:
           path: ${{ runner.temp }}/runtime-contract
           digest-mismatch: error
       - name: Test, typecheck, and build
+        env:
+          APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-contract/runtime-revision.json
         run: |
           pnpm test
           pnpm typecheck

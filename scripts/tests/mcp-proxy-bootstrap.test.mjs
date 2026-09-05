@@ -51,3 +51,30 @@ test('source-only: local example explicitly selects development standalone witho
   }
   assert.doesNotMatch(environment, /^\s*(?:export\s+)?APEX_MCP_PROXY_REVISION_CONFIG(?:_FILE)?\s*=/m);
 });
+
+function liveStepWith(command) {
+  const steps = source('.github/workflows/live-mtls-e2e.yml').split(/^      - name: /m);
+  const matching = steps.filter((step) => step.includes(command));
+  assert.equal(matching.length, 1, 'expected one live proof step');
+  return matching[0];
+}
+
+test('source-only: bootstrap CI runs real image safety checks and retains container isolation inspection', () => {
+  const step = liveStepWith('docker compose $P build mcp-proxy-portfolio');
+  assert.match(step, /node .*verify-image\.mjs --image "\$image" --suite packaging/);
+  assert.match(step, /node .*verify-image\.mjs --image "\$image" --suite startup/);
+  assert.match(step, /docker compose \$P create --no-build mcp-proxy-portfolio/);
+  assert.match(step, /docker compose \$P ps -a -q mcp-proxy-portfolio/);
+  assert.match(step, /APEX_CONTROL_LIVE_MCP_PROXY_RUNTIME=1/);
+  assert.match(step, /cargo test -p apex-control-plane-api --test live_mcp_proxy_runtime/);
+  assert.doesNotMatch(step, /State\.Health|\bhealthy\b|up -d/);
+});
+
+test('source-only: live stdio proof opts into development startup but retains real governance', () => {
+  const step = liveStepWith('node scripts/live_proof.mjs');
+  assert.match(step, /^          NODE_ENV: development$/m);
+  assert.match(step, /^          APEX_MCP_PROFILE: development-standalone$/m);
+  assert.match(step, /^          APEX_MCP_GOVERNANCE_MODE: live$/m);
+  assert.doesNotMatch(step, /APEX_MCP_PROXY_REVISION_CONFIG|APEX_MCP_GOVERNANCE_MODE: local/);
+  assert.match(step, /verify_mcp_projection\.py/);
+});
