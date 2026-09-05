@@ -4,7 +4,7 @@ Apex is a self-hosted control plane for AI agents. It is cloud-agnostic.
 
 Apex helps teams observe, govern, evaluate, secure, and control agent workloads. It runs on local hosts, on-premises systems, and cloud systems. Each agent action is a scoped event. Security, compliance, and cost controls stay near the runtime.
 
-> **Status:** Phase 0, the out-of-band control gateway baseline, the Rust workspace/fanout foundations, and the Apex governance contract boundary are complete. The thin TypeScript stdio MCP gateway and deterministic local `portfolio.read` path are now implemented in `apps/mcp-gateway` for local/test-only use. The remaining active roadmap work is live Apex authorization and event clients plus one narrow operator-visible vertical slice. Live completion is not reached yet, and all other roadmap work remains on hold. See the [Apex execution roadmap](docs/roadmap.md).
+> **Status:** Phase 0, the out-of-band control gateway (cooperative controls plus a supervisor-enacted `force_stop`), the Rust workspace and shared crates, durable admission/fanout separation, and the Apex governance contract boundary are complete. The thin TypeScript MCP gateway in `apps/mcp-gateway` exposes one read-only `portfolio.read` tool, and its live authorization/event path through `control-plane-api` and `event-ingest` has passed the narrow vertical-slice gate. The active milestone is now the managed MCP proxy platform: one hardened isolated container per proxy, with lifecycle and governance controls in the operator UI. The operator UI has a real `MCP proxies` route that talks to the control-plane browser edge, but the rest of the UI is still a placeholder shell, and a usable managed product is not delivered yet. All other roadmap work remains on hold. See the [Apex execution roadmap](docs/roadmap.md).
 
 ## What Apex provides
 
@@ -39,13 +39,13 @@ python3 deploy/compose/e2e/run_gates.py
 
 See [docs/environment-gates.md](docs/environment-gates.md).
 
-Also see [Phase 0 progress](docs/phase-0-progress.md).
+Also see [Phase 0 progress](docs/phase-0-progress.md) and [Phase 0.5 progress](docs/phase-0.5-progress.md) (out-of-band control gateway). The minimum runtime structure an agent must implement to connect safely is in [Agent_Structure.md](Agent_Structure.md).
 
 Documentation style: [ASD-STE100 Simplified Technical English](docs/writing-style-ste100.md).
 
 ## Operator UI preview
 
-The Phase 1 operator UI is a local React application. It currently uses clearly labelled illustrative data. It does not call control-plane, ingest, identity, archive, or policy APIs yet.
+The operator UI is a local React 19 + TypeScript + Vite application. Only the `MCP proxies` routes (`/mcp-proxies`, `/mcp-proxies/new`, `/mcp-proxies/$proxyId`) call a backend: they use a typed `@apex/contracts` client against the optional browser edge that the `control-plane-api` binary can serve (session, logout, and `McpProxyService` management calls; see [docs/operations/mcp-browser-edge.md](docs/operations/mcp-browser-edge.md)). That browser edge is a development checkpoint with Keycloak login and PostgreSQL-backed sessions, not a published production surface. Every other route (agent groups, events, findings, evidence, retention, deployment, settings) is a placeholder with an explicit empty state and calls nothing.
 
 ```bash
 cd apps/operator-ui
@@ -53,7 +53,7 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:4173`. The preview shows the planned system-map workflow, scoped connection starting point, finding queue, and reserved routes for agent groups, events, evidence, retention, deployment, and settings. See [apps/operator-ui/README.md](apps/operator-ui/README.md).
+Open `http://127.0.0.1:4173`. Without a running control-plane browser edge, the `MCP proxies` routes show their unauthenticated state and the reserved routes show empty states. See [apps/operator-ui/README.md](apps/operator-ui/README.md).
 
 ## Home test in five minutes
 
@@ -99,7 +99,7 @@ See [deploy/lab/README.md](deploy/lab/README.md). Output is in `.local/apex-lab/
 
 ## Connection options
 
-Phase 0 supports the paths below. **Implemented** means the client or boundary is present and tested. You may still need deployment wiring.
+Apex supports the paths below. **Implemented** means the client or boundary is present and tested. You may still need deployment wiring.
 
 | Connection | Protocol and authentication | Data that crosses the boundary | Status |
 |---|---|---|---|
@@ -109,8 +109,10 @@ Phase 0 supports the paths below. **Implemented** means the client or boundary i
 | Ingest → NATS JetStream | Async NATS over `tls://`; mutual TLS; bounded timeouts | Opaque canonical event bytes; scope-safe subjects; `Nats-Msg-Id` | Client and live-mTLS Compose path implemented |
 | Ingest → ClickHouse projection | Authenticated HTTPS POST; mTLS; optional bearer | Canonical event bytes; `X-Apex-Event-Id` | Client, reference provider, live-mTLS, gateway-ref |
 | Ingest → archive staging | Authenticated HTTPS PUT; mTLS; optional bearer; create-only keys | One event per event-id key; `If-None-Match: *` | Client and reference provider; backends: local, S3/MinIO, Azure Blob, GCS |
-| Operators → operator UI | Local React 19 + Vite preview; the browser is not an authorization boundary | Clearly labelled illustrative topology, connection workflow, and reserved operating routes | Phase 1 scaffold implemented; live API/session integration pending |
-| Operators → control-plane API (OOB commands) | gRPC; operator-token auth independent of the ingest data path | `stop` / `pause` / `resume` / `inject` / `set_budget` cooperative controls (ADR-0005), canonicalized into `control` events, durable command outbox (ADR-0006) | Implemented; authenticated UI session wiring remains pending and is governed by the active roadmap |
+| Operators → operator UI | Local React 19 + Vite app; same-origin browser edge served by `control-plane-api` (Keycloak login, cookie session, CSRF token); the browser is not an authorization boundary | `MCP proxies` list, creation wizard, detail, and activity views over `McpProxyService`; all other routes are placeholders | MCP proxy routes wired to the browser edge (development checkpoint); everything else is a placeholder shell |
+| Operators → control-plane API (OOB commands) | gRPC over mTLS; operator credential (Keycloak JWT in production, static token table in lab/CI) independent of the ingest data path | `stop` / `pause` / `resume` / `inject` / `set_budget` cooperative controls (ADR-0005) plus `force_stop` behind two-operator approval, canonicalized into `control` events, durable command outbox (ADR-0006) | Implemented, including bulk submit, list, status, and cancel |
+| Agent / supervisor → control-plane API (command retrieval) | gRPC `PollCommands` / `AckCommand`; mTLS client certificate pinned to a bearer token, a third credential space distinct from ingest and operator credentials; file-backed revocation list | Per-command delivery state; the Python SDK reference runtime enacts the five cooperative controls, `apps/agent-supervisor` enacts `force_stop` by killing the agent's process group | Implemented and proven live over a real poll loop |
+| MCP client → MCP gateway → Apex | MCP stdio (local) or managed Streamable HTTP; gateway authorizes through `control-plane-api` and admits metadata-only tool evidence through `event-ingest` over mTLS | One read-only `portfolio.read` tool; strict input validation, exact-scope authorization, gateway-side field filtering, no raw prompts or full records | Local/test path and live path proven for the narrow slice; managed production startup fails closed until runtime enforcement is connected |
 
 The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-staging`, required and explicit — there is no default-on path) binds one shared token to exactly one workload identity, scope set, and pinned client certificate. It is a single-agent staging fallback, not a multi-tenant credential store: do not point more than one agent identity at the same gateway through this path. Real multi-agent and multi-tenant fleets use SPIFFE/SPIRE workload identity instead (see [Frictionless Secure Agent Integration](docs/architecture/Frictionless%20Secure%20Agent%20Integration.md)).
 
@@ -125,7 +127,10 @@ The gateway's file-based bearer credential (`APEX_FILE_BEARER_MODE=single-agent-
   - `compose.gcs.yaml` — archive-provider → GCS
   - Env keys are in `deploy/compose/.env.example`
 - **Production Compose** (`compose.yaml`): `clickhouse-projection` and `archive-provider` need operator digest-pinned images; `archive-store-init` gates Object-Lock; run `preflight.ps1` or `preflight.sh` before start.
-- **PostgreSQL** outbox and idempotency adapters exist behind the gateway `postgres` feature. Compose E2E starts Postgres for smoke tests. Full multi-process control-plane API is later work.
+- **Control-plane overlays**: `compose.control-pg.yaml` (Postgres-backed command inbox/outbox for multi-replica `control-plane-api`), `compose.control-valkey.yaml` (distributed admission rate limiting), `compose.control-keycloak.yaml` (Keycloak operator credentials).
+- **MCP proxy fixture** (`compose.mcp-proxy.yaml`, `mcp-proxy-test/`): builds the `apps/mcp-gateway` image and starts one managed `portfolio.read` proxy plus a test upstream. It is a bootstrap/startup-refusal fixture for the active roadmap slice, not a ready deployment.
+- **Cold-storage tier** (`compose.coldstore.yaml`) and **CI cache** (`compose.ci-cache.yaml`) overlays; a `working-browser/` topology for the operator-UI browser-edge journey.
+- **PostgreSQL** outbox and idempotency adapters exist behind the `event-ingest` `postgres` feature, and the `control-plane-api` `postgres` feature provides the multi-replica-authoritative command inbox/outbox. Compose E2E starts Postgres for smoke tests.
 
 For local work, start with the reference agent. For a production-like path, use live-mTLS or gateway-ref, or use pinned images from the [Compose profile](deploy/compose/README.md). Cloud SDKs stay in the archive-provider process only.
 
@@ -139,7 +144,9 @@ Apex runs as several small containers. No image does more than one job. The defi
 
 | Service | Built from | What it handles |
 |---|---|---|
-| `ingest-gateway` | `apps/event-ingest/Dockerfile` (Rust) | The only entry point for agent events. Terminates gRPC and mTLS. Authenticates the caller. Validates and canonicalizes each event, writes it to a durable local outbox, then fans it out to JetStream, the ClickHouse projection, and the archive, all before acknowledging the caller. This full chain currently runs synchronously per event and single-flight process-wide — a known throughput limit; a future pass moves fanout to a background worker pool decoupled from admission. |
+| `ingest-gateway` | `apps/event-ingest/Dockerfile` (Rust) | The only entry point for agent events. Terminates gRPC and mTLS. Authenticates the caller. Validates and canonicalizes each event, commits it to a durable local outbox, and acknowledges the caller. A separate replay worker then fans the event out to JetStream, the ClickHouse projection, and the archive with idempotent retry, so a downstream outage cannot block admission. |
+| `control-plane-api` | `apps/control-plane-api/Dockerfile` (Rust) | The out-of-band control gateway. Accepts operator commands over mTLS, gates `force_stop` behind two distinct approvals, records each command in a durable outbox and per-target delivery inbox, and serves `PollCommands`/`AckCommand` to agents and supervisors under a separate credential space. Optionally serves the loopback browser edge for the operator UI. |
+| `mcp-gateway` *(`compose.mcp-proxy.yaml` overlay)* | `apps/mcp-gateway/Dockerfile` (TypeScript) | One managed MCP proxy per container. Exposes `portfolio.read`, authorizes through `control-plane-api`, filters fields, and admits metadata-only evidence through `ingest-gateway`. Managed startup refuses to run until live enforcement is connected. |
 | `jetstream` | Approved NATS image | The durable event backbone between the gateway and its consumers. Holds events so a slow or restarting consumer does not lose data. |
 | `clickhouse` | Approved ClickHouse image | Stores the queryable event table. Nothing writes to it directly except the `clickhouse-projection` service. |
 | `clickhouse-projection` | `apps/reference-providers/Dockerfile` (Python), run in `clickhouse_projection` mode | A narrow write API in front of ClickHouse. Accepts an event only over mTLS from the one pinned client certificate the ingest gateway presents. Refuses every other caller. |
@@ -150,9 +157,9 @@ Apex runs as several small containers. No image does more than one job. The defi
 
 `clickhouse-projection` and `archive-provider` are the same built image, `apex-reference-providers`, given different roles by the command-line subcommand each service passes at startup (`clickhouse_projection` or `archive_provider`) — not two separate codebases to maintain.
 
-Every service above drops all Linux capabilities and mounts its filesystem read-only except for an explicit data volume or `/tmp`. `ingest-gateway` also runs as a fixed non-root UID (`apps/event-ingest/Dockerfile`). `clickhouse-projection` and `archive-provider` do not: `apps/reference-providers/Dockerfile` has no `USER` directive and `compose.yaml` does not override it, so both currently run as root — a known hardening gap, not a deliberate choice, worth closing before either is treated as production-hardened rather than a reference implementation. Every service-to-service link is mTLS regardless; `clickhouse-projection` and `archive-provider` pin the exact client certificate fingerprint they accept and fail closed on anything else. See [Security and regulated deployment posture](#security-and-regulated-deployment-posture).
+Every service above drops all Linux capabilities and mounts its filesystem read-only except for an explicit data volume or `/tmp`. `ingest-gateway` and `control-plane-api` also run as fixed non-root UIDs (`apps/event-ingest/Dockerfile`, `apps/control-plane-api/Dockerfile`). `clickhouse-projection` and `archive-provider` do not: `apps/reference-providers/Dockerfile` has no `USER` directive and `compose.yaml` does not override it, so both currently run as root — a known hardening gap, not a deliberate choice, worth closing before either is treated as production-hardened rather than a reference implementation. Every service-to-service link is mTLS regardless; `clickhouse-projection` and `archive-provider` pin the exact client certificate fingerprint they accept and fail closed on anything else. See [Security and regulated deployment posture](#security-and-regulated-deployment-posture).
 
-The out-of-band control gateway (`apps/control-plane-api`) has a `Dockerfile` and Compose entries. The operator UI (`apps/operator-ui`) remains a local dev server rather than a container. Further UI/session integration is part of the active vertical slice; unrelated UI expansion remains on hold.
+`apps/agent-supervisor` is not a Compose service: one instance runs per supervised agent, wrapping the agent as its own OS child in a separate process group and holding a credential the agent never sees. The operator UI (`apps/operator-ui`) remains a local dev server rather than a container. UI work beyond the `MCP proxies` surface remains on hold.
 
 ## Design principles
 
@@ -189,56 +196,51 @@ flowchart LR
 | Kubernetes cost allocation | Optional OpenCost |
 | Deployment | Compose, K3s/Kubernetes, Helm |
 | Operator experience | React 19 + TypeScript + Vite in `apps/operator-ui` |
+| MCP data plane | TypeScript (`@modelcontextprotocol/sdk`) in `apps/mcp-gateway`; shared wire types in `packages/apex-contracts-ts` |
 
 ## Repository layout
 
 ```text
 apps/
-  control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget); implemented
-  event-ingest/            gRPC ingestion and event validation
-  mcp-gateway/             Thin TypeScript MCP data plane; local/test-only `portfolio.read` path implemented, live Apex wiring deferred
-  operator-ui/             Operations, compliance, evaluation, Cost Lens GUI
+  agent-supervisor/        Per-run process supervisor that enacts non-cooperative `force_stop` by process-group kill
+  control-plane-api/       Out-of-band command gateway (stop/pause/resume/inject/set_budget/force_stop), MCP proxy management, optional browser edge
+  event-ingest/            gRPC ingestion, event validation, durable outbox, replay fanout
+  mcp-gateway/             Thin TypeScript MCP gateway; read-only `portfolio.read`; managed proxy runtime image
+  operator-ui/             React operator console; `MCP proxies` routes are live, other routes are placeholders
+  proxy-runtime-agent/     Rust wire/inspection boundary for managed proxy runtimes (no listener or provisioning yet)
+  reference-providers/     Python mTLS reference ClickHouse-projection and archive-provider services for local/CI
 crates/
-  domain/                  Shared domain types and scope model
-  event-contract/          Protobuf envelope, schema evolution, validation
-  apex-policy/             Apex governance contracts and adapter interfaces
-  policy-engine/           Policies, admission, approval logic
-  authz/                   Role, permission, and scope evaluation
-  cost-ledger/             Immutable ledger, rate cards, allocation, budgets
-  archive-provider/        Portable immutable/WORM archive adapters
-  diagnostics/             Deep error reports and safe diagnostic bundles
+  apex-contract/           Generated Protobuf types and contract compatibility evidence
+  apex-domain/             Scope model, identifiers, validation, domain errors
+  apex-auth/               Credential verification and non-authoritative ephemeral acceleration (rate limits, Valkey/memory)
+  apex-policy/             Apex governance contracts: authorization, policy, approval, tool evidence
+  apex-security/           Security Alerts and deterministic detectors
+  apex-durability/         Outbox, idempotency, and fanout foundations
+  apex-telemetry/          Integer clock primitives for microsecond-precision telemetry
 packages/
-  sdk-python/              Python SDK for agents and evaluation workloads
+  apex-contracts-ts/       TypeScript Protobuf types shared by the MCP gateway and operator UI
+  sdk-python/              Python SDK for agents, including the reference control-channel runtime
 contracts/
-  proto/apex/v1/           Versioned protobuf API and event contracts
+  proto/apex/v1/           Versioned protobuf API and event contracts (event, control, governance, MCP proxy)
   jsonschema/              JSON schemas for configuration and policies
-config/
-  profiles/                Deployment and compliance profiles
-  policies/                Versioned policy examples and defaults
-  pricebooks/              Self-hosted and provider rate-card examples
+  clickhouse/, archive-provider/, postgres-*.md   Storage provider contracts
 deploy/
-  compose/                 Single-host deployment
+  compose/                 Single-host deployment, CI/dev overlays, live-mTLS harness, E2E gates
   lab/                     Lab installer (Windows, Linux, macOS)
-  helm/apex/               Helm chart
-  kubernetes/base/         Kubernetes base manifests
-  kubernetes/overlays/     Self-hosted and HA overlays
+  clickhouse/, postgres/   Schemas
 docs/
   architecture/            Architecture decisions and diagrams
-  api/                     API and event documentation
-  security/                Threat model, controls, hardening
-  operations/              Runbooks, backup/restore, deployment guidance
+  security/                Threat models, Security Alerts, hardening reviews
+  operations/              Durability, browser edge, MCP proxy operations and evidence ledgers
+  superpowers/             Approved design specs and execution plans
+  roadmap.md               Execution source of truth
   getting-started.md       Day-one operator and developer guide
 examples/
   reference-agent/         Small observable reference agent
-  evaluation-flow/         Deterministic and judge-based evaluation example
-tests/
-  contract/                Contract compatibility tests
-  integration/             Service, storage, archive-adapter tests
-  e2e/                     GUI-to-control-plane tests
-  security/                Authorization, abuse, fuzz, negative-path tests
-scripts/                   Developer and CI automation
-tools/                     Internal development tooling
+scripts/                   Developer and CI automation (lab-only-settings gate, line-limit check, browser/Keycloak prep)
 ```
+
+Helm charts, Kubernetes manifests, a cost ledger, and a diagnostics crate are planned but do not exist in the repository yet.
 
 ## Operator experience
 
@@ -260,7 +262,7 @@ tools/                     Internal development tooling
 - SPIFFE workload identities and mutual TLS for service-to-service access.
 - Namespace isolation, classification-aware policy, transport encryption, and externalized runtime secrets.
 - Non-root and read-only containers. Signed and pinned images. SBOMs. Vulnerability gates. Supply-chain verification.
-- CI runs static analysis and dependency-vulnerability scanning on every push: `cargo audit` and `cargo deny` (advisories, license policy, banned/duplicate crates) for the Rust gateway, `bandit` and `pip-audit` for the Python SDK.
+- CI runs static analysis and dependency-vulnerability scanning on every push: `cargo audit` and `cargo deny` (advisories, license policy, banned/duplicate crates) for each of the three Rust binaries, `bandit` and `pip-audit` for the Python SDK, a gateway-contract compatibility check, a 600-line source-file limit, and a lab-only-settings gate.
 - Strict ingest limits and schema validation. Safe text-only display of untrusted content.
 - Isolated tool execution: deny-by-default egress, per-tool identity, resource limits, no host or Docker socket access.
 - Append-only audit and cost ledgers. Corrections are linked adjustments, not overwrites.
@@ -276,7 +278,7 @@ It includes usage and token accounting, requested versus effective model attribu
 
 ## Build order
 
-The former build order is superseded. Follow the [Apex execution roadmap](docs/roadmap.md): the thin TypeScript MCP gateway and read-only RIA path are implemented locally, and the remaining active work is the live Apex authorization/event integration plus one live operator-visible vertical slice. The Rust workspace, durable admission/fanout separation, and Apex governance contract boundary are foundations already in place; everything else remains paused until that slice passes its completion gate.
+The former build order is superseded. Follow the [Apex execution roadmap](docs/roadmap.md). The Rust workspace, durable admission/fanout separation, Apex governance contracts, the thin TypeScript MCP gateway, and the narrow live `portfolio.read` vertical slice are complete. The active milestone is the managed MCP proxy platform: versioned proxy resources in the control-plane contract, one hardened isolated container per proxy, and create/deploy/pause/rotate/rollback/retire workflows in the operator UI. Its first acceptance slice is a read-only `portfolio.read` proxy running through an isolated runtime and appearing in the operator UI as server-derived activity. Everything else remains paused until that gate passes.
 
 ## Contributing
 
