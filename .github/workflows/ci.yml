@@ -36,6 +36,7 @@ jobs:
           pnpm --dir contracts verify
           pnpm --dir contracts test
           node --test scripts/tests/verify-working-mcp-gateway.test.mjs
+          node --test scripts/tests/runtime-agent-ci.test.mjs
           node scripts/verify-working-mcp-gateway.mjs --list
 
   source-line-limits:
@@ -284,6 +285,17 @@ jobs:
         run: |
           node --test scripts/tests/collect-runtime-fixture.test.mjs
           node scripts/collect-runtime-fixture.mjs --root "${RUNNER_TEMP}/rust-contract-export" --out "${RUNNER_TEMP}/runtime-revision.json"
+      - name: Test runtime agent and shared boundaries
+        env:
+          APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-revision.json
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test --locked -p apex-domain
+          cargo test --locked -p apex-auth
+          cargo test --locked -p apex-proxy-runtime-agent
+          cargo clippy --locked -p apex-domain -p apex-auth -p apex-proxy-runtime-agent --all-targets -- -D warnings
       - name: Share the actual Rust export with the gateway tests
         uses: actions/upload-artifact@v7
         with:
