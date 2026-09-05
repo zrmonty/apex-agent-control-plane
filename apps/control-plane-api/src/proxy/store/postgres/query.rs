@@ -1,4 +1,4 @@
-use postgres::GenericClient;
+use apex_durability::PostgresClientOps as GenericClient;
 
 use super::super::McpProxy;
 use super::super::shared::{StoreProxy, StoredRevision, configuration_error, revision_key};
@@ -107,6 +107,6 @@ fn load_revision_map(
     Ok(revisions)
 }
 
-pub(crate) fn map_identity_error(_error: postgres::Error) -> ProxyError {
+pub(crate) fn map_identity_error(_error: apex_durability::PostgresClientError) -> ProxyError {
     ProxyError::identity_conflict()
 }

@@ -93,6 +93,43 @@ impl OperatorCaller {
         &self.subject
     }
 
+    /// Exact UI choices derived from verified grants. Global callers require a
+    /// deployment-owned catalog; this method never invents wildcard scopes.
+    pub fn scope_choices(
+        &self,
+        global_catalog: &[crate::ExactScope],
+    ) -> Result<Vec<crate::ExactScope>, CommandError> {
+        if global_catalog.len() > MAX_ALLOWED_SCOPES
+            || global_catalog.iter().any(|scope| {
+                !is_identifier(&scope.workspace_id) || !is_identifier(&scope.namespace_id)
+            })
+        {
+            return Err(CommandError::invalid_authorization());
+        }
+        let mut choices = match &self.allowed_scopes {
+            OperatorScopes::Global => global_catalog.to_vec(),
+            OperatorScopes::Scoped(scopes) => {
+                let mut choices = Vec::with_capacity(scopes.len());
+                for scope in scopes {
+                    let (workspace, namespace) = scope
+                        .split_once('/')
+                        .ok_or_else(CommandError::invalid_authorization)?;
+                    choices.push(crate::ExactScope {
+                        workspace_id: workspace.to_owned(),
+                        namespace_id: namespace.to_owned(),
+                    });
+                }
+                choices
+            }
+        };
+        choices.sort_unstable_by(|a, b| {
+            (&a.workspace_id, &a.namespace_id).cmp(&(&b.workspace_id, &b.namespace_id))
+        });
+        choices
+            .dedup_by(|a, b| a.workspace_id == b.workspace_id && a.namespace_id == b.namespace_id);
+        Ok(choices)
+    }
+
     pub fn allows_scope(&self, workspace_id: &str, namespace_id: &str) -> bool {
         if !is_identifier(workspace_id) || !is_identifier(namespace_id) {
             return false;
@@ -462,5 +499,7 @@ pub(crate) fn extract_bearer_token(
     Ok(token.to_owned())
 }
 
+#[cfg(test)]
+mod scope_choices_tests;
 #[cfg(test)]
 mod tests;

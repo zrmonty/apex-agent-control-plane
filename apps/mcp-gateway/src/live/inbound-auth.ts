@@ -7,20 +7,20 @@ import {
 
 import { GatewayError } from "../contracts.js";
 import type { InboundTokenClaims, InboundTokenVerifier } from "../managed/auth.js";
-import type { ProxyRevisionConfig } from "../managed/config.js";
+import type { ReadonlyRuntimeConfiguration } from "../managed/runtime-config.js";
+import { runtimeAuth } from "../managed/runtime-types.js";
 import { loadTrustedJson } from "./secrets.js";
 
 const ALLOWED_ALGORITHMS = ["RS256", "ES256", "EdDSA"] as const;
 
 export async function createInboundTokenVerifier(
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
   trustedSecretBase: string,
   jwksFile: string,
 ): Promise<InboundTokenVerifier> {
-  const binding = config.authBindings.find((candidate) => candidate.direction === "inbound");
-  if (binding === undefined) {
-    throw unavailable();
-  }
+  // jwksUri is metadata, not permission to fetch keys. Local key provenance and
+  // confinement still come from the explicitly trusted process configuration.
+  const binding = runtimeAuth(config);
   const raw = await loadTrustedJson(jwksFile, trustedSecretBase);
   if (!isRecord(raw) || !Array.isArray(raw.keys) || raw.keys.length === 0) {
     throw unavailable();

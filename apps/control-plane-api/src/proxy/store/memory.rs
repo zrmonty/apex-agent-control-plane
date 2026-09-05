@@ -202,6 +202,7 @@ impl ProxyStore for InMemoryProxyStore {
         if draft.published {
             return Err(ProxyError::immutable_revision());
         }
+        super::publish_capabilities::validate_publish_capabilities(&draft.revision.spec)?;
         let revision_id = ProxyRevisionId::new(&input.request_id).expect("validated request id");
         let revision = build_revision(
             input.proxy_id.clone(),

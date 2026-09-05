@@ -2,25 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GatewayError } from "../contracts.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
 import {
   buildProtectedResourceMetadata,
   validateHttpIngressRequest,
   type HttpIngressRequest,
 } from "./http.js";
 
-const config = {
-  proxyId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84",
-  revisionId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e85",
-  configHash: "a".repeat(64),
-  ingress: { transport: "streamable-http", endpoint: "https://proxy.example.test/mcp", allowedOrigins: ["https://console.example.test"] },
-  upstreams: [],
-  exposedTools: [],
-  cliProfiles: [],
-  authBindings: [{ bindingId: "inbound", direction: "inbound" }],
-  governance: { policyId: "policy-read", approvalMode: "none", classification: "confidential" },
-  runtime: { imageDigest: "sha256:" + "b".repeat(64), cpuMillis: 500, memoryBytes: 268_435_456, pidLimit: 128, readOnlyRootfs: true, networkMode: "declared-egress", noNewPrivileges: true, droppedCapabilities: ["ALL"] },
-} as unknown as ProxyRevisionConfig;
+const config = componentFixture();
 
 const request: HttpIngressRequest = {
   method: "POST",
@@ -30,6 +19,7 @@ const request: HttpIngressRequest = {
     origin: ["https://console.example.test"],
     "content-length": ["24"],
     "mcp-session-id": ["session-123"],
+    "mcp-protocol-version": ["2025-11-25"],
   },
   bodyBytes: 24,
 };
@@ -58,7 +48,18 @@ test("rejects invalid origin, host, scheme, duplicate headers, and oversized bod
 test("publishes metadata without tokens, secrets, or proxy internals", () => {
   const metadata = buildProtectedResourceMetadata(config);
   assert.equal(metadata.resource, "https://proxy.example.test/mcp");
-  assert.deepEqual(metadata.authorization_servers, ["https://proxy.example.test"]);
+  assert.deepEqual(metadata.authorization_servers, ["https://issuer.example.test"]);
   assert.equal(JSON.stringify(metadata).includes("secret://"), false);
   assert.equal(JSON.stringify(metadata).includes(config.proxyId), false);
+});
+
+test("advertises every configured scope without a hardcoded default", () => {
+  const scoped = componentFixture(value => { value.auth!.requiredScopes = ["portfolio:read", "evidence:admit"]; });
+  assert.deepEqual(buildProtectedResourceMetadata(scoped).scopes_supported, ["portfolio:read", "evidence:admit"]);
+});
+
+test("session requests reject absent, duplicate or unsupported protocol revisions", () => {
+  for (const version of [undefined, ["2025-06-18"], ["2025-11-25", "2025-11-25"]]) {
+    assertRejected({ ...request, headers: { ...request.headers, "mcp-protocol-version": version } });
+  }
 });

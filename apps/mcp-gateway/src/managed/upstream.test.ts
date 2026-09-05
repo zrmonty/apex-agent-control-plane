@@ -1,47 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ProxyRevisionConfig, UpstreamConfig } from "./config.js";
+import { McpProxyToolClassification } from "@apex/contracts";
+import type { RuntimeUpstream as UpstreamConfig } from "./runtime-types.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
 import { compileExposedToolIndexes, createUpstreamSessions, type UpstreamTransport } from "./upstream.js";
 
-const config = (proxyId: string, credentialRef: string): ProxyRevisionConfig => ({
-  proxyId,
-  revisionId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e85",
-  configHash: "a".repeat(64),
-  ingress: {
-    transport: "stdio",
-    allowedOrigins: [],
-  },
-  upstreams: [
-    {
-      upstreamId: "portfolio",
-      transport: "streamable-http",
-      endpointOrCommandRef: "https://portfolio.example.test/mcp",
-      credentialRef,
-    },
-  ],
-  exposedTools: [
-    {
-      upstreamId: "portfolio",
-      toolName: "portfolio.read",
-      alias: "portfolio.read",
-      classification: "read",
-    },
-  ],
-  cliProfiles: [],
-  authBindings: [{ bindingId: "inbound", direction: "inbound" }],
-  governance: { policyId: "policy-read", approvalMode: "none", classification: "confidential" },
-  runtime: {
-    imageDigest: "sha256:" + "b".repeat(64),
-    cpuMillis: 500,
-    memoryBytes: 268_435_456,
-    pidLimit: 128,
-    readOnlyRootfs: true,
-    networkMode: "declared-egress",
-    noNewPrivileges: true,
-    droppedCapabilities: ["ALL"],
-  },
+const config = (proxyId: string, credentialRef: string) => componentFixture(value => {
+  value.proxyId = proxyId;
+  value.spec!.upstreams[0].credentialRef = credentialRef;
+  value.secretRefs = [credentialRef];
 });
+const fixtureTool = componentFixture().spec!.exposedTools[0];
 
 class FakeTransport implements UpstreamTransport {
   readonly discoveries: string[] = [];
@@ -81,11 +51,12 @@ test("creates isolated sessions, catalogs, and credential inputs per proxy", asy
 });
 
 test("compiles alias and upstream tool indexes without changing configured order", () => {
-  const exposedTools = [
-    ...config("018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84", "secret://a").exposedTools,
-    { upstreamId: "secondary", toolName: "portfolio.read", alias: "secondary.read", classification: "read" as const },
-  ];
-  const indexes = compileExposedToolIndexes({ exposedTools });
+  const multi = componentFixture(value => {
+    value.spec!.upstreams.push({ ...value.spec!.upstreams[0], upstreamId: "secondary" });
+    value.spec!.exposedTools.push({ ...value.spec!.exposedTools[0], upstreamId: "secondary", alias: "secondary.read" });
+    value.toolSchemas.push({ ...value.toolSchemas[0], upstreamId: "secondary" });
+  });
+  const indexes = compileExposedToolIndexes(multi);
 
   assert.equal(indexes.byAlias.get("portfolio.read")?.upstreamId, "portfolio");
   assert.equal(indexes.byAlias.get("secondary.read")?.upstreamId, "secondary");
@@ -100,25 +71,28 @@ test("quarantines discovery and refuses tools that are not explicitly exposed", 
   assert.ok(session);
 
   await assert.rejects(() => session.call({
+    ...fixtureTool,
     upstreamId: "portfolio",
     toolName: "portfolio.read",
     alias: "portfolio.read",
-    classification: "read",
+    classification: McpProxyToolClassification.READ,
   }, {}));
   const catalog = await session.discover();
   assert.equal(catalog.upstreamId, "portfolio");
   assert.equal(catalog.tools.length, 2);
   await assert.rejects(() => session.call({
+    ...fixtureTool,
     upstreamId: "portfolio",
     toolName: "portfolio.write",
     alias: "portfolio.write",
-    classification: "business-write",
+    classification: McpProxyToolClassification.BUSINESS_WRITE,
   }, {}));
   await session.call({
+    ...fixtureTool,
     upstreamId: "portfolio",
     toolName: "portfolio.read",
     alias: "portfolio.read",
-    classification: "read",
+    classification: McpProxyToolClassification.READ,
   }, {});
   assert.deepEqual(transport.calls, ["secret://a:portfolio.read"]);
 });

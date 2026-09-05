@@ -9,15 +9,17 @@ import "@fontsource/ibm-plex-sans/latin-500.css";
 import "@fontsource/ibm-plex-sans/latin-600.css";
 import "@fontsource/ibm-plex-sans/latin-700.css";
 import { router } from "./app/router";
+import { SessionProvider } from "./api/session-context";
 import "./styles.css";
 import "./proxy-styles.css";
+import "./session-styles.css";
 
-const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30_000 } } });
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 }, mutations: { retry: false } } });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <SessionProvider><RouterProvider router={router} /></SessionProvider>
     </QueryClientProvider>
   </StrictMode>,
 );

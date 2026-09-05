@@ -1,0 +1,99 @@
+syntax = "proto3";
+package apex.v1;
+import "apex/v1/proxy_approval.proto";
+import "apex/v1/proxy_trace.proto";
+
+message ProxyResourceScope {
+  string workspace_id = 1;
+  string namespace_id = 2;
+  string proxy_id = 3;
+}
+message GetProxyCapabilitiesRequest {
+  ProxyResourceScope scope = 1;
+}
+message GetProxyCapabilitiesResponse {
+  // This list comes from current server/runtime observations, never schemas.
+  repeated string supported = 1;
+  uint64 observed_at_unix_us = 2;
+  string contract_version = 3;
+}
+message ListProxyRevisionsRequest {
+  ProxyResourceScope scope = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+enum ProxyDesiredState {
+  PROXY_DESIRED_STATE_UNSPECIFIED = 0;
+  PROXY_DESIRED_STATE_SERVING = 1;
+  PROXY_DESIRED_STATE_PAUSED = 2;
+  PROXY_DESIRED_STATE_RETIRED = 3;
+}
+enum ProxyObservedState {
+  PROXY_OBSERVED_STATE_UNSPECIFIED = 0;
+  PROXY_OBSERVED_STATE_PENDING = 1;
+  PROXY_OBSERVED_STATE_RECONCILING = 2;
+  PROXY_OBSERVED_STATE_READY = 3;
+  PROXY_OBSERVED_STATE_PAUSED = 4;
+  PROXY_OBSERVED_STATE_RETIRED = 5;
+  PROXY_OBSERVED_STATE_FAILED = 6;
+  PROXY_OBSERVED_STATE_NOT_SERVING = 7;
+}
+message ProxyOperation {
+  string operation_id = 1;
+  string request_id = 2;
+  ProxyResourceScope scope = 3;
+  string revision_id = 4;
+  ProxyDesiredState desired_state = 5;
+  ProxyObservedState observed_state = 6;
+  uint64 generation = 7;
+  string error_code = 8;
+  uint64 observed_at_unix_us = 9;
+}
+message GetProxyOperationRequest {
+  ProxyResourceScope scope = 1;
+  string operation_id = 2;
+}
+message GetProxyOperationResponse { ProxyOperation operation = 1; }
+message ListProxyBindingsRequest { ProxyResourceScope scope = 1; }
+message ProxyBindingStatus {
+  string binding_id = 1;
+  string direction = 2;
+  string credential_ref = 3;
+  string status = 4;
+  uint64 observed_at_unix_us = 5;
+  // Never serialize credential values, provider tokens, or refresh tokens.
+}
+message ListProxyBindingsResponse { repeated ProxyBindingStatus bindings = 1; }
+message ListProxyApprovalsRequest {
+  ProxyResourceScope scope = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+message ListProxyApprovalsResponse {
+  repeated ProxyApproval approvals = 1;
+  string next_page_token = 2;
+}
+message GetProxyTraceRequest {
+  ProxyResourceScope scope = 1;
+  string call_id = 2;
+  string otel_trace_id = 3;
+}
+message GetProxyTraceResponse { ProxyTraceSummary trace = 1; }
+message ProxyCallActivity {
+  string call_id = 1;
+  string tool_alias = 2;
+  string outcome = 3;
+  ProxyTraceSummary trace = 4;
+}
+message ProxyLifecycleActivity {
+  ProxyOperation operation = 1;
+  string event_id = 2;
+}
+message ProxyActivitySummary {
+  oneof summary {
+    ProxyCallActivity call = 1;
+    ProxyLifecycleActivity lifecycle = 2;
+    ProxyApproval approval = 3;
+    ProxyTraceSummary trace = 4;
+  }
+}

@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 zeroize = "1.8"
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
+tokio-postgres = { version = "=0.7.18", optional = true, features = ["with-uuid-1"] }
 rustls-pki-types = { version = "1", optional = true }
 tokio-postgres-rustls = { version = "0.14", optional = true, default-features = false, features = ["ring", "webpki-roots"] }
 uuid = { version = "1", optional = true, features = ["v4"] }
@@ -28,7 +29,7 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 [features]
 default = []
 test-support = ["apex-domain/test-support"]
-postgres = ["dep:postgres", "dep:rustls-pki-types", "dep:tokio-postgres-rustls", "dep:uuid"]
+postgres = ["dep:postgres", "dep:tokio-postgres", "dep:rustls-pki-types", "dep:tokio-postgres-rustls", "dep:uuid"]
 
 [lints.rust]
 unsafe_code = "forbid"

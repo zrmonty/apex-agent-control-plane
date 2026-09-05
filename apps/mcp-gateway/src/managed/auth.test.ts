@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { GatewayError } from "../contracts.js";
-import type { ProxyRevisionConfig } from "./config.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
 import {
   authenticateInbound,
   buildBearerChallenge,
@@ -13,22 +13,11 @@ import {
 } from "./auth.js";
 
 const proxyId = "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e84";
-const config = {
-  proxyId,
-  revisionId: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e85",
-  configHash: "a".repeat(64),
-  ingress: { transport: "streamable-http", endpoint: "https://proxy.example.test/mcp", allowedOrigins: ["https://console.example.test"] },
-  upstreams: [{ upstreamId: "portfolio", transport: "streamable-http", endpointOrCommandRef: "https://portfolio.example.test/mcp", credentialRef: "secret://portfolio/read" }],
-  exposedTools: [{ upstreamId: "portfolio", toolName: "portfolio.read", alias: "portfolio.read", classification: "read" }],
-  cliProfiles: [],
-  authBindings: [{ bindingId: "inbound", direction: "inbound", issuer: "https://issuer.example.test", audience: "apex-mcp-proxy" }],
-  governance: { policyId: "policy-read", approvalMode: "none", classification: "confidential" },
-  runtime: { imageDigest: "sha256:" + "b".repeat(64), cpuMillis: 500, memoryBytes: 268_435_456, pidLimit: 128, readOnlyRootfs: true, networkMode: "declared-egress", noNewPrivileges: true, droppedCapabilities: ["ALL"] },
-} as unknown as ProxyRevisionConfig;
+const config = componentFixture();
 
 const claims: InboundTokenClaims = {
   issuer: "https://issuer.example.test",
-  audience: "apex-mcp-proxy",
+  audience: "https://proxy.example.test/mcp",
   subject: "operator:alice",
   expiresAt: Math.floor(Date.now() / 1000) + 300,
   scope: "mcp:proxy:invoke",
@@ -106,4 +95,17 @@ test("normalizes header names once and preserves duplicate values", () => {
   assert.deepEqual(headers.authorization, ["Bearer signed-token", "Bearer duplicate-token"]);
   assert.deepEqual(headers.origin, ["https://console.example.test"]);
   assert.equal(Object.hasOwn(headers, "Authorization"), false);
+});
+
+test("requires every configured scope and the exact single resource audience", async () => {
+  const scoped = componentFixture(value => { value.auth!.requiredScopes = ["portfolio:read", "evidence:admit"]; });
+  for (const invalid of [
+    { ...claims, scope: "portfolio:read" }, { ...claims, scope: "evidence:admit" },
+    { ...claims, scope: "mcp:proxy:invoke" },
+    { ...claims, scope: "portfolio:read evidence:admit", audience: [config.resourceUrl, "https://other.example.test/mcp"] },
+  ]) await assert.rejects(() => authenticateInbound({ authorization: ["Bearer token"] }, scoped, new FakeVerifier(invalid)), /INVALID_INPUT/);
+  const identity = await authenticateInbound({ authorization: ["Bearer token"] }, scoped,
+    new FakeVerifier({ ...claims, scope: "extra evidence:admit portfolio:read" }));
+  assert.deepEqual(identity.scopes, ["portfolio:read", "evidence:admit"]);
+  assert.equal(identity.scopes, scoped.auth!.requiredScopes);
 });

@@ -136,19 +136,27 @@ pub(crate) fn bounded_secs_value(
 }
 
 mod backends;
+mod browser;
+#[cfg(feature = "postgres")]
+pub(crate) use browser::BrowserEnv;
+pub(crate) use browser::browser_env;
 mod credentials;
 mod keycloak;
 mod limits;
+mod proxy_profile;
+pub(crate) use proxy_profile::proxy_storage_profile_value;
 
 pub(crate) use backends::{control_postgres_url, control_valkey_env, nats_config};
-pub(crate) use credentials::{AgentTokenSource, OperatorTokenSource, agent_revocation_env, agent_token_source, operator_token_source};
-pub(crate) use keycloak::keycloak_env;
-pub(crate) use limits::{
-    admission_limits, command_retention, fanout_interval, inbox_scope_quota,
-    nats_retry_attempts,
+pub(crate) use credentials::{
+    AgentTokenSource, OperatorTokenSource, agent_revocation_env, agent_token_source,
+    operator_token_source,
 };
+pub(crate) use keycloak::keycloak_env;
 #[cfg(feature = "postgres")]
 pub(crate) use limits::postgres_pool_size;
+pub(crate) use limits::{
+    admission_limits, command_retention, fanout_interval, inbox_scope_quota, nats_retry_attempts,
+};
 
 // Only `startup::tests` (a sibling of `env`, not a descendant, so it cannot
 // reach `env::credentials`/`env::keycloak`/`env::limits`/`env::backends`
@@ -167,6 +175,6 @@ pub(crate) use credentials::{
 pub(crate) use keycloak::{expected_token_typ_value, global_subjects_value};
 #[cfg(test)]
 pub(crate) use limits::{
-    admission_limit_value, command_retention_value, fanout_interval_value,
-    inbox_scope_quota_value, nats_retry_attempts_value,
+    admission_limit_value, command_retention_value, fanout_interval_value, inbox_scope_quota_value,
+    nats_retry_attempts_value,
 };

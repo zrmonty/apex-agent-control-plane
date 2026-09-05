@@ -1,0 +1,43 @@
+{
+  "request": {
+    "schemaVersion": 1,
+    "target": {
+      "workspaceId": "acme",
+      "namespaceId": "prod",
+      "proxyId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+      "revisionId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+      "generation": "9007199254740993",
+      "fencingToken": "18446744073709551615"
+    },
+    "operationId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1003",
+    "commandId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1004",
+    "action": "RUNTIME_AUTHORITY_ACTION_CHECK_CURRENT_OPERATION",
+    "installationId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1005",
+    "observedControllerCertificateSha256": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="
+  },
+  "snapshot": {
+    "schemaVersion": 1,
+    "target": {
+      "workspaceId": "acme",
+      "namespaceId": "prod",
+      "proxyId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+      "revisionId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+      "generation": "9007199254740993",
+      "fencingToken": "18446744073709551615"
+    },
+    "operationId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1003",
+    "commandId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1004",
+    "action": "RUNTIME_AUTHORITY_ACTION_CHECK_CURRENT_OPERATION",
+    "installationId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1005",
+    "agentIdentityId": "host-agent-a",
+    "observedControllerIdentityId": "controller-a",
+    "peerPolicyVersion": "policy-1",
+    "enrollmentVersion": "enrollment-1",
+    "hostPolicyVersion": "host-1",
+    "desiredState": "PROXY_DESIRED_STATE_SERVING",
+    "observedState": "PROXY_OBSERVED_STATE_RECONCILING",
+    "configHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checkedAtUnixUs": "9007199254740993",
+    "leaseExpiresAtUnixUs": "9007199254741000"
+  }
+}

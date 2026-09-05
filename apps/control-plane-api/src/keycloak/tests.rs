@@ -15,5 +15,5 @@
 
 mod config;
 mod resolver;
-mod support;
+pub(crate) mod support;
 mod verify;

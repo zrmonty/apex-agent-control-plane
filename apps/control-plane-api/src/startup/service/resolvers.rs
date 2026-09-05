@@ -3,6 +3,7 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use apex_control_plane_api::{
     AgentRevocationList, BoxedAgentWorkloadResolver, BoxedOperatorCredentialResolver,
@@ -27,6 +28,20 @@ const MAX_TLS_MATERIAL_BYTES: usize = 1024 * 1024;
 /// `MAX_OPERATOR_TOKEN_BYTES`), so 64 KiB is generous headroom while still
 /// bounding what a mounted file can make this process allocate.
 const MAX_OPERATOR_TABLE_BYTES: usize = 64 * 1024;
+
+/// One process-wide verifier/cache, shared without changing credential space.
+#[derive(Clone)]
+pub(super) struct SharedOperatorResolver(
+    pub Arc<dyn apex_control_plane_api::OperatorCredentialResolver>,
+);
+impl apex_control_plane_api::OperatorCredentialResolver for SharedOperatorResolver {
+    fn resolve(
+        &self,
+        token: &str,
+    ) -> Result<apex_control_plane_api::OperatorCaller, apex_control_plane_api::CommandError> {
+        self.0.resolve(token)
+    }
+}
 
 /// Builds the live MCP governance service when its dedicated service token is
 /// configured. The operator and agent tables are intentionally not accepted

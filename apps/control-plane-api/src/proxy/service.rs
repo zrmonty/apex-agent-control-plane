@@ -160,6 +160,7 @@ fn activity_to_proto(activity: super::ProxyActivity) -> proto::McpProxyActivityE
         lifecycle_state: state_to_proto(activity.next_state),
         redaction_status: proto::McpProxyRedactionStatus::Redacted as i32,
         summary: activity.status,
+        detail: None,
     }
 }
 
@@ -319,6 +320,48 @@ impl<R: OperatorCredentialResolver> proto::mcp_proxy_service_server::McpProxySer
         request: Request<proto::ListProxyActivityRequest>,
     ) -> Result<Response<proto::ListProxyActivityResponse>, Status> {
         McpProxyService::list_proxy_activity(self, request).await
+    }
+    async fn get_proxy_capabilities(
+        &self,
+        _request: Request<proto::GetProxyCapabilitiesRequest>,
+    ) -> Result<Response<proto::GetProxyCapabilitiesResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn list_proxy_revisions(
+        &self,
+        _request: Request<proto::ListProxyRevisionsRequest>,
+    ) -> Result<Response<proto::ListProxyRevisionsResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn get_proxy_operation(
+        &self,
+        _request: Request<proto::GetProxyOperationRequest>,
+    ) -> Result<Response<proto::GetProxyOperationResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn list_proxy_bindings(
+        &self,
+        _request: Request<proto::ListProxyBindingsRequest>,
+    ) -> Result<Response<proto::ListProxyBindingsResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn list_proxy_approvals(
+        &self,
+        _request: Request<proto::ListProxyApprovalsRequest>,
+    ) -> Result<Response<proto::ListProxyApprovalsResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn decide_proxy_approval(
+        &self,
+        _request: Request<proto::DecideProxyApprovalRequest>,
+    ) -> Result<Response<proto::DecideProxyApprovalResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
+    }
+    async fn get_proxy_trace(
+        &self,
+        _request: Request<proto::GetProxyTraceRequest>,
+    ) -> Result<Response<proto::GetProxyTraceResponse>, Status> {
+        Err(Status::unimplemented("managed capability is not wired"))
     }
 }
 

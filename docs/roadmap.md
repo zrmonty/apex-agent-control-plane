@@ -38,6 +38,16 @@ Apex observes, governs, controls, and proves agent actions. MCP remains a thin d
 
 Only work that advances the objective below is active.
 
+## Usability execution plan
+
+The 2026-09-04 assessment of revision `1a6df0908de0a604415fd5c1631f697656d679ee` distinguishes implemented components from a usable managed product. The current operator proxy UI uses preview state; production provisioning, runtime lifecycle effects, generic tool governance, persistent operator workflows and live activity still need integrated delivery. Historical narrow-slice and fixture verification below does not establish full operator readiness.
+
+The requested [working MCP gateway execution plan](superpowers/plans/2026-09-04-working-mcp-gateway.md) contains 22 tasks across control/browser integration, runtime deployment, governance/evidence/tracing, and operator/release verification. Its [delivery design](superpowers/specs/2026-09-04-working-mcp-gateway-design.md) supplements the accepted platform design and records the proposed implementation boundaries. Planning is complete; implementation under this new plan is not marked complete or started here.
+
+The added tracing requirement is microsecond-level elapsed measurement and precision-preserving evidence, queries and UI. Clock source, uncertainty and incomplete spans must be visible; millisecond timestamps padded with zeros do not pass.
+
+Completion requires the real journey: fresh install and login, large-plus creation, dynamic deployment, MCP allow/deny, durable activity and microsecond traces, a second isolated proxy, safe lifecycle controls, restart/restore, and the complete release gate. All unrelated work in **Explicit hold** remains paused.
+
 ## Current implementation status
 
 - The Rust workspace boundary is implemented for the shared event contract, domain validation/errors, authentication, security findings, and durability/fanout foundations.

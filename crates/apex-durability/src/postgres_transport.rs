@@ -20,6 +20,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 const MAX_CONNECTION_STRING_BYTES: usize = 2048;
 const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
 
+mod worker;
+pub use worker::{WorkerPostgresClient, WorkerPostgresError, WorkerPostgresTransaction};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportMode {
     LoopbackPlaintext,
@@ -39,6 +42,21 @@ enum TransportMode {
 #[allow(clippy::result_unit_err)]
 pub fn connect_postgres(connection_string: &str) -> Result<Client, ()> {
     let config = parse_and_classify(connection_string, plaintext_explicitly_allowed())?;
+    connect_classified(config)
+}
+
+/// Deadline-bound PostgreSQL for blocking workers. Timeouts close the connection
+/// instead of leaving an outstanding query/handshake behind a detached thread.
+#[allow(clippy::result_unit_err)]
+pub fn connect_postgres_for_worker(
+    connection_string: &str,
+) -> Result<crate::PostgresConnection, ()> {
+    WorkerPostgresClient::connect(connection_string)
+        .map(crate::PostgresConnection::Worker)
+        .map_err(|_| ())
+}
+
+fn connect_classified(config: (Config, TransportMode)) -> Result<Client, ()> {
     match config.1 {
         TransportMode::LoopbackPlaintext => config.0.connect(NoTls).map_err(|_| ()),
         TransportMode::VerifiedTls => {
@@ -77,7 +95,11 @@ pub fn connect_postgres(connection_string: &str) -> Result<Client, ()> {
 /// and a richer type here only adds a place for schema/DDL detail to leak
 /// without adding anything a caller could act on.
 #[allow(clippy::result_unit_err)]
-pub fn apply_postgres_schema(client: &mut Client, lock_key: i64, sql: &str) -> Result<(), ()> {
+pub fn apply_postgres_schema(
+    client: &mut impl crate::PostgresClientOps,
+    lock_key: i64,
+    sql: &str,
+) -> Result<(), ()> {
     client
         .execute("SELECT pg_advisory_lock($1)", &[&lock_key])
         .map_err(|_| ())?;

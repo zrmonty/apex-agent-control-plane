@@ -20,8 +20,21 @@ path = "src/main.rs"
 # application. The OOB control gateway is a distinct authentication boundary
 # and transport, not a distinct durability or event-contract story.
 apex-auth = { version = "0.1.0", path = "../../crates/apex-auth" }
+apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
+apex-domain = { version = "0.1.0", path = "../../crates/apex-domain" }
 apex-durability = { version = "0.1.0", path = "../../crates/apex-durability" }
 apex-policy = { version = "0.1.0", path = "../../crates/apex-policy" }
+apex-telemetry = { version = "0.1.0", path = "../../crates/apex-telemetry", optional = true }
+# Browser edge requires durable PostgreSQL sessions. Keep its cryptography and
+# HTTP/OIDC dependencies feature-gated; no alternate authority or token-in-browser path.
+axum = { version = "=0.8.9", optional = true, default-features = false, features = ["http1", "tokio", "json"] }
+base64 = { version = "=0.22.1", optional = true }
+chacha20poly1305 = { version = "=0.11.0", optional = true, default-features = false, features = ["alloc", "zeroize"] }
+getrandom = { version = "=0.4.3", optional = true }
+oauth2 = { version = "=5.0.0", optional = true, default-features = false }
+openid = { version = "=0.24.0", optional = true, default-features = false }
+url = { version = "=2.5.8", optional = true }
+zeroize = { version = "=1.9.0", optional = true }
 # Exclusive writer lock on the durable command-inbox journal, the same
 # primitive and the same version `event-ingest`'s `FileOutbox` uses for its own
 # journal. A second process appending to one journal would interleave delivery
@@ -37,6 +50,7 @@ fs2 = "0.4"
 jsonwebtoken = "9.3.1"
 prost = "0.14"
 prost-types = "0.14"
+pbjson = "=0.9.0"
 postgres = { version = "0.19", optional = true, features = ["with-uuid-1"] }
 # JWKS retrieval for the Keycloak resolver. Same client, same TLS stack, and
 # the same "trust only the configured CA, never a platform root store"
@@ -54,14 +68,18 @@ tonic-prost = "0.14"
 uuid = { version = "1", features = ["v7"] }
 
 [build-dependencies]
+pbjson-build = "=0.9.0"
+prost = "0.14"
+prost-types = "0.14"
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 
 [dev-dependencies]
-# Test-only: decodes the throwaway RSA fixture keys in `keycloak/tests.rs` and
-# assembles the deliberately malformed tokens (`alg: none`) that no real
-# signing library will produce. Never linked into the released binary.
+# Real loopback HTTPS provider fixtures; reuse the workspace ring TLS stack.
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+# Tests also need base64 when the PostgreSQL/browser feature is disabled:
+# decode throwaway RSA fixture keys and assemble deliberately malformed tokens.
 base64 = "0.22"
 # Paused/mocked time for deterministic tests of the interval-based fanout
 # worker (see replay.rs's tests) -- real wall-clock sleeps racing a
@@ -74,7 +92,11 @@ tokio = { version = "1", features = ["test-util"] }
 [features]
 default = []
 test-support = ["apex-auth/test-support", "apex-durability/test-support"]
-postgres = ["apex-durability/postgres", "dep:postgres"]
+postgres = [
+    "apex-durability/postgres", "dep:postgres", "dep:axum", "dep:base64",
+    "dep:chacha20poly1305", "dep:getrandom", "dep:oauth2", "dep:openid",
+    "dep:url", "dep:zeroize", "dep:apex-telemetry",
+]
 # Cross-replica admission ceiling through `event-ingest`'s own Valkey
 # accelerator -- reused, not forked, the same rule the outbox and the JetStream
 # publisher already follow. Without it the ceiling is process-local, which with

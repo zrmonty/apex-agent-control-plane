@@ -1,0 +1,47 @@
+/* Authenticated operation states extend the incumbent console layout. */
+.session-screen { display: grid; min-height: 100vh; padding: 2rem; place-items: center; }
+.session-screen section { max-width: 42rem; width: 100%; }
+.session-screen h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -.035em; margin: 0 0 1.5rem; }
+.session-screen p { color: #465873; line-height: 1.65; max-width: 70ch; }
+.session-controls { display: grid; gap: .75rem; margin-block-end: 1.5rem; min-width: 0; }
+.session-controls .workspace-picker { display: flex; margin: 0; min-width: 0; padding: .35rem; width: 100%; }
+.workspace-picker select { background: #fff; border: 0; color: #233452; font: inherit; font-size: 1rem; min-height: 2.5rem; min-width: 0; width: 100%; }
+.identity { min-width: 0; }
+.identity div { min-width: 0; }
+.identity strong { overflow-wrap: anywhere; }
+.proxy-page-intro h1, .wizard-heading h1, .detail-heading h1 { letter-spacing: -.035em; }
+.proxy-page .crumb, .detail-heading, .proxy-card-title, .proxy-scope { min-width: 0; overflow-wrap: anywhere; }
+.proxy-card-title > div, .proxy-scope strong { min-width: 0; }
+.proxy-card-open { flex-shrink: 0; min-height: 2.75rem; min-width: 2.75rem; }
+.proxy-card:hover { box-shadow: none; }
+.proxy-card-title p, .proxy-card-foot, .proxy-environment, .proxy-operating-strip { color: #52627c; }
+.proxy-card dd, .detail-list dd { overflow-wrap: anywhere; }
+.proxy-toolbar { flex-wrap: wrap; }
+.proxy-pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; justify-content: flex-end; margin-block: 1.75rem; }
+.proxy-activity-list { list-style: none; margin: 0; padding: 0; }
+.proxy-activity-list li { border-bottom: 1px solid #dfe5ef; padding-block: 1.2rem; overflow-wrap: anywhere; }
+.proxy-activity-list small { display: block; margin-block-start: .5rem; }
+.proxy-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; }
+.proxy-page input, .proxy-page select { font-size: 1rem; }
+.primary-button, .secondary-button, .new-proxy-button { min-height: 2.75rem; }
+button:disabled { cursor: not-allowed; opacity: .65; }
+:focus-visible { outline: 2px solid #263ac2; outline-offset: 3px; }
+::selection { background: #d9e0ff; color: #14213a; }
+input, select { caret-color: #263ac2; }
+.session-screen [role="alert"], .wizard-card [role="alert"] { color: #9b3227; }
+@media (max-width: 980px) {
+  .sidebar .session-controls { align-items: center; background: #fff; border-bottom: 1px solid #dfe5ef; display: flex; gap: .75rem; inset: 0 0 auto 70px; margin: 0; padding: .5rem 1rem; position: fixed; z-index: 25; }
+  .session-controls .workspace-picker { flex: 1; }
+  .session-controls button { flex-shrink: 0; }
+  .app-workspace { padding-block-start: 4rem; }
+}
+@media (max-width: 700px) {
+  .sidebar .session-controls { inset-inline-start: 0; }
+  .proxy-page { padding-inline: 1rem; }
+  .proxy-operating-strip { align-items: start; flex-wrap: wrap; gap: .5rem 1rem; }
+  .search-field { min-width: 0; width: 100%; }
+  .search-field input { min-width: 0; width: 100%; }
+  .proxy-grid { grid-template-columns: minmax(0, 1fr); }
+  .proxy-pagination { justify-content: space-between; gap: .5rem; }
+  .session-screen { padding: 1.25rem; }
+}

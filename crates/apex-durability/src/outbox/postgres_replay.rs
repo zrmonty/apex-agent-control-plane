@@ -1,6 +1,6 @@
 use super::postgres::{OUTBOX_CLAIM_LEASE_SECONDS, PostgresOutbox};
 use super::types::OutboxKey;
-use crate::{GatewayError, IngestRequest, proto};
+use crate::{GatewayError, IngestRequest, PostgresClientOps, proto};
 use prost::Message;
 use std::str::FromStr;
 use std::time::Duration;

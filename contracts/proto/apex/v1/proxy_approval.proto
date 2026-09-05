@@ -1,0 +1,47 @@
+syntax = "proto3";
+package apex.v1;
+
+enum ProxyApprovalMode {
+  PROXY_APPROVAL_MODE_UNSPECIFIED = 0;
+  PROXY_APPROVAL_MODE_NONE = 1;
+  PROXY_APPROVAL_MODE_OPERATOR = 2;
+  PROXY_APPROVAL_MODE_DUAL_OPERATOR = 3;
+}
+enum ProxyApprovalOutcome {
+  PROXY_APPROVAL_OUTCOME_UNSPECIFIED = 0;
+  PROXY_APPROVAL_OUTCOME_PENDING = 1;
+  PROXY_APPROVAL_OUTCOME_APPROVED = 2;
+  PROXY_APPROVAL_OUTCOME_DENIED = 3;
+  PROXY_APPROVAL_OUTCOME_EXPIRED = 4;
+}
+message ProxyApproval {
+  string approval_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string call_id = 6;
+  string request_hash = 7;
+  string policy_id = 8;
+  ProxyApprovalMode mode = 9;
+  ProxyApprovalOutcome outcome = 10;
+  repeated string deciding_subjects = 11;
+  uint64 expires_at_unix_us = 12;
+  uint64 generation = 13;
+}
+message DecideProxyApprovalRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+  string namespace_id = 3;
+  string proxy_id = 4;
+  string revision_id = 5;
+  string approval_id = 6;
+  string request_hash = 7;
+  ProxyApprovalOutcome outcome = 8;
+  uint64 expected_generation = 9;
+  // Subject is always derived from the authenticated operator, never this body.
+}
+message DecideProxyApprovalResponse {
+  ProxyApproval approval = 1;
+  bool duplicate = 2;
+}

@@ -7,8 +7,10 @@ members = [
     "crates/apex-security",
     "crates/apex-durability",
     "crates/apex-policy",
+    "crates/apex-telemetry",
     "apps/event-ingest",
     "apps/control-plane-api",
+    "apps/proxy-runtime-agent",
     "apps/agent-supervisor",
 ]
 

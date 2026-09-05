@@ -1,18 +1,10 @@
 import { Link } from "@tanstack/react-router";
-import { Activity, KeyRound, Layers3, ListChecks, Scale, TerminalSquare, Wrench } from "lucide-react";
-import type { ProxySummary } from "./types";
 
-const tabs = [
-  ["Overview", "", Layers3],
-  ["Upstreams & tools", "upstreams", Wrench],
-  ["Authentication", "auth", KeyRound],
-  ["CLI runners", "cli", TerminalSquare],
-  ["Governance", "governance", Scale],
-  ["Runtime", "runtime", ListChecks],
-  ["Activity", "activity", Activity],
-  ["Revisions", "revisions", Layers3],
-] as const;
-
-export function ProxyTabs({ proxy, activeTab }: { proxy: ProxySummary; activeTab: string }) {
-  return <nav className="proxy-tabs" aria-label="Proxy sections">{tabs.map(([label, suffix, Icon]) => <Link key={label} className={activeTab === suffix ? "proxy-tab active" : "proxy-tab"} to={suffix === "activity" ? "/mcp-proxies/$proxyId/activity" : "/mcp-proxies/$proxyId"} params={{ proxyId: proxy.proxyId }} search={suffix ? { tab: suffix } : undefined}><Icon size={15} />{label}</Link>)}</nav>;
+const pending = ["Upstreams & tools", "Authentication", "CLI runners", "Governance", "Runtime", "Revisions"];
+export function ProxyTabs({ proxyId, activeTab }: { proxyId: string; activeTab: string }) {
+  return <nav className="proxy-tabs" aria-label="Proxy sections">
+    <Link className={"proxy-tab " + (activeTab === "" ? "active" : "")} to="/mcp-proxies/$proxyId" params={{ proxyId }}>Overview</Link>
+    {pending.map(label => <button key={label} className="proxy-tab" disabled title="Server integration pending">{label}</button>)}
+    <Link className={"proxy-tab " + (activeTab === "activity" ? "active" : "")} to="/mcp-proxies/$proxyId/activity" params={{ proxyId }}>Activity</Link>
+  </nav>;
 }

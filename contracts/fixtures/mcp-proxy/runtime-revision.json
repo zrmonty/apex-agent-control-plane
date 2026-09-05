@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "workspaceId": "acme",
+  "namespaceId": "prod",
+  "proxyId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+  "revisionId": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+  "configHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "generation": "1",
+  "resourceUrl": "https://proxy.apex.test/mcp",
+  "spec": {
+    "ingress": {
+      "transport": "MCP_PROXY_TRANSPORT_STREAMABLE_HTTP",
+      "exposure": "MCP_PROXY_EXPOSURE_PRIVATE",
+      "host": "proxy.apex.test",
+      "path": "/mcp",
+      "allowedOrigins": [
+        "https://console.apex.test"
+      ],
+      "protocolRevision": "2025-11-25",
+      "inboundAuthenticationRequired": true
+    },
+    "upstreams": [
+      {
+        "upstreamId": "portfolio-upstream",
+        "displayName": "Portfolio upstream",
+        "transport": "MCP_PROXY_TRANSPORT_STREAMABLE_HTTP",
+        "endpointOrCommandRef": "https://portfolio-api.apex.test/mcp",
+        "credentialRef": "secret://vault/upstreams/portfolio-reader",
+        "serverIdentity": "portfolio-api.apex.test",
+        "toolCatalogHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    ],
+    "exposedTools": [
+      {
+        "upstreamId": "portfolio-upstream",
+        "toolName": "portfolio.read",
+        "alias": "portfolio.read",
+        "classification": "MCP_PROXY_TOOL_CLASSIFICATION_READ"
+      }
+    ],
+    "governanceBinding": {
+      "policyId": "ria-read-v1",
+      "approvalMode": "none",
+      "dataClassification": "confidential",
+      "rateLimit": "60/m",
+      "concurrencyLimit": "4",
+      "budget": "5000/d",
+      "retention": "30d"
+    },
+    "runtimeProfile": {
+      "imageDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "cpuLimit": "500m",
+      "memoryLimit": "256Mi",
+      "networkPolicy": "default-deny",
+      "filesystemPolicy": "read-only-rootfs",
+      "rootless": true,
+      "egressDestinations": [
+        {
+          "host": "portfolio-api.apex.test",
+          "port": 443,
+          "privateDestinationAllowance": "MCP_PROXY_PRIVATE_DESTINATION_ALLOWANCE_DENIED"
+        }
+      ]
+    }
+  },
+  "toolSchemas": [
+    {
+      "upstreamId": "portfolio-upstream",
+      "toolName": "portfolio.read",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"portfolioId\":{\"type\":\"string\"}},\"required\":[\"portfolioId\"],\"additionalProperties\":false}",
+      "outputSchemaJson": "{\"type\":\"object\"}",
+      "outputProfileId": "portfolio-read-v1",
+      "schemaHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "networkGrants": [
+    {
+      "grantId": "portfolio-https",
+      "host": "portfolio-api.apex.test",
+      "port": 443
+    }
+  ],
+  "auth": {
+    "issuer": "https://issuer.example.test",
+    "audience": "https://proxy.apex.test/mcp",
+    "jwksUri": "https://issuer.example.test/jwks",
+    "requiredScopes": [
+      "mcp:tools"
+    ],
+    "workloadIdentityRef": "identity://apex/proxy-gateway"
+  },
+  "telemetry": {
+    "fullTraceSamplePerMillion": 1000000,
+    "maxStages": 32,
+    "maxSummaryBytes": 65536,
+    "maxSpans": 128,
+    "maxAttributesPerSpan": 64,
+    "maxExportQueueBytes": "8388608"
+  },
+  "approvalMode": "PROXY_APPROVAL_MODE_NONE",
+  "runtimeManifestHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "imageRef": "registry.example.test/apex/mcp-gateway@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "cpuMillis": 500,
+  "memoryBytes": "268435456",
+  "pidLimit": 128,
+  "secretRefs": [
+    "secret://vault/upstreams/portfolio-reader"
+  ]
+}

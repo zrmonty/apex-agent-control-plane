@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { UpstreamConfig } from "./config.js";
+import { componentFixture } from "./testing/runtime-fixture.js";
 import { createOutboundCredentialProvider } from "./auth.js";
 import { McpHttpUpstreamTransport } from "./mcp-http-transport.js";
 
-const upstream = {
-  upstreamId: "portfolio",
-  transport: "streamable-http",
-  endpointOrCommandRef: "https://portfolio.example.test/mcp",
-  credentialRef: "secret://portfolio/read",
-} as const satisfies UpstreamConfig;
+const config = componentFixture();
+const upstream = config.spec!.upstreams[0];
 
 test("uses the official MCP HTTP client with an isolated outbound credential", async () => {
   const requests: Array<{ body: Record<string, unknown> | undefined; headers: Headers }> = [];
@@ -26,7 +22,7 @@ test("uses the official MCP HTTP client with an isolated outbound credential", a
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          protocolVersion: "2025-06-18",
+          protocolVersion: "2025-11-25",
           capabilities: { tools: {} },
           serverInfo: { name: "fixture", version: "1.0.0" },
         },
@@ -55,7 +51,7 @@ test("uses the official MCP HTTP client with an isolated outbound credential", a
       return "outbound-token-123456";
     },
   });
-  const transport = new McpHttpUpstreamTransport(credentialProvider, {
+  const transport = new McpHttpUpstreamTransport(config, credentialProvider, {
     fetch,
     resolveAddresses: async () => ["93.184.216.34"],
   });
@@ -79,6 +75,7 @@ test("uses the official MCP HTTP client with an isolated outbound credential", a
 
 test("rejects a resolved private upstream address before connecting", async () => {
   const transport = new McpHttpUpstreamTransport(
+    config,
     createOutboundCredentialProvider({ resolve: async () => "outbound-token-123456" }),
     {
       fetch: async () => { throw new Error("must not connect"); },
@@ -100,7 +97,7 @@ test("bounds streamed upstream responses even without a content-length header", 
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          protocolVersion: "2025-06-18",
+          protocolVersion: "2025-11-25",
           capabilities: { tools: {} },
           serverInfo: { name: "fixture", version: "x".repeat(512) },
         },
@@ -113,6 +110,7 @@ test("bounds streamed upstream responses even without a content-length header", 
     });
   };
   const transport = new McpHttpUpstreamTransport(
+    config,
     createOutboundCredentialProvider({ resolve: async () => "outbound-token-123456" }),
     { fetch, resolveAddresses: async () => ["93.184.216.34"], maxResponseBytes: 256 },
   );
@@ -124,6 +122,7 @@ test("reuses a fresh validated address resolution and refreshes it after the TTL
   let resolveCalls = 0;
   let now = 10_000;
   const transport = new McpHttpUpstreamTransport(
+    config,
     createOutboundCredentialProvider({ resolve: async () => "outbound-token-123456" }),
     {
       fetch: async (_url, init) => {
@@ -133,7 +132,7 @@ test("reuses a fresh validated address resolution and refreshes it after the TTL
           return jsonResponse({
             jsonrpc: "2.0",
             id: body.id,
-            result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } },
+            result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } },
           });
         }
         return jsonResponse({ jsonrpc: "2.0", id: body?.id, result: { tools: [{ name: "portfolio.read", inputSchema: { type: "object" } }] } });
@@ -163,6 +162,7 @@ test("revalidates refreshed addresses instead of trusting a stale safe result", 
   let now = 10_000;
   const addresses = [["93.184.216.34"], ["127.0.0.1"]];
   const transport = new McpHttpUpstreamTransport(
+    config,
     createOutboundCredentialProvider({ resolve: async () => "outbound-token-123456" }),
     {
       fetch: async (_url, init) => {
@@ -172,7 +172,7 @@ test("revalidates refreshed addresses instead of trusting a stale safe result", 
           return jsonResponse({
             jsonrpc: "2.0",
             id: body.id,
-            result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } },
+            result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } },
           });
         }
         return jsonResponse({ jsonrpc: "2.0", id: body?.id, result: { tools: [{ name: "portfolio.read", inputSchema: { type: "object" } }] } });
@@ -198,3 +198,22 @@ function jsonResponse(value: unknown): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+test("upstream negotiation refuses a protocol revision outside the declared executable subset", async () => {
+  let listed = false;
+  const transport = new McpHttpUpstreamTransport(config, createOutboundCredentialProvider({ resolve: async () => "outbound-token" }), {
+    resolveAddresses: async () => ["93.184.216.34"],
+    fetch: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { id?: number; method: string };
+      if (body.method === "initialize") return jsonResponse({ jsonrpc: "2.0", id: body.id, result: {
+        protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "old-server", version: "1" } } });
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      listed = true;
+      return jsonResponse({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
+    },
+  });
+  try {
+    await assert.rejects(() => transport.discover(upstream), /ADAPTER_FAILED/);
+    assert.equal(listed, false);
+  } finally { await transport.close(upstream); }
+});

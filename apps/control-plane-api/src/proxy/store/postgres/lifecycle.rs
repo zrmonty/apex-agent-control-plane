@@ -1,3 +1,5 @@
+use apex_durability::PostgresClientOps;
+
 use super::super::shared::{
     IdempotencyRecord, ensure_scope_match, lifecycle_payload_hash, list_activity_cursor,
     parse_activity_cursor, rollback_payload_hash, rotate_payload_hash, spec_json,

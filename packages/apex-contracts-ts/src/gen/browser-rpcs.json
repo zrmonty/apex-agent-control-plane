@@ -1,0 +1,156 @@
+[
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "CreateProxy",
+    "path": "/api/apex/v1/McpProxyService/CreateProxy",
+    "input": "apex.v1.CreateProxyRequest",
+    "output": "apex.v1.CreateProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "DecideProxyApproval",
+    "path": "/api/apex/v1/McpProxyService/DecideProxyApproval",
+    "input": "apex.v1.DecideProxyApprovalRequest",
+    "output": "apex.v1.DecideProxyApprovalResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "DeployProxy",
+    "path": "/api/apex/v1/McpProxyService/DeployProxy",
+    "input": "apex.v1.DeployProxyRequest",
+    "output": "apex.v1.DeployProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "DiscoverUpstream",
+    "path": "/api/apex/v1/McpProxyService/DiscoverUpstream",
+    "input": "apex.v1.DiscoverUpstreamRequest",
+    "output": "apex.v1.DiscoverUpstreamResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "GetProxy",
+    "path": "/api/apex/v1/McpProxyService/GetProxy",
+    "input": "apex.v1.GetProxyRequest",
+    "output": "apex.v1.GetProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "GetProxyCapabilities",
+    "path": "/api/apex/v1/McpProxyService/GetProxyCapabilities",
+    "input": "apex.v1.GetProxyCapabilitiesRequest",
+    "output": "apex.v1.GetProxyCapabilitiesResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "GetProxyOperation",
+    "path": "/api/apex/v1/McpProxyService/GetProxyOperation",
+    "input": "apex.v1.GetProxyOperationRequest",
+    "output": "apex.v1.GetProxyOperationResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "GetProxyTrace",
+    "path": "/api/apex/v1/McpProxyService/GetProxyTrace",
+    "input": "apex.v1.GetProxyTraceRequest",
+    "output": "apex.v1.GetProxyTraceResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ListProxies",
+    "path": "/api/apex/v1/McpProxyService/ListProxies",
+    "input": "apex.v1.ListProxiesRequest",
+    "output": "apex.v1.ListProxiesResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ListProxyActivity",
+    "path": "/api/apex/v1/McpProxyService/ListProxyActivity",
+    "input": "apex.v1.ListProxyActivityRequest",
+    "output": "apex.v1.ListProxyActivityResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ListProxyApprovals",
+    "path": "/api/apex/v1/McpProxyService/ListProxyApprovals",
+    "input": "apex.v1.ListProxyApprovalsRequest",
+    "output": "apex.v1.ListProxyApprovalsResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ListProxyBindings",
+    "path": "/api/apex/v1/McpProxyService/ListProxyBindings",
+    "input": "apex.v1.ListProxyBindingsRequest",
+    "output": "apex.v1.ListProxyBindingsResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ListProxyRevisions",
+    "path": "/api/apex/v1/McpProxyService/ListProxyRevisions",
+    "input": "apex.v1.ListProxyRevisionsRequest",
+    "output": "apex.v1.ListProxyRevisionsResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "PauseProxy",
+    "path": "/api/apex/v1/McpProxyService/PauseProxy",
+    "input": "apex.v1.PauseProxyRequest",
+    "output": "apex.v1.PauseProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "PublishProxyRevision",
+    "path": "/api/apex/v1/McpProxyService/PublishProxyRevision",
+    "input": "apex.v1.PublishProxyRevisionRequest",
+    "output": "apex.v1.PublishProxyRevisionResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ResumeProxy",
+    "path": "/api/apex/v1/McpProxyService/ResumeProxy",
+    "input": "apex.v1.ResumeProxyRequest",
+    "output": "apex.v1.ResumeProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "RetireProxy",
+    "path": "/api/apex/v1/McpProxyService/RetireProxy",
+    "input": "apex.v1.RetireProxyRequest",
+    "output": "apex.v1.RetireProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "RollbackProxy",
+    "path": "/api/apex/v1/McpProxyService/RollbackProxy",
+    "input": "apex.v1.RollbackProxyRequest",
+    "output": "apex.v1.RollbackProxyResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "RotateProxyCredentials",
+    "path": "/api/apex/v1/McpProxyService/RotateProxyCredentials",
+    "input": "apex.v1.RotateProxyCredentialsRequest",
+    "output": "apex.v1.RotateProxyCredentialsResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "TestProxyConnection",
+    "path": "/api/apex/v1/McpProxyService/TestProxyConnection",
+    "input": "apex.v1.TestProxyConnectionRequest",
+    "output": "apex.v1.TestProxyConnectionResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "UpdateProxyDraft",
+    "path": "/api/apex/v1/McpProxyService/UpdateProxyDraft",
+    "input": "apex.v1.UpdateProxyDraftRequest",
+    "output": "apex.v1.UpdateProxyDraftResponse"
+  },
+  {
+    "service": "apex.v1.McpProxyService",
+    "method": "ValidateProxy",
+    "path": "/api/apex/v1/McpProxyService/ValidateProxy",
+    "input": "apex.v1.ValidateProxyRequest",
+    "output": "apex.v1.ValidateProxyResponse"
+  }
+]

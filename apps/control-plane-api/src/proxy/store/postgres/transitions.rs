@@ -1,4 +1,4 @@
-use postgres::GenericClient;
+use apex_durability::PostgresClientOps as GenericClient;
 
 use super::super::shared::configuration_error;
 use super::rows;

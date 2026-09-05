@@ -6,15 +6,20 @@ use crate::ExactScope;
 
 mod canonical;
 mod memory;
+#[cfg(feature = "postgres")]
+mod operations;
+mod publish_capabilities;
 mod shared;
 mod transitions;
+#[cfg(feature = "postgres")]
+pub use operations::{LeasedProxyOperation, SubmitProxyOperation};
 
 #[cfg(feature = "postgres")]
 mod postgres;
 
 pub use memory::InMemoryProxyStore;
 #[cfg(feature = "postgres")]
-pub use postgres::PostgresProxyStore;
+pub use postgres::{PostgresProxyStore, RuntimeOperationSnapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpProxy {

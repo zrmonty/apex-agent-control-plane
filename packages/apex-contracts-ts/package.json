@@ -1,0 +1,14 @@
+{
+  "name": "@apex/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./json": "./src/json.js",
+    "./gen/*": "./src/gen/*"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.14.1"
+  }
+}

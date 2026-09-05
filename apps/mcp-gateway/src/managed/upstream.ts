@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { GatewayError } from "../contracts.js";
-import type { ExposedTool, ProxyRevisionConfig, UpstreamConfig } from "./config.js";
+import { McpProxyTransport } from "@apex/contracts";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { runtimeSpec, upstreamGrant, type RuntimeTool as ExposedTool, type RuntimeUpstream as UpstreamConfig } from "./runtime-types.js";
 import { validateHttpsDestination } from "./network.js";
 
 const MAX_DISCOVERY_BYTES = 1_048_576;
@@ -31,10 +33,10 @@ export type ExposedToolIndexes = Readonly<{
   byUpstream: ReadonlyMap<string, readonly ExposedTool[]>;
 }>;
 
-export function compileExposedToolIndexes(config: Pick<ProxyRevisionConfig, "exposedTools">): ExposedToolIndexes {
+export function compileExposedToolIndexes(config: ReadonlyRuntimeConfiguration): ExposedToolIndexes {
   const byAlias = new Map<string, ExposedTool>();
   const byUpstream = new Map<string, ExposedTool[]>();
-  for (const tool of config.exposedTools) {
+  for (const tool of runtimeSpec(config).exposedTools) {
     byAlias.set(tool.alias, tool);
     const tools = byUpstream.get(tool.upstreamId);
     if (tools === undefined) {
@@ -52,14 +54,14 @@ export function compileExposedToolIndexes(config: Pick<ProxyRevisionConfig, "exp
 }
 
 export function createUpstreamSessions(
-  config: ProxyRevisionConfig,
+  config: ReadonlyRuntimeConfiguration,
   transport: UpstreamTransport,
 ): ReadonlyMap<string, UpstreamSession> {
   const sessions = new Map<string, UpstreamSession>();
   const indexes = compileExposedToolIndexes(config);
-  for (const upstream of config.upstreams) {
+  for (const upstream of runtimeSpec(config).upstreams) {
     const exposedTools = indexes.byUpstream.get(upstream.upstreamId) ?? [];
-    sessions.set(upstream.upstreamId, new ManagedUpstreamSession(upstream, exposedTools, transport));
+    sessions.set(upstream.upstreamId, new ManagedUpstreamSession(config, upstream, exposedTools, transport));
   }
   return sessions;
 }
@@ -71,6 +73,7 @@ class ManagedUpstreamSession implements UpstreamSession {
   private readonly exposedToolNamesByAlias: ReadonlyMap<string, string>;
 
   constructor(
+    private readonly config: ReadonlyRuntimeConfiguration,
     private readonly upstream: UpstreamConfig,
     exposedTools: readonly ExposedTool[],
     private readonly transport: UpstreamTransport,
@@ -115,17 +118,12 @@ class ManagedUpstreamSession implements UpstreamSession {
   }
 
   private validateDestination(): void {
-    if (this.upstream.transport !== "streamable-http") {
-      return;
+    if (this.upstream.transport !== McpProxyTransport.STREAMABLE_HTTP) {
+      throw new GatewayError("INVALID_INPUT", "upstream transport rejected safely");
     }
     const endpoint = this.upstream.endpointOrCommandRef;
-    let hostname: string;
-    try {
-      hostname = new URL(endpoint).hostname;
-    } catch {
-      throw new GatewayError("INVALID_INPUT", "upstream destination rejected safely");
-    }
-    validateHttpsDestination(endpoint, [hostname]);
+    const grant = upstreamGrant(this.config, this.upstream);
+    validateHttpsDestination(endpoint, [grant.host]);
   }
 
   // Keeps the per-session state observable in a debugger without exposing credentials.

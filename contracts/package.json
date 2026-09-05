@@ -1,0 +1,15 @@
+{
+  "name": "@apex/contract-tooling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "verify": "node scripts/verify.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.1",
+    "@bufbuild/protobuf": "2.14.1"
+  }
+}

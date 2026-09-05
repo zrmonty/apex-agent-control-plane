@@ -103,6 +103,7 @@ services:
         CARGO_FEATURES: ${CONTROL_CARGO_FEATURES:-}
     environment:
       APEX_CONTROL_TRUSTED_SECRET_BASE: /var/lib/apex-control-secrets
+      APEX_CONTROL_PROXY_PROFILE: development
       APEX_CONTROL_BIND_ADDR: 0.0.0.0:9443
       APEX_CONTROL_ALLOW_NONLOCAL_BIND: "true"
       APEX_CONTROL_SERVER_CERT_FILE: /var/lib/apex-control-secrets/control_server_cert

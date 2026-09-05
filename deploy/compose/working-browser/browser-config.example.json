@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "public_origin": "https://console.example",
+  "client_id": "apex-browser",
+  "client_secret_file": "browser-client-secret",
+  "session_keys": [
+    { "usage": "active", "id": "session-v1", "file": "browser-session-key" }
+  ],
+  "management": {
+    "server_name": "control-plane-api",
+    "ca_file": "ca.pem",
+    "certificate_file": "browser-edge-client.pem",
+    "key_file": "browser-edge-client.key"
+  },
+  "session_max_age_secs": 28800,
+  "idle_timeout_secs": 900,
+  "max_in_flight": 32,
+  "request_timeout_secs": 30,
+  "global_scope_catalog": []
+}

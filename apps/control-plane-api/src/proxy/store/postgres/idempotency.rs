@@ -1,4 +1,4 @@
-use postgres::GenericClient;
+use apex_durability::PostgresClientOps as GenericClient;
 
 use super::super::shared::{IdempotencyRecord, check_idempotency_record, configuration_error};
 use crate::ExactScope;

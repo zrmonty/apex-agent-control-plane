@@ -1,8 +1,11 @@
 import { authenticateInbound, type HeaderValues, type InboundTokenVerifier } from "./auth.js";
-import type { ExposedTool, ProxyRevisionConfig } from "./config.js";
+import { McpProxyToolClassification } from "@apex/contracts";
+import type { ReadonlyRuntimeConfiguration } from "./runtime-config.js";
+import { assertRuntimeScope, runtimeSpec, type RuntimeTool as ExposedTool } from "./runtime-types.js";
 import { compileExposedToolIndexes, type ExposedToolIndexes, type UpstreamSession } from "./upstream.js";
 import { portfolioResourceReference } from "../context.js";
 import { GatewayError, type AuthenticatedContext } from "../contracts.js";
+import { createClock, durationUs, type Clock } from "../telemetry/clock.js";
 
 export type ManagedAuthorizationRequest = Readonly<{
   caller: AuthenticatedContext & { readonly subject: string };
@@ -46,7 +49,8 @@ export type ManagedEvidenceEvent = Readonly<{
   traceId: string;
   policyId: string;
   reasonCode: string;
-  latencyMs: number;
+  /** Monotonic integer microseconds; replaces the old rounded latencyMs API. */
+  latencyUs: bigint;
   inputBytes: number;
   sourceBytes: number;
   filteredBytes: number;
@@ -64,10 +68,12 @@ export type ManagedFilteredOutput = Readonly<{
 }>;
 
 type ManagedExecutorOptions = Readonly<{
-  config: ProxyRevisionConfig;
+  config: ReadonlyRuntimeConfiguration;
   caller: AuthenticatedContext;
+  clock?: Clock;
   verifier: InboundTokenVerifier;
   governance: ManagedGovernance;
+  /** Legacy component injection only: never consumed; requires_approval refuses. */
   approve: (request: ManagedAuthorizationRequest) => Promise<boolean>;
   admit: (request: ManagedAuthorizationRequest) => Promise<boolean>;
   checkEgress: (tool: ExposedTool) => Promise<void>;
@@ -83,13 +89,16 @@ type ManagedExecutorOptions = Readonly<{
 
 export class ManagedExecutor {
   private readonly toolIndexes: ExposedToolIndexes;
+  private readonly clock: Clock;
 
   constructor(private readonly options: ManagedExecutorOptions) {
+    assertRuntimeScope(options.config, options.caller);
+    this.clock = options.clock ?? createClock();
     this.toolIndexes = compileExposedToolIndexes(options.config);
   }
 
   async execute(toolAlias: string, input: unknown, headers: HeaderValues): Promise<unknown> {
-    const startedAt = performance.now();
+    const startedAt = this.clock.now().monotonicNs;
     const identity = await authenticateInbound(headers, this.options.config, this.options.verifier);
     const parsedInput = this.parseInput(input);
     const tool = this.findTool(toolAlias);
@@ -101,17 +110,10 @@ export class ManagedExecutor {
       throw new GatewayError("AUTHORIZATION_DENIED", "request rejected safely");
     }
     if (decision.outcome === "requires_approval") {
-      let approved: boolean;
-      try {
-        approved = await this.options.approve(request);
-      } catch {
-        await this.emitDenied(request, decision, startedAt, inputBytes);
-        throw new GatewayError("GOVERNANCE_UNAVAILABLE", "request rejected safely");
-      }
-      if (!approved) {
-        await this.emitDenied(request, decision, startedAt, inputBytes);
-        throw new GatewayError("APPROVAL_REQUIRED", "request rejected safely");
-      }
+      // No staged runtime can consume real approval authority yet. In particular,
+      // configuration NONE never turns an Apex approval decision into approval.
+      await this.emitDenied(request, decision, startedAt, inputBytes);
+      throw new GatewayError("APPROVAL_REQUIRED", "request rejected safely");
     }
     const policy = await this.loadPolicy(request, decision);
     let admitted: boolean;
@@ -143,7 +145,7 @@ export class ManagedExecutor {
           traceId: request.traceId,
           policyId: policy.policyId,
           reasonCode: decision.reasonCode,
-          latencyMs: elapsed(startedAt),
+          latencyUs: durationUs(startedAt, this.clock.now().monotonicNs),
           inputBytes,
           sourceBytes: filtered.sourceBytes,
           filteredBytes: filtered.filteredBytes,
@@ -200,7 +202,7 @@ export class ManagedExecutor {
     subject: string,
     input: unknown,
   ): ManagedAuthorizationRequest {
-    const action = tool.classification === "read" ? "read" : "execute";
+    const action = tool.classification === McpProxyToolClassification.READ ? "read" : "execute";
     return {
       caller: { ...this.options.caller, subject },
       proxyId: this.options.config.proxyId,
@@ -234,7 +236,7 @@ export class ManagedExecutor {
   ): Promise<ManagedPolicySnapshot> {
     try {
       const policy = await this.options.governance.getPolicy(request.scope);
-      if (!isPolicy(policy) || policy.policyId !== decision.policyId || policy.policyId !== this.options.config.governance.policyId) {
+      if (!isPolicy(policy) || policy.policyId !== decision.policyId || policy.policyId !== runtimeSpec(this.options.config).governanceBinding!.policyId) {
         throw new Error("policy mismatch");
       }
       return policy;
@@ -267,7 +269,7 @@ export class ManagedExecutor {
   private async emitDenied(
     request: ManagedAuthorizationRequest,
     decision: ManagedAuthorizationDecision,
-    startedAt: number,
+    startedAt: bigint,
     inputBytes: number,
   ): Promise<void> {
     try {
@@ -283,7 +285,7 @@ export class ManagedExecutor {
         traceId: request.traceId,
         policyId: decision.policyId,
         reasonCode: decision.reasonCode,
-        latencyMs: elapsed(startedAt),
+        latencyUs: durationUs(startedAt, this.clock.now().monotonicNs),
         inputBytes,
         sourceBytes: 0,
         filteredBytes: 0,
@@ -336,8 +338,4 @@ function jsonSize(value: unknown): number {
   } catch {
     throw new GatewayError("INVALID_INPUT", "managed proxy input rejected safely");
   }
-}
-
-function elapsed(startedAt: number): number {
-  return Math.max(0, Math.round(performance.now() - startedAt));
 }

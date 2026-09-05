@@ -160,6 +160,7 @@ fn connect_off_runtime(
 /// design (see its doc comment): construction happens with no runtime
 /// entered, and `tokio::spawn` requires one. This half touches only the
 /// environment and the filesystem.
+#[derive(Clone)]
 pub(crate) struct ControlFanout {
     publisher: Arc<tokio::sync::Mutex<LazyJetStreamPublisher>>,
     interval: std::time::Duration,

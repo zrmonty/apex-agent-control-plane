@@ -1,11 +1,14 @@
-use std::sync::Mutex;
-
-use postgres::Client;
-
+mod connection;
+use apex_durability::PostgresClientOps;
 mod idempotency;
 mod lifecycle;
+mod operation_journal;
+mod operations;
 mod rows;
+mod runtime_operation;
 mod transitions;
+
+pub use runtime_operation::RuntimeOperationSnapshot;
 
 use super::shared::{
     CREATE_OPERATION, IdempotencyRecord, PUBLISH_OPERATION, RETIRE_OPERATION,
@@ -25,6 +28,7 @@ use crate::proxy::{
     McpProxyRevision, ProxyError, ProxyId, ProxyLifecycleState, ProxyRedactionStatus,
     ProxyRevisionId,
 };
+use connection::ProxyConnection;
 use idempotency::{insert_idempotency, query_idempotency};
 use rows::{redaction_to_text, state_to_text, store_proxy_from_row};
 use transitions::insert_lifecycle_transition;
@@ -32,7 +36,7 @@ use transitions::insert_lifecycle_transition;
 const PROXY_SCHEMA_LOCK: i64 = 0x0A9E_1DE3_0000_0004_u64 as i64;
 
 pub struct PostgresProxyStore {
-    pub(super) client: Mutex<Client>,
+    client: ProxyConnection,
 }
 
 impl ProxyLifecycleStore for PostgresProxyStore {
@@ -58,7 +62,7 @@ impl ProxyLifecycleStore for PostgresProxyStore {
 
 impl PostgresProxyStore {
     pub fn connect(connection_string: &str) -> Result<Self, ProxyError> {
-        let mut client = apex_durability::connect_postgres(connection_string)
+        let mut client = apex_durability::connect_postgres_for_worker(connection_string)
             .map_err(|_| configuration_error())?;
         apex_durability::apply_postgres_schema(
             &mut client,
@@ -66,8 +70,15 @@ impl PostgresProxyStore {
             include_str!("../../../../../deploy/postgres/mcp_proxies.sql"),
         )
         .map_err(|_| configuration_error())?;
+        apex_durability::apply_postgres_schema(
+            &mut client,
+            PROXY_SCHEMA_LOCK,
+            include_str!("../../../../../deploy/postgres/mcp_proxy_operations.sql"),
+        )
+        .map_err(|_| configuration_error())?;
         Ok(Self {
-            client: Mutex::new(client),
+            client: ProxyConnection::new(client, connection_string)
+                .map_err(|_| configuration_error())?,
         })
     }
 }
@@ -316,6 +327,7 @@ impl ProxyStore for PostgresProxyStore {
         if draft.published {
             return Err(ProxyError::immutable_revision());
         }
+        super::publish_capabilities::validate_publish_capabilities(&draft.revision.spec)?;
         let revision_id = ProxyRevisionId::new(&input.request_id).expect("validated request id");
         let revision = build_revision(
             input.proxy_id.clone(),

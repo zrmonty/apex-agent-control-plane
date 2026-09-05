@@ -1,0 +1,13 @@
+{
+  "name": "policy",
+  "startedAtUnixUs": "1788480000123456",
+  "durationUs": "7",
+  "durationNs": "7000",
+  "otelTraceId": "0123456789abcdef0123456789abcdef",
+  "spanId": "0123456789abcdef",
+  "parentSpanId": "fedcba9876543210",
+  "processInstanceId": "gateway-fixture-1",
+  "clockSource": "hrtime+wall-anchor",
+  "clockResolutionNs": "1000",
+  "clockUncertaintyUs": "1000"
+}
