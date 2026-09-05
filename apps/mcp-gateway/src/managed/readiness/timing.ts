@@ -4,8 +4,8 @@ import { durationUs, type Clock, type ClockSnapshot } from "../../telemetry/cloc
 import { assertDataTree } from "../runtime-config/boundary.js";
 import type { CheckId } from "./types.js";
 
-const NAMES = ["readiness.config", "readiness.launch", "readiness.material", "readiness.inbound_auth",
-  "readiness.upstream_catalog", "readiness.governance", "readiness.evidence_admission", "readiness.network", "readiness.admission"];
+export const READINESS_STAGE_NAMES = Object.freeze(["readiness.config", "readiness.launch", "readiness.material", "readiness.inbound_auth",
+  "readiness.upstream_catalog", "readiness.governance", "readiness.evidence_admission", "readiness.network", "readiness.admission"]);
 const MAX = (1n << 64n) - 1n;
 
 export function clockSample(clock: Clock, previous?: bigint): ClockSnapshot {
@@ -23,7 +23,7 @@ export function clockSample(clock: Clock, previous?: bigint): ClockSnapshot {
 }
 
 export function timing(id: CheckId, start: ClockSnapshot, end: ClockSnapshot, instance: string): ProxyStageTiming {
-  return create(ProxyStageTimingSchema, { name: NAMES[id - 1], startedAtUnixUs: start.unixUs,
+  return create(ProxyStageTimingSchema, { name: READINESS_STAGE_NAMES[id - 1], startedAtUnixUs: start.unixUs,
     durationUs: durationUs(start.monotonicNs, end.monotonicNs), durationNs: end.monotonicNs - start.monotonicNs,
     processInstanceId: instance, clockSource: start.source, clockResolutionNs: start.resolutionNs,
     clockUncertaintyUs: start.uncertaintyUs });

@@ -1,5 +1,6 @@
 import { types } from "node:util";
 import { ScalarType, type DescMessage } from "@bufbuild/protobuf";
+import { FeatureSet_FieldPresence } from "@bufbuild/protobuf/wkt";
 import { GatewayError } from "../../contracts.js";
 
 export function rejected(): GatewayError {
@@ -102,6 +103,10 @@ export function assertMessage(schema: DescMessage, value: unknown): void {
     requireValue(!field.oneof && field.fieldKind !== "map");
     const entry = message[field.localName];
     if (field.fieldKind === "message" && entry === undefined) continue;
+    // Readiness timing has explicit optional uint64s. Absence is not zero;
+    // implicit/required defaults and all present values still need validation.
+    if (field.fieldKind === "scalar" && field.scalar === ScalarType.UINT64 &&
+      field.presence === FeatureSet_FieldPresence.EXPLICIT && entry === undefined) continue;
     if (field.fieldKind === "list") requireValue(Array.isArray(entry));
     const entries: unknown[] = field.fieldKind === "list" ? entry as unknown[] : [entry];
     for (const item of entries) {

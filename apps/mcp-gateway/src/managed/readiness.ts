@@ -9,6 +9,7 @@ import { parseRuntimeConfiguration } from "./runtime-config.js";
 import { assertDataTree, assertMessage, freezeTree } from "./runtime-config/boundary.js";
 import { evidence, failed } from "./readiness/evidence.js";
 import { clockSample, timing } from "./readiness/timing.js";
+import { ReadinessReportCodec } from "./readiness/report-codec.js";
 import { CHECK_IDS, type CheckId, type ProbeHandle, type ReadinessBinding, type ReadinessOptions,
   type ReadonlyReadinessReport, type ReadinessScheduler } from "./readiness/types.js";
 export type { ReadinessBinding, ReadinessOptions, ProbeOwner, ProbeHandle, ProbeResult } from "./readiness/types.js";
@@ -32,6 +33,7 @@ const scheduler: ReadinessScheduler = { after: (ms, callback) => {
  * synthetic component probes establish no production dependency authority. */
 export class ReadinessMonitor {
   private readonly binding: ReadinessBinding;
+  private readonly codec: ReadinessReportCodec;
   private readonly options: ReadinessOptions;
   private readonly timers: ReadinessScheduler;
   private readonly deadlineMs: number;
@@ -68,6 +70,7 @@ export class ReadinessMonitor {
       const config = parseRuntimeConfiguration(encodeJson(RuntimeConfigurationSchema, options.configuration as RuntimeConfiguration));
       const launch = parseRuntimeLaunchContext(options.launchContext, config);
       this.binding = freezeTree({ config, launch });
+      this.codec = new ReadinessReportCodec(this.binding);
       this.report = this.build(CHECK_IDS.map(id => create(ReadinessCheckSchema, { id, status: Status.PENDING, reason: Reason.UNAVAILABLE })));
     } catch { throw new GatewayError("INVALID_INPUT", "readiness configuration rejected safely"); }
   }
@@ -295,8 +298,9 @@ export class ReadinessMonitor {
   }
 
   private invalidReport(reason: Reason): ReadonlyReadinessReport {
-    return freezeTree(create(ReadinessReportSchema, { ...this.report as ReadinessReport, live: !this.closed && !this.fatal && !this.clockFailed, ready: false,
-      checks: CHECK_IDS.map(id => failed(id, reason)) }));
+    const report = create(ReadinessReportSchema, { ...this.report as ReadinessReport, live: !this.closed && !this.fatal && !this.clockFailed, ready: false,
+      checks: CHECK_IDS.map(id => failed(id, reason)) });
+    return this.codec.decode(this.codec.encode(report));
   }
 
   private build(checks: ReadinessCheck[], observedAtUnixUs = 0n, stages: ProxyStageTiming[] = []): ReadonlyReadinessReport {
@@ -305,9 +309,8 @@ export class ReadinessMonitor {
       ready: checks.length === 9 && checks.every(check => check.status === Status.PASS && check.reason === Reason.OK),
       target: launch.target as RuntimeTarget, configHash: launch.configHash, runtimeManifestHash: launch.runtimeManifestHash,
       launchContextHash: launch.launchContextHash, processInstanceId: launch.processInstanceId, observedAtUnixUs, checks, stages });
-    if (Buffer.byteLength(JSON.stringify(encodeJson(ReadinessReportSchema, report))) > 8192) {
-      throw new GatewayError("INVALID_INPUT", "readiness report rejected safely");
-    }
-    return freezeTree(report);
+    // One once-bound semantic/size boundary, including every invalidated view.
+    // Round-trip copies/freeze independently without reparsing config per read.
+    return this.codec.decode(this.codec.encode(report));
   }
 }
