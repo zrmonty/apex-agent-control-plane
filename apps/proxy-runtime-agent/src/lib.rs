@@ -22,6 +22,11 @@ pub use target::{check_runtime_target, check_target_configuration_binding};
 
 /// Untrusted wire messages generated from the canonical runtime protos/imports.
 /// Generated RPC types alone do not create a server or authenticate a caller.
+#[allow(
+    unknown_lints,
+    clippy::useless_borrows_in_formatting,
+    reason = "pbjson-build 0.9 emits &FIELDS; this generated-code lint is unknown before Rust 1.97"
+)]
 pub mod proto {
     tonic::include_proto!("apex.v1");
     include!(concat!(env!("OUT_DIR"), "/apex.v1.serde.rs"));

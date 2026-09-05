@@ -27,6 +27,11 @@
 //! requires two distinct operator approvals to record at all (see the
 //! crate-internal `dual_approval` module).
 
+#[allow(
+    unknown_lints,
+    clippy::useless_borrows_in_formatting,
+    reason = "pbjson-build 0.9 emits &FIELDS; this generated-code lint is unknown before Rust 1.97"
+)]
 pub mod proto {
     tonic::include_proto!("apex.v1");
     include!(concat!(env!("OUT_DIR"), "/apex.v1.serde.rs"));
