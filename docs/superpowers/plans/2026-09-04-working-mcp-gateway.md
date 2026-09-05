@@ -31,7 +31,7 @@ Tasks 1-5 are implemented, verified and independently reviewed: publication
 restrictions are in `33a053a`, the browser/UI and compiler foundation in
 `cc30a1c`, and the complete generated runtime chain in `2ec1297`.
 Fresh evidence includes 305 UI tests, three consecutive actual browser journeys,
-all 79 startup tests and 435 gateway tests with one existing Windows
+all 79 startup tests and 486 gateway tests with one existing Windows
 symlink skip. The startup subprocess finding is closed. Managed composition remains
 deliberately unavailable until real network/admission enforcement is connected.
 Task 6's rebuilt image passes the independently reviewed packaging harness.
@@ -44,7 +44,9 @@ The bounded readiness monitor is committed in `6dafe00` after shutdown/nested
 startup regression fixes, independent re-review, and fresh full gateway checks.
 The shared report validator is committed in `09c04fa`, and bounded authenticated
 loopback health transport in `6c4cc95`, after independent review and fresh
-full-suite/typecheck/build checks. Secure staged material and real probe-owner
+full-suite/typecheck/build checks. The fixed Linux staged-health-material loader
+has also passed independent review, 51 component cases and 15 actual Linux
+cases after its timer/currentness corrections. Trusted staging and real probe-owner
 composition remain open; these checks do not establish managed serving or
 end-to-end tracing.
 Task 7's pure runtime-agent identity/configuration/inspection boundary is committed
@@ -56,6 +58,11 @@ The current PostgreSQL operation/lease/publication lookup is committed in
 `aff8ae3` after real database tests and independent review. The authenticated
 callback, policy loading/enrollment and actual runtime effects remain open;
 neither a peer check nor a point-in-time store snapshot is an execution permit.
+The additive check-only authority wire, shared Agent/observed-Controller pair
+check and redacted generated decoder are reviewed and verified. Actual service
+implementation and startup registration remain unfinished and are excluded
+from this merge checkpoint. See the [runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)
+for the exact slice boundaries and post-review verification.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.
 Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
 the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)

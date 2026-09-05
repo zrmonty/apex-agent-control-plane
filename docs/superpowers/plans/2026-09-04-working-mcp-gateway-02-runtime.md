@@ -36,6 +36,11 @@ with 19 actual transport tests and independent review. Cached observations retai
 their original integer timings; GET does not refresh probes. Secure staged
 credential loading, fixed executable packaging and actual network/admission
 probe owners are not composed into production yet. The complete task stays open.
+The fixed Linux staged-health-material loader is independently reviewed with
+51 passing component cases and 15 passing actual Linux cases after timer and
+owner-currentness fixes. It retains one job until actual I/O/close completion,
+checks the complete independently expected binding and wipes owned token bytes.
+It is not yet connected to a trusted staging owner or production startup.
 
 **Files**
 
@@ -89,6 +94,12 @@ real PostgreSQL cases and the existing journal/recovery regressions pass.
 The authenticated callback, policy loading/revocation delivery, enrollment,
 image verification, staging and engine effects remain required. A snapshot is
 not authority to execute later, and per-query deadlines are not a whole-job bound.
+The check-only authority protobuf and shared Agent/observed-Controller pair
+check are now independently reviewed, with strict integer wire tests, actual
+mTLS controls and malformed-RPC decoder regressions. The Agent's observation
+is not an end-to-end Controller signature. The unfinished live authority-service
+implementation is excluded from this checkpoint; no callback is registered by
+production startup. All listed integration and runtime-effect gates stay open.
 
 **Files**
 

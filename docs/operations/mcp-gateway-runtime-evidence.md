@@ -303,3 +303,113 @@ Secure material loading, authenticated launch/currentness, real network/admissio
 owners, executable probe packaging and configured-health image acceptance remain
 required. No deployed readiness, end-to-end tracing, aggregate gate, GitHub
 Actions run, merge or push is claimed.
+
+## Check-only authority wire and peer-pair checkpoint — 2026-09-05
+
+Source checkpoint: `b9540048f58e7df439ed2cde1ef743a933dcfe95`.
+
+The separate `RuntimeAuthorityService.CheckRuntimeAuthority` contract has one
+check-only action, seven request fields and sixteen snapshot fields. Existing
+RuntimeTarget fields, browser management allowlist and event contracts remain
+unchanged. It carries no engine action, secret material or reusable permit.
+The shared pair check authenticates the actual TLS Agent and checks its observed
+Controller pin against the same policy/time/exact scope. That observation is an
+Agent attestation, not proof the Controller signed the callback.
+
+The control-plane generator now selects the existing shared redacted protobuf
+codec for all generated clients/servers. Valid encoding is unchanged; malformed
+protobuf payloads receive the static InvalidArgument envelope error instead of
+Internal with prost message details. One existing dependency edge was added;
+no dependency versions changed. Framing/header/application errors outside the
+protobuf decoder are not covered by this redaction claim.
+
+The eighteen wire/codec files and nine peer-pair files passed separate independent
+reviews with no remaining findings. Verification includes 94 generated-contract
+tests and reproducible generation/compatibility, independent Rust wire assertions,
+64 auth units, four compile-fail doctests and actual mTLS pair controls. Three
+actual malformed-RPC tests exercise the new server, new client and legacy
+SubmitCommand decoder with healthy-before/after controls and listener cleanup.
+Temporarily restoring the old codec produced three expected failures; restoring
+the shared redacted codec passed all three. Integer tests retain 1/7/999us
+differences above 2^53 and across the full uint64 wire range.
+
+The live authority service, deployment-policy reader, enrollment, bounded PG
+worker/cancellation and startup registration are not included. No generated
+contract or borrowed identity view establishes serving or execution authority.
+
+## Task 6H1: fixed Linux health-material loader — 2026-09-05
+
+Source checkpoint: `dba56cec691f15711f43624ba6c54de4380a0187`.
+
+Thirteen new source/test files, 1231 lines total, maximum273. The uncomposed
+loader reads only `/run/apex/runtime` configuration, launch metadata and a
+canonical43-byte health token under the explicit Linux UID/GID10001,0400,
+regular-file/nlink1 contract. Required O_NOFOLLOW/O_NONBLOCK and same-descriptor
+metadata checks have no weaker fallback. Complete generated configuration and
+launch values must equal the independently supplied expected binding before
+token acquisition. Immutable ancestry and material provenance are trusted
+integration preconditions, not inferred from those local checks.
+
+One process job owns pending reads, closes and writable buffers until actual
+cleanup. Cancellation or a fatal callback cannot authorize replacement. The
+absolute2s work/5s cleanup observations use monotonic time; fatal notification
+does not pretend an unresponsive OS operation terminated. Returned token bytes
+are explicitly owned and disposable, without claiming erasure of all native/GC
+copies. Generated integer metadata never passes through JavaScript Number.
+
+Independent review found two P2s: an early one-shot cleanup timer could lose
+fatal escalation, and a Clock callback could invalidate ownership after its
+last check. Targeted tests first produced40 pass/10 fail; cleanup-only41/9;
+both corrections50/50; final strengthened tests51/51. Scoped re-review closed
+both findings and an inaccurate role-test label. MAIN then independently ran:
+
+- Focused loader51/51, zero skips,678.6071ms.
+- Full gateway487 total:486 pass, one existing Windows symlink skip, zero
+  failures,33.2613271s; typecheck and production build passed.
+- Rebuilt Docker `build` target image
+  `sha256:1c3fa49d0c8498d8f6136c04ca02053fca2941e48559cdf2a1a20757043afac7`.
+  This is a verification build image, not a final production-image claim.
+- Actual native Linux15/15: valid and exact JSON caps, overflows, symlink,
+  hardlink, FIFO, UID/GID/mode, missing/short/newline/noncanonical token.
+  Each used an independent actual Rust artifact and synthetic expected owner,
+  fixed mounts, non-root execution, read-only root/staged volume, no network
+  and restricted capabilities. All owned containers/volumes were removed and
+  absence checked; unresolved cleanup0.
+
+Trusted credential staging, authenticated currentness, fatal-process supervision,
+real network/admission probes and production composition remain open. These
+checks do not complete Tasks6/7, end-to-end tracing or aggregate G0-G3 gates.
+
+## Merge-checkpoint packaging and regression checks — 2026-09-05
+
+The final production image was also rebuilt as
+`sha256:644ceae35bb4f1be664a18cde70f6696fb1acc47bc3b2615103abb6768197f4c`.
+The existing packaging suite passed (35 files, zero test artifacts/private-key
+files); all eight original-entrypoint startup cases passed. Both reports retain
+`readinessVerified: false`; startup retains `protocolHandshakeVerified: false`.
+They establish packaging and truthful profile refusal, not live MCP serving.
+
+UI tests passed305/305 with typecheck/build. The combined Node workflow,
+browser-journey-helper and image-harness tests passed408/408. Source-line
+checker tests passed4/4 and the tracked600-line and lab-only-settings checks
+passed. The Python check initially hit the documented Windows shared-temp ACL
+problem; a new private temp root resolved setup without changing repository code.
+Likewise, one main Rust command omitted the mandatory PKI fixture variable;
+the complete shared-package rerun with explicit PKI/artifact passed. Neither
+setup failure is a semantic implementation RED or a production fix.
+
+The full control-plane test command with `test-support,postgres,valkey` and
+serial execution passed using the existing real PostgreSQL and Keycloak
+fixtures. This includes576 library and79 startup tests, plus the integration
+targets. Existing optional live tests can return early when their separate
+environment switches are absent; this is not full deployment-gate acceptance.
+One earlier run failed the existing refresh fixture's transport-error counter
+after the positive token-rotation assertions. The focused rerun and complete
+rerun passed. Temporary static-only diagnostics did not reproduce a failure
+label and were removed; a further unmodified refresh suite passed5/5. No root
+cause or fix is claimed for that intermittent fixture result.
+
+Final authority codec/contract tests passed3/3 and9/9; control-plane
+all-feature/all-target Clippy passed with warnings denied. The durability
+all-feature library suite passed116/116, subject to its existing optional-live
+environment gates. Local checks do not claim a completed GitHub Actions run.
