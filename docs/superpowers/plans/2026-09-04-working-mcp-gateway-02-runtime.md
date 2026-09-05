@@ -79,8 +79,13 @@ parity, plus strict deployment-owned certificate policy and real mTLS role/grant
 tests. Policy checks retain integer microseconds and return borrowed point-in-time
 identity evidence, not enrollment or a current operation permit. The existing
 cached CI job now runs the shared packages and agent tests (`68d8d77`).
-Policy loading/revocation delivery, current PostgreSQL operation proof, image
-verification, staging and engine effects remain required before this task closes.
+`aff8ae3` adds a read-only current-operation snapshot: exact live database lease,
+row/blob consistency, active target, published revision and historical control
+hash are checked in one transaction, including a final expiry recheck. Eighteen
+real PostgreSQL cases and the existing journal/recovery regressions pass.
+The authenticated callback, policy loading/revocation delivery, enrollment,
+image verification, staging and engine effects remain required. A snapshot is
+not authority to execute later, and per-query deadlines are not a whole-job bound.
 
 **Files**
 

@@ -201,3 +201,48 @@ Results: domain17, auth49+doc1, agent43+6+8 = **124 passed, zero ignored**;
 combined Clippy passed (0.51s). This is local Windows execution, not a GitHub
 Actions run, all-feature/full-workspace proof or a pipeline speed benchmark.
 No merge or push was performed; unrelated runtime work remains separate.
+
+## Task 7B2: current PostgreSQL operation snapshot — 2026-09-05
+
+Source: `aff8ae38c32158e2aaaa738946be5b49db1bbf43`. Fifteen source/test
+files, maximum 553 physical lines (maximum new file 261), independently reviewed.
+No schema, wire, dependency, startup, provider or runtime-effect changes.
+
+`read_current_runtime_operation` validates exact scope/typed IDs/worker and
+checked SQL-width generation/fence before accessing the connection. One
+transaction locks the scoped proxy and exact unexpired lease, independently
+compares stored operation columns with its bounded protobuf, and verifies the
+current revision/generation/desired state. Publication and the existing control
+hash algorithm are checked against the actual stored spec. A final database
+microsecond expiry check follows all validation; success returns after commit.
+The lookup neither issues/renews a lease nor changes durable application rows.
+
+The shared live-lease predicate preserves journal observation order and exact
+terminal-event retries. The returned snapshot is copyable point-in-time data,
+not an authenticated caller, enrollment record or reusable execution permit.
+
+Main semantic RED: 0 passed/18 failed/zero ignored, 7.10s. Seventeen tests
+stopped at their first valid positive, so deeper branches were not independently
+RED. Frozen tests then passed against the real owned PostgreSQL fixture:
+
+```powershell
+cargo test --locked --offline -p apex-control-plane-api --features postgres --test proxy_runtime_operation -- --test-threads=1
+```
+
+GREEN: **18/18**, zero ignored, 27.50s. Coverage includes two-connection takeover,
+reconnect, busy/locked storage, unchanged seven-table snapshots, malformed or
+inconsistent stored data, legacy target changes and terminal operations. The
+final-expiry case observes a valid lease while blocked at the actual revision
+query, releases after database expiry and requires NOT_CURRENT rather than a
+transport timeout. It does not claim two reads sampled the identical microsecond.
+
+Existing regressions with `test-support,postgres,valkey`, serial execution:
+journal **24/24**, 3.40s; recovery **21/21**, 33.10s (17 real cases plus four
+child-entry helpers). Default and all-feature/all-target control-plane Clippy
+passed with warnings denied (4.92s/9.42s); exact owned Rust formatting passed.
+No full workspace suite or GitHub Actions run is inferred.
+
+Authentication, current policy, installation enrollment, bounded whole-job
+dispatch/cancellation and lease-to-engine race handling remain integration gates.
+No runtime command calls this API yet. Full Task7, serving, end-to-end tracing
+and aggregate release acceptance remain incomplete; no merge/push performed.
