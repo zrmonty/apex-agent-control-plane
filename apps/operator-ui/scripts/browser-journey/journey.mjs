@@ -2,8 +2,8 @@ import path from 'node:path';
 import { CONSOLE, KEYCLOAK, requireValue, allowedBrowserUrl, verifiedProxy, UUID7 } from './policy.mjs';
 import { observeLoginCookies } from './cookie-observer.mjs';
 import { jsonResponse } from './response.mjs';
+import { createResponseCapture, responsePatterns } from './response-capture.mjs';
 
-const SERVICE = '/api/apex/v1/McpProxyService/';
 const NAME = 'Browser journey draft';
 const SLUG = 'browser-journey-draft';
 
@@ -26,6 +26,11 @@ async function responseFor(page, suffix, action) {
   const pending = page.waitForResponse(response => matches(response, suffix));
   // Attach immediately so an action failure cannot leave an unhandled timeout.
   pending.catch(() => {});
+  await action();
+  return pending;
+}
+async function capturedResponse(capture, method, action) {
+  const pending = capture.expect(method);
   await action();
   return pending;
 }
@@ -71,9 +76,14 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   // CDP Fetch observes EVERY redirect hop. Playwright page.route explicitly
   // documents first-URL-only handling for redirects; it is insufficient here.
   const cdp = await context.newCDPSession(page);
+  const capture = createResponseCapture(cdp, { signal: abort.signal, onFailure: fail });
+  try {
   let requests = 0; let challenged = false; let callbackSeen = false;
   cdp.on('Fetch.requestPaused', event => {
     void (async () => {
+      if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) {
+        await capture.response(event); return;
+      }
       const request = event.request;
       if (abort.signal.aborted || ++requests > 512 || request.url.length > 8192 || !allowedBrowserUrl(request.url)) {
         await cdp.send('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' }); fail('traffic'); return;
@@ -88,10 +98,11 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
       } else if (url.pathname === '/realms/apex/protocol/openid-connect/auth') {
         challenge(url); challenged = true;
       }
+      capture.request(event);
       await cdp.send('Fetch.continueRequest', { requestId: event.requestId });
     })().catch(() => fail('traffic'));
   });
-  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }, ...responsePatterns] });
 
   onPhase('login');
   const initial = await responseFor(page, '/api/session', () => page.goto(CONSOLE + '/mcp-proxies', { waitUntil: 'domcontentloaded' }));
@@ -113,7 +124,7 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await page.locator('#username').fill(credentials.username);
   await page.locator('#password').fill(credentials.password);
   credentials.password = ''; credentials.username = '';
-  const initialInventory = page.waitForResponse(response => matches(response, SERVICE + 'ListProxies'));
+  const initialInventory = capture.expect('ListProxies');
   initialInventory.catch(() => {});
   await page.locator('#kc-login').click();
   onPhase('scope');
@@ -140,7 +151,7 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await screenshotPair(page, artifacts, 'draft', onPhase);
   onPhase('identity');
   const { response: createdResponse, value: created } = await jsonResponse('create', () =>
-    responseFor(page, SERVICE + 'CreateProxy', () => page.getByRole('button', { name: 'Create draft', exact: true }).click()), onPhase);
+    capturedResponse(capture, 'CreateProxy', () => page.getByRole('button', { name: 'Create draft', exact: true }).click()), onPhase);
   onPhase('identity');
   const id = verifiedProxy(created, NAME, SLUG);
   const input = createdResponse.request().postDataJSON();
@@ -150,13 +161,13 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   requireValue(new URL(page.url()).pathname === '/mcp-proxies/' + id, 'identity');
   // A hard detail reload proves a fresh actual GetProxy, not create cache data.
   const { value: detail } = await jsonResponse('detail_reload', () =>
-    responseFor(page, SERVICE + 'GetProxy', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
+    capturedResponse(capture, 'GetProxy', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('identity');
   requireValue(verifiedProxy(detail, NAME, SLUG) === id, 'identity');
   await page.getByRole('heading', { name: NAME, exact: true }).waitFor();
   onPhase('inventory');
   const { value: inventory } = await jsonResponse('inventory_reload', () =>
-    responseFor(page, SERVICE + 'ListProxies', () => page.goto(CONSOLE + '/mcp-proxies', { waitUntil: 'domcontentloaded' })), onPhase);
+    capturedResponse(capture, 'ListProxies', () => page.goto(CONSOLE + '/mcp-proxies', { waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('inventory');
   verifyInventory(inventory, id);
   await page.getByRole('link', { name: 'Open ' + NAME, exact: true }).waitFor();
@@ -177,7 +188,7 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await protocol.exchange('R');
   onPhase('inventory');
   const { value: restored } = await jsonResponse('restored_inventory', () =>
-    responseFor(page, SERVICE + 'ListProxies', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
+    capturedResponse(capture, 'ListProxies', () => page.reload({ waitUntil: 'domcontentloaded' })), onPhase);
   onPhase('inventory');
   verifyInventory(restored, id);
   const link = page.getByRole('link', { name: 'Open ' + NAME, exact: true });
@@ -193,8 +204,10 @@ export async function journey({ browser, credentials, protocol, abort, artifacts
   await absent(page, page.locator('article.proxy-card'));
   await privacy(page, 'signed-out', cookieObservation, onPhase);
   await cookieObservation.drain();
+  await capture.finish();
   requireValue(!abort.signal.aborted, 'cancelled');
   return cookieObservation.finish;
+  } finally { capture.dispose(); }
 }
 
 function verifyInventory(reply, id) {
