@@ -593,3 +593,8 @@ The suite preserves the original entrypoint and reports both
 Configured managed health, authenticated launch ownership, real enforcement,
 end-to-end microsecond traces and release gates remain incomplete. No merge,
 push or GitHub CI result is claimed.
+
+## Runtime continuation
+
+See [runtime evidence](mcp-gateway-runtime-evidence.md) for the reviewed readiness
+lifecycle checkpoint and subsequent runtime work; aggregate gates remain open.

@@ -26,8 +26,9 @@ selection and removal of unconditional Compose health success are committed
 (`b973488`); additive launch/readiness wire contracts are in `a6fc19b`.
 Pure launch validation is committed in `0ba80dc`, with Rust health-wire checks
 in `79de522`. Image startup (`3679446`) passes eight cases and detects the older fallback.
-Bounded readiness components are being implemented. The complete task remains
-open: no authenticated health
+The bounded readiness monitor is committed in `6dafe00`, with 41 component
+tests and fresh full-suite verification. A shared report validator is next.
+The complete task remains open: no authenticated health
 listener or actual network/admission owners are composed into production yet.
 
 **Files**

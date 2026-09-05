@@ -31,7 +31,7 @@ Tasks 1-5 are implemented, verified and independently reviewed: publication
 restrictions are in `33a053a`, the browser/UI and compiler foundation in
 `cc30a1c`, and the complete generated runtime chain in `2ec1297`.
 Fresh evidence includes 305 UI tests, three consecutive actual browser journeys,
-all 79 startup tests and 350 frozen gateway tests with one existing Windows
+all 79 startup tests and 391 gateway tests with one existing Windows
 symlink skip. The startup subprocess finding is closed. Managed composition remains
 deliberately unavailable until real network/admission enforcement is connected.
 Task 6's rebuilt image passes the independently reviewed packaging harness.
@@ -40,8 +40,10 @@ in `b973488`; additive launch/readiness contracts are committed in `a6fc19b`.
 Pure launch metadata validation is committed in `0ba80dc`; Rust health-wire
 precision checks are in `79de522`. The corrected image startup suite passes all
 eight cases and rejects the older image's implicit-standalone behavior (`3679446`).
-Bounded readiness components remain in progress; none of these checks yet
-establish managed serving or end-to-end tracing.
+The bounded readiness monitor is committed in `6dafe00` after shutdown/nested
+startup regression fixes, independent re-review, and fresh full gateway checks.
+The shared report validator and authenticated health transport remain unfinished;
+none of these checks yet establish managed serving or end-to-end tracing.
 The Task 16 integer clock primitives are implemented, not end-to-end tracing.
 Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
 the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)
