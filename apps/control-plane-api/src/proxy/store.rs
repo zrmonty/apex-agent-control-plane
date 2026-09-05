@@ -19,7 +19,7 @@ mod postgres;
 
 pub use memory::InMemoryProxyStore;
 #[cfg(feature = "postgres")]
-pub use postgres::PostgresProxyStore;
+pub use postgres::{PostgresProxyStore, RuntimeOperationSnapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpProxy {

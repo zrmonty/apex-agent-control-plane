@@ -5,7 +5,10 @@ mod lifecycle;
 mod operation_journal;
 mod operations;
 mod rows;
+mod runtime_operation;
 mod transitions;
+
+pub use runtime_operation::RuntimeOperationSnapshot;
 
 use super::shared::{
     CREATE_OPERATION, IdempotencyRecord, PUBLISH_OPERATION, RETIRE_OPERATION,

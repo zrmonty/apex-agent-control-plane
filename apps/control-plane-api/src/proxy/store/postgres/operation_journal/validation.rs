@@ -31,7 +31,7 @@ pub(super) fn validate_observation(
     }
 }
 
-pub(super) fn desired_text(state: ProxyDesiredState) -> Result<&'static str, ProxyError> {
+pub(in super::super) fn desired_text(state: ProxyDesiredState) -> Result<&'static str, ProxyError> {
     match state {
         ProxyDesiredState::Serving => Ok("serving"),
         ProxyDesiredState::Paused => Ok("paused"),
@@ -42,7 +42,7 @@ pub(super) fn desired_text(state: ProxyDesiredState) -> Result<&'static str, Pro
     }
 }
 
-pub(super) fn bounded_identifier(value: &str) -> bool {
+pub(in super::super) fn bounded_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value

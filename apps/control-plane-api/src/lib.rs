@@ -86,7 +86,7 @@ pub use keycloak::{
 pub use outbox::RecoveringPostgresOutbox;
 pub use outbox::{ControlOutboxBackend, submit_command};
 #[cfg(feature = "postgres")]
-pub use proxy::PostgresProxyStore;
+pub use proxy::{PostgresProxyStore, RuntimeOperationSnapshot};
 pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 pub use proxy::{
     ApprovalMode, ArgSchema, ArgSchemaField, AuthBinding, CliProfile, CreateProxy,

@@ -12,9 +12,12 @@ use prost::Message;
 use uuid::Uuid;
 
 mod leases;
+mod live_lease;
 mod validation;
 pub(super) use leases::lease_operation;
-use validation::{bounded_identifier, desired_text, validate_observation};
+pub(super) use live_lease::exact_live_lease_expiry;
+use validation::validate_observation;
+pub(super) use validation::{bounded_identifier, desired_text};
 
 #[derive(Clone, Copy)]
 pub(super) struct Target<'a> {
@@ -233,23 +236,15 @@ pub(super) fn observe_operation(
         return Err(stale_fence());
     }
     let now = database_now(&mut tx)?;
-    let valid = tx
-        .query_opt(
-            "SELECT 1 FROM mcp_proxy_controller_leases WHERE workspace_id = $1
-        AND namespace_id = $2 AND proxy_id = $3 AND operation_id = $4 AND generation = $5
-        AND worker_id = $6 AND fencing_token = $7 AND expires_at_micros > $8 FOR UPDATE",
-            &[
-                &target.scope.workspace_id,
-                &target.scope.namespace_id,
-                target.proxy_id.as_uuid(),
-                &operation_id,
-                &generation,
-                &lease.worker_id,
-                &fence,
-                &now,
-            ],
-        )
-        .map_err(db_error)?;
+    let valid = exact_live_lease_expiry(
+        &mut tx,
+        target,
+        &operation_id,
+        generation,
+        &lease.worker_id,
+        fence,
+        now,
+    )?;
     if valid.is_none() {
         return Err(stale_fence());
     }
@@ -428,7 +423,7 @@ fn insert_intent(
     Ok(())
 }
 
-fn lock_proxy(tx: &mut Transaction<'_>, target: Target<'_>) -> Result<Row, ProxyError> {
+pub(super) fn lock_proxy(tx: &mut Transaction<'_>, target: Target<'_>) -> Result<Row, ProxyError> {
     validate_scope(target.scope)?;
     tx.query_opt(
         "SELECT active_revision_id, deployment_generation, desired_state FROM mcp_proxies
@@ -445,7 +440,10 @@ fn lock_proxy(tx: &mut Transaction<'_>, target: Target<'_>) -> Result<Row, Proxy
 
 /// The proxy row stays locked until commit. Legacy lifecycle writes can change
 /// its desired state or active revision without incrementing the generation.
-fn matches_live_target(locked: &Row, operation: &ProxyOperation) -> Result<bool, ProxyError> {
+pub(super) fn matches_live_target(
+    locked: &Row,
+    operation: &ProxyOperation,
+) -> Result<bool, ProxyError> {
     let desired =
         ProxyDesiredState::try_from(operation.desired_state).map_err(|_| configuration_error())?;
     Ok(
@@ -468,7 +466,7 @@ fn validated_intent(
     EvidenceIntent::new(target, event)
 }
 
-fn request_uuid(value: &str) -> Result<Uuid, ProxyError> {
+pub(super) fn request_uuid(value: &str) -> Result<Uuid, ProxyError> {
     validate_request_id(value)?;
     let id = ProxyRevisionId::new(value).map_err(|_| ProxyError::invalid_request_id())?;
     Ok(*id.as_uuid())
@@ -479,7 +477,7 @@ fn decode_result(row: &Row, column: &str) -> Result<ProxyOperation, ProxyError> 
         .map_err(|_| configuration_error())
 }
 
-fn database_now(tx: &mut Transaction<'_>) -> Result<i64, ProxyError> {
+pub(super) fn database_now(tx: &mut Transaction<'_>) -> Result<i64, ProxyError> {
     tx.query_one(
         "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000000)::bigint",
         &[],

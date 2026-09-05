@@ -36,7 +36,7 @@ pub use service::{
 };
 
 #[cfg(feature = "postgres")]
-pub use store::PostgresProxyStore;
+pub use store::{PostgresProxyStore, RuntimeOperationSnapshot};
 pub use store::{
     CreateProxy, CreateProxyResult, InMemoryProxyStore, ListProxies, ListProxiesPage,
     ListProxyActivity, ListProxyActivityPage, McpProxy, McpProxySummary, ProxyActivity,
