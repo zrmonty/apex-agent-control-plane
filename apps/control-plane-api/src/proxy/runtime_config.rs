@@ -7,9 +7,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-
 use super::{
     ApprovalMode, McpProxyRevision, ProxyError, SecretRef, validate_mcp_proxy_revision,
     wire::proxy_spec_to_proto,
@@ -110,28 +107,7 @@ pub fn compile_runtime_config(
 /// drift or serialization failure returns a static error, never a panic,
 /// sentinel, or a substitute digest of an empty/default configuration.
 pub fn runtime_manifest_hash(config: &proto::RuntimeConfiguration) -> Result<String, ProxyError> {
-    let mut json = serde_json::to_value(config).map_err(|_| encoding_error())?;
-    let object = json.as_object_mut().ok_or_else(encoding_error)?;
-    object.remove("runtimeManifestHash");
-    let canonical = serde_json::to_vec(&sorted(json)).map_err(|_| encoding_error())?;
-    Ok(format!("{:x}", Sha256::digest(canonical)))
-}
-
-fn sorted(value: Value) -> Value {
-    match value {
-        Value::Object(fields) => {
-            let mut fields: Vec<_> = fields.into_iter().collect();
-            fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-            Value::Object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, sorted(value)))
-                    .collect(),
-            )
-        }
-        Value::Array(values) => Value::Array(values.into_iter().map(sorted).collect()),
-        scalar => scalar,
-    }
+    apex_domain::runtime_manifest_hash(config).map_err(|_| encoding_error())
 }
 
 fn encoding_error() -> ProxyError {

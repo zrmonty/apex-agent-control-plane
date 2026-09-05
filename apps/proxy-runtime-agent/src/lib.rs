@@ -8,6 +8,7 @@
 mod error;
 mod inspect;
 mod inspect_decode;
+mod manifest;
 mod shapes;
 mod target;
 
@@ -16,6 +17,7 @@ pub use inspect::{
     EngineState, ExpectedRuntimeOwnership, InspectedRuntime, RuntimeOwnershipInput,
     check_owned_inspect, parse_inspect_id,
 };
+pub use manifest::runtime_manifest_hash;
 pub use target::{check_runtime_target, check_target_configuration_binding};
 
 /// Untrusted wire messages generated from the canonical runtime protos/imports.

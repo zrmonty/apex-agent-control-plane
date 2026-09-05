@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 # Canonical wire types are generated independently, never imported from an app.
 apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
+apex-domain = { version = "0.1.0", path = "../../crates/apex-domain" }
 pbjson = "=0.9.0"
 prost = "0.14"
 prost-types = "0.14"
@@ -25,6 +26,13 @@ pbjson-build = "=0.9.0"
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
+
+[dev-dependencies]
+apex-auth = { version = "0.1.0", path = "../../crates/apex-auth" }
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -57,6 +57,8 @@ version = "0.1.0"
 dependencies = [
  "apex-domain",
  "redis",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tonic",
@@ -80,6 +82,7 @@ name = "apex-control-plane-api"
 version = "0.1.0"
 dependencies = [
  "apex-auth",
+ "apex-domain",
  "apex-durability",
  "apex-policy",
  "apex-telemetry",
@@ -189,15 +192,21 @@ dependencies = [
 name = "apex-proxy-runtime-agent"
 version = "0.1.0"
 dependencies = [
+ "apex-auth",
  "apex-contract",
+ "apex-domain",
+ "base64",
  "pbjson",
  "pbjson-build",
  "prost",
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

@@ -15,6 +15,8 @@ pub enum RuntimeError {
     OwnershipMismatch,
     /// Docker state is outside the supported closed state vocabulary.
     UnsupportedState,
+    /// Generated runtime ProtoJSON could not be encoded for manifest computation.
+    ManifestEncodingFailed,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -26,6 +28,7 @@ impl std::fmt::Display for RuntimeError {
             Self::InvalidExpectedOwnership => "RUNTIME_INVALID_EXPECTED_OWNERSHIP",
             Self::OwnershipMismatch => "RUNTIME_OWNERSHIP_MISMATCH",
             Self::UnsupportedState => "RUNTIME_UNSUPPORTED_STATE",
+            Self::ManifestEncodingFailed => "RUNTIME_MANIFEST_ENCODING_FAILED",
         })
     }
 }
