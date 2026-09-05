@@ -31,8 +31,11 @@ tests and fresh full-suite verification. The shared bound report validator is
 committed in `09c04fa`, with 25 additional codec/presence tests and independent
 review. Its 8KiB boundary preserves exact integer timing and rejects mismatched
 identity/check/stage data; it does not authenticate the expected launch.
-The complete task remains open: no authenticated health
-listener or actual network/admission owners are composed into production yet.
+`6c4cc95` adds the authenticated fixed-loopback health server and probe library,
+with 19 actual transport tests and independent review. Cached observations retain
+their original integer timings; GET does not refresh probes. Secure staged
+credential loading, fixed executable packaging and actual network/admission
+probe owners are not composed into production yet. The complete task stays open.
 
 **Files**
 

@@ -246,3 +246,60 @@ Authentication, current policy, installation enrollment, bounded whole-job
 dispatch/cancellation and lease-to-engine race handling remain integration gates.
 No runtime command calls this API yet. Full Task7, serving, end-to-end tracing
 and aggregate release acceptance remain incomplete; no merge/push performed.
+
+## Task 6G: authenticated loopback health transport — 2026-09-05
+
+Source: `6c4cc952f1dd5608dacc533dd30665c87d8040ed`. Thirteen new files,
+962 physical lines total, maximum172, independently reviewed. No production
+root/factory, startup parser, readiness owner/codec or process-runner changes.
+
+The server binds only `127.0.0.1:8081`. Exact authenticated HTTP/1.1 `/livez` and
+`/readyz` requests use one cached snapshot and one bound encoding. Authentication
+requires the dedicated32-byte token and canonical Bearer encoding; malformed,
+ambiguous, duplicate, oversized, body-bearing or pipelined envelopes cannot
+start probes. Responses preserve the original observation and integer stages,
+with empty static failures instead of raw diagnostics or secrets.
+
+The client probes only that fixed loopback endpoint, with no caller URL, proxy
+configuration, redirects or retries. Strict bounded framing and original UTF-8
+reach the same8KiB bound codec. Server/probe own their token copies and socket
+cleanup; absolute2s work limits cannot be extended by trickling activity. The
+server has at most8 tracked sockets and5s cleanup grace; the probe requires
+actual close notification within1s or reports failure. Failure does not pretend
+an unresponsive socket was gracefully closed. Timers require a progressing
+event loop; this is not a hard operating-system deadline.
+
+Owner incremental tests recorded actual refusals before implementation, while
+separately identifying already-working delegated behavior. Final focused
+transport suite: **19/19**, zero ignored, 8.124s, over real HTTP/raw sockets and
+the actual Rust artifact with explicitly synthetic launch/probe owners.
+Independent review found a masked current-binding-loss assertion. The corrected
+test first proves a fresh200, changes only currentness and requires503 with nine
+decoded MISMATCH reasons, unchanged observation/stages and no extra probe starts.
+Re-review closed the finding; no production change was needed.
+
+Main fresh post-correction commands using the actual export listed under7B1/7C:
+
+```powershell
+pnpm --dir apps/mcp-gateway test
+pnpm --dir apps/mcp-gateway typecheck
+pnpm --dir apps/mcp-gateway build
+```
+
+Results: **436 total,435 passed, one existing Windows symlink skip, zero
+failures,29.866s**; typecheck/build passed. Exact staged hashes/whitespace and
+tracked-source600-line checks passed. Two checked-in child cases cover real
+socket lifetime and cleanup/refusal with exact owned-process reap assertions.
+
+Main additionally ran the fixed `watchdog-child.ts actual-grace` under a bounded
+9s execution/1s reap parent with4KiB output caps: actual5,120ms cleanup grace,
+required fatal exit73, empty stderr and exact PID45628 reaped/ESRCH. The held
+destroy hook deliberately remained unresponsive (`closed=false`); this proves
+fatal process termination, not graceful socket completion. That separate parent
+was a manual acceptance command, not a checked-in CI long-grace test.
+
+These uncomposed libraries are not yet imported by the production build entry.
+Secure material loading, authenticated launch/currentness, real network/admission
+owners, executable probe packaging and configured-health image acceptance remain
+required. No deployed readiness, end-to-end tracing, aggregate gate, GitHub
+Actions run, merge or push is claimed.

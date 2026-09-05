@@ -31,7 +31,7 @@ Tasks 1-5 are implemented, verified and independently reviewed: publication
 restrictions are in `33a053a`, the browser/UI and compiler foundation in
 `cc30a1c`, and the complete generated runtime chain in `2ec1297`.
 Fresh evidence includes 305 UI tests, three consecutive actual browser journeys,
-all 79 startup tests and 416 gateway tests with one existing Windows
+all 79 startup tests and 435 gateway tests with one existing Windows
 symlink skip. The startup subprocess finding is closed. Managed composition remains
 deliberately unavailable until real network/admission enforcement is connected.
 Task 6's rebuilt image passes the independently reviewed packaging harness.
@@ -42,9 +42,11 @@ precision checks are in `79de522`. The corrected image startup suite passes all
 eight cases and rejects the older image's implicit-standalone behavior (`3679446`).
 The bounded readiness monitor is committed in `6dafe00` after shutdown/nested
 startup regression fixes, independent re-review, and fresh full gateway checks.
-The shared report validator is committed in `09c04fa` after independent review
-and fresh full-suite/typecheck/build checks. Authenticated health transport is next;
-none of these checks yet establish managed serving or end-to-end tracing.
+The shared report validator is committed in `09c04fa`, and bounded authenticated
+loopback health transport in `6c4cc95`, after independent review and fresh
+full-suite/typecheck/build checks. Secure staged material and real probe-owner
+composition remain open; these checks do not establish managed serving or
+end-to-end tracing.
 Task 7's pure runtime-agent identity/configuration/inspection boundary is committed
 in `b5d0391` (43 tests); authenticated authority and provisioning remain open.
 Shared producer/agent manifest hashing and exact certificate-role/scope policy
