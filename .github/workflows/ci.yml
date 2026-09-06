@@ -311,7 +311,7 @@ jobs:
         run: |
           cargo test --locked -p apex-domain
           cargo test --locked -p apex-auth
-          cargo test --locked -p apex-proxy-runtime-agent
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo --preserve-env=APEX_RUNTIME_FIXTURE_PATH,APEX_BROWSER_TEST_PKI_DIR,RUST_BACKTRACE --' cargo test --locked -p apex-proxy-runtime-agent
           cargo clippy --locked -p apex-domain -p apex-auth -p apex-proxy-runtime-agent --all-targets -- -D warnings
       - name: Share the actual Rust export with the gateway tests
         uses: actions/upload-artifact@v7

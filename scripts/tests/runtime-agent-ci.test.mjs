@@ -12,7 +12,7 @@ const gateName = 'Test runtime agent and shared boundaries';
 const packageTests = [
   'cargo test --locked -p apex-domain',
   'cargo test --locked -p apex-auth',
-  'cargo test --locked -p apex-proxy-runtime-agent',
+  "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo --preserve-env=APEX_RUNTIME_FIXTURE_PATH,APEX_BROWSER_TEST_PKI_DIR,RUST_BACKTRACE --' cargo test --locked -p apex-proxy-runtime-agent",
 ];
 const lintCommand = 'cargo clippy --locked -p apex-domain -p apex-auth -p apex-proxy-runtime-agent --all-targets -- -D warnings';
 
@@ -94,8 +94,8 @@ test('source-only: the gate uses the collected artifact and inherits existing PK
     '          python -B deploy/compose/live-mtls/generate_pki.py --out "${fixture_root}/untrusted"',
   ]);
   assert.equal(rust.split('generate_pki.py').length - 1, 2);
-  assert.equal(rust.split('APEX_BROWSER_TEST_PKI_DIR').length - 1, 1, 'only the existing GITHUB_ENV export');
-  assert.equal(rust.split('APEX_RUNTIME_FIXTURE_PATH').length - 1, 1, 'one explicit collected-artifact binding');
+  assert.equal(rust.split('APEX_BROWSER_TEST_PKI_DIR').length - 1, 2, 'existing GITHUB_ENV export plus the narrow runner allowlist');
+  assert.equal(rust.split('APEX_RUNTIME_FIXTURE_PATH').length - 1, 2, 'one collected-artifact binding plus the narrow runner allowlist');
   assert.deepEqual(gate.split('\n').slice(1, -commands(gate).length), [
     '        env:',
     '          APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-revision.json',
@@ -119,6 +119,20 @@ test('source-only: scoped Clippy covers all targets in all three packages with w
   const run = commands(namedStep(job('rust-control-plane'), gateName));
   assert.equal(run.at(-1), lintCommand);
   assert.equal(run.filter((line) => line.startsWith('cargo clippy ')).length, 1);
+});
+
+test('source-only: only agent test execution uses the allowlisted root runner, not compilation', () => {
+  const rust = job('rust-control-plane');
+  const run = commands(namedStep(rust, gateName));
+  const key = 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER';
+  assert.equal(rust.split(key).length - 1, 1, 'one command-local host runner, not a job or step env override');
+  assert.match(run[2], /^CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='sudo --preserve-env=APEX_RUNTIME_FIXTURE_PATH,APEX_BROWSER_TEST_PKI_DIR,RUST_BACKTRACE --' cargo test --locked -p apex-proxy-runtime-agent$/);
+  assert.deepEqual([run[0], run[1], run[3]], [
+    'cargo test --locked -p apex-domain',
+    'cargo test --locked -p apex-auth',
+    lintCommand,
+  ], 'shared tests and Clippy stay unprivileged; Cargo itself is never sudoed');
+  assert.doesNotMatch(run.join('\n'), /sudo\s+(?:-E\b|cargo\b)|--target(?:[ =]|-dir)|--test-threads|--ignored|--skip|--lib\b|--tests\b|\|\|/);
 });
 
 test('source-only: gateway-contracts invokes this Node contract suite as an active command', () => {
