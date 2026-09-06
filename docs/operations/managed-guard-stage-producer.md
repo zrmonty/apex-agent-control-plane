@@ -103,6 +103,9 @@ DORMANT refusal for its missing upstream-purpose declaration. It is not a succes
 native guard stage/create test. Successful producer-data acceptance is the separate
 Rust-to-TS fixture. No TS consumer behavior changes in this task.
 
-Future work must durably bind this data to signature verification, paired staging,
-create/inspect/start ownership, and fresh effect authority. This result establishes
-none of those steps, health, routing, admission, readiness, or Serving.
+The separate [Task4W composition](managed-guard-staging.md) binds this data
+to real signature verification, durable guard intent and protected sealing/recovery.
+Its scoped verification and independent review passed; it is committed in `cdbcd1f`.
+The producer remains data-only.
+Paired gateway staging, create/inspect/start ownership, health, routing, admission,
+readiness and Serving remain later gates; guard staging alone establishes none.
