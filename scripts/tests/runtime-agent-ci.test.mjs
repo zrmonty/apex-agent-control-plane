@@ -153,3 +153,11 @@ test('source-only: daemon-mutating joint journeys require explicit native accept
   const acceptance = readFileSync(new URL('../../docs/operations/runtime-execution-control-plane.md', import.meta.url), 'utf8');
   assert.ok(acceptance.includes('--test proxy_runtime_execution -- --ignored --test-threads=1'));
 });
+
+test('source-only: live fixture listing drains its input under pipefail', () => {
+  const live = readFileSync(new URL('../../.github/workflows/live-mtls-e2e.yml', import.meta.url), 'utf8');
+  for (const directory of ['secrets', 'secrets-host']) {
+    assert.ok(live.includes(`ls -la ${directory} | sed -n '1,40p'`));
+    assert.ok(!live.includes(`ls -la ${directory} | head`));
+  }
+});
