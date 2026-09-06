@@ -6,6 +6,8 @@ mod deployment;
 #[allow(dead_code)]
 #[path = "proxy_runtime_authority/material.rs"]
 mod material;
+#[path = "proxy_runtime_agent_client/observation.rs"]
+mod observation;
 #[allow(dead_code)]
 #[path = "proxy_runtime_operation/support.rs"]
 mod operation;
@@ -127,15 +129,17 @@ fn actual_agent_client_checks_production_root_and_current_postgres_lease() {
 
     fixture.expired_at_database_edge();
     let expired = fixture.bytes();
-    root::assert_refusal(
-        root.probe(
-            &materials,
-            &request,
-            &fixture.revision.config_hash,
-            "controller",
-        ),
-        "RUNTIME_AUTHORITY_CLIENT_REMOTE_REFUSAL",
-    );
+    for _ in 0..20 {
+        root::assert_refusal(
+            root.probe(
+                &materials,
+                &request,
+                &fixture.revision.config_hash,
+                "controller",
+            ),
+            "RUNTIME_AUTHORITY_CLIENT_REMOTE_REFUSAL",
+        );
+    }
     assert_unchanged(fixture.bytes(), &expired);
     root.finish();
 }
