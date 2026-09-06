@@ -101,12 +101,24 @@ pub(super) fn clean(command: &mut Command) {
 }
 
 pub(super) fn probe(command: &mut Command, directory: &Directory) -> serde_json::Value {
+    // The production callback can fail closed while its paired policy refresh
+    // holds the nonblocking metadata lock. These are read-only test probes;
+    // retry only Unavailable, without renewing the existing 15-second watchdog.
+    super::observation::after_refresh(|deadline| probe_once(command, directory, deadline))
+}
+
+fn probe_once(
+    command: &mut Command,
+    directory: &Directory,
+    deadline: Instant,
+) -> serde_json::Value {
     let output = directory.write(&format!("output-{}.json", uuid::Uuid::now_v7()), &[]);
     let file = fs::OpenOptions::new().write(true).open(&output).unwrap();
     command.stdout(Stdio::from(file));
+    assert!(Instant::now() < deadline, "probe watchdog expired");
     let mut process = Process::spawn(command);
-    let started = Instant::now();
     loop {
+        assert!(Instant::now() < deadline, "probe watchdog expired");
         assert!(
             fs::metadata(&output).unwrap().len() <= 8192,
             "probe output bound"
@@ -118,10 +130,6 @@ pub(super) fn probe(command: &mut Command, directory: &Directory) -> serde_json:
             );
             break;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(15),
-            "probe watchdog expired"
-        );
         std::thread::sleep(Duration::from_millis(10));
     }
     read_result(&output)
@@ -139,4 +147,27 @@ fn read_result(output: &Path) -> serde_json::Value {
     let text = std::str::from_utf8(&bytes).unwrap();
     assert!(!text.contains("PROBE_SECRET_CANARY") && !text.contains("PRIVATE KEY"));
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn expired_probe_watchdog_refuses_before_process_spawn() {
+    let directory = Directory::new();
+    let mut command = Command::new(directory.path.join("must-not-be-launched"));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        probe_once(
+            &mut command,
+            &directory,
+            Instant::now() - Duration::from_secs(1),
+        )
+    }));
+    let panic = result.expect_err("expired probe must fail");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+    assert_eq!(
+        message,
+        Some("probe watchdog expired"),
+        "must refuse before trying to spawn"
+    );
 }
