@@ -142,3 +142,14 @@ test('source-only: Linux staging and real signature verification are required ac
   assert.match(gate, /sudo -u '#1001' -g '#1001'/);
   assert.match(gate, /signature::tests::dedicated_agent_uid_can_open_its_protected_cache --exact --ignored/);
 });
+
+test('source-only: daemon-mutating joint journeys require explicit native acceptance opt-in', () => {
+  for (const file of ['journey', 'registration']) {
+    const source = readFileSync(new URL(`../../apps/control-plane-api/tests/proxy_runtime_execution/${file}.rs`, import.meta.url), 'utf8');
+    assert.match(source, /#\[test\]\s*#\[ignore = "requires explicit owned Linux Docker\/Cosign\/PostgreSQL fixtures; run with --ignored"\]\s*fn actual_joint_/);
+  }
+  const fixture = readFileSync(new URL('../../apps/control-plane-api/tests/proxy_runtime_execution/fixture.rs', import.meta.url), 'utf8');
+  assert.match(fixture, /var_os\("APEX_TASK3B_ROOT"\)\.expect\("scoped owned Docker volume required"\)/);
+  const acceptance = readFileSync(new URL('../../docs/operations/runtime-execution-control-plane.md', import.meta.url), 'utf8');
+  assert.ok(acceptance.includes('--test proxy_runtime_execution -- --ignored --test-threads=1'));
+});

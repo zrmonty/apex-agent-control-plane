@@ -164,3 +164,23 @@ does not configure NATS; committed evidence intents are not proof of trace fanou
 Task4 Start/readiness/network/route/admission and end-to-end browser serving remain
 separate gates. Component timeout/overload/shutdown tests do not substitute for
 the actual joint test.
+
+The two `proxy_runtime_execution` tests are explicitly ignored in the ordinary
+Cargo suite: they mutate a Docker daemon and require the separately prepared
+owned volume, protected Cosign/Docker tools, production binaries, PostgreSQL,
+runtime export and mTLS fixtures. The general CI job does not provision that
+joint fixture. An ignored result is not native acceptance or a release pass.
+After independently validating those isolated fixture resources, invoke:
+
+```sh
+cargo test --locked -p apex-control-plane-api --features postgres --test proxy_runtime_execution -- --ignored --test-threads=1
+```
+
+When invoking the separately compiled test executable, retain `--ignored
+--test-threads=1` as well. Both tests must actually pass; zero executed tests do
+not count. Explicit invocation still fails if `APEX_TASK3B_ROOT` or another
+required fixture is absent. Do not create or reuse an arbitrary volume to satisfy
+the path check, waive signature verification, or mark an unavailable fixture as
+a successful journey. Automating this complete joint fixture on disposable CI
+runners remains a separate acceptance gate; existing CI staging/signature tests
+continue to run but do not substitute for it.

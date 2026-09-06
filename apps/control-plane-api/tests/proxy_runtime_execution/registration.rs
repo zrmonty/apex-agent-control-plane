@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub(super) mod configuration;
 
 #[test]
+#[ignore = "requires explicit owned Linux Docker/Cosign/PostgreSQL fixtures; run with --ignored"]
 fn actual_joint_sealed_stage_registers_original_proof_and_obtains_only_prepare() {
     let f = Fixture::for_registration();
     eprintln!("registration joint evidence root: {}", f.root.display());

@@ -15,6 +15,7 @@ use std::{
 use uuid::Uuid;
 
 #[test]
+#[ignore = "requires explicit owned Linux Docker/Cosign/PostgreSQL fixtures; run with --ignored"]
 fn actual_joint_durable_dormant_restart_pause_retire_isolation() {
     let f = Fixture::new();
     eprintln!("joint evidence root: {}", f.root.display());
