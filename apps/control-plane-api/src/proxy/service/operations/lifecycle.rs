@@ -46,62 +46,6 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         Ok(proxy)
     }
 
-    pub(super) async fn reconciled(&self, revision: McpProxyRevision) -> Result<(), Status> {
-        let Some(runtime) = &self.runtime else {
-            return Err(Status::failed_precondition(
-                "PROXY_RUNTIME_UNAVAILABLE: request rejected safely",
-            ));
-        };
-        let runtime = Arc::clone(runtime);
-        tokio::task::spawn_blocking(move || runtime.reconcile(&revision))
-            .await
-            .map_err(internal_status)?
-            .map_err(proxy_status)
-    }
-
-    async fn reconcile_to_ready(
-        &self,
-        scope: ExactScope,
-        actor_id: String,
-        proxy: McpProxy,
-        revision_id: super::ProxyRevisionId,
-    ) -> Result<McpProxy, Status> {
-        if proxy.lifecycle_state != super::ProxyLifecycleState::Provisioning {
-            return Ok(proxy);
-        }
-        let revision = self
-            .require_revision(scope.clone(), proxy.proxy_id.clone(), revision_id.clone())
-            .await?;
-        if let Err(error) = self.reconciled(revision).await {
-            let _ = self
-                .lifecycle(
-                    scope.clone(),
-                    actor_id.clone(),
-                    uuid::Uuid::now_v7().hyphenated().to_string(),
-                    proxy.proxy_id.clone(),
-                    revision_id.clone(),
-                    Some(revision_id.clone()),
-                    "proxy.runtime_failed".to_owned(),
-                    super::LifecycleCommand::Fail,
-                    false,
-                )
-                .await;
-            return Err(error);
-        }
-        self.lifecycle(
-            scope,
-            actor_id,
-            uuid::Uuid::now_v7().hyphenated().to_string(),
-            proxy.proxy_id,
-            revision_id.clone(),
-            Some(revision_id),
-            "proxy.ready".to_owned(),
-            super::LifecycleCommand::Ready,
-            false,
-        )
-        .await
-    }
-
     pub async fn validate_proxy(
         &self,
         request: Request<proto::ValidateProxyRequest>,
@@ -127,6 +71,20 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             ));
         }
         super::validate_proxy_spec(&stored.spec).map_err(proxy_status)?;
+        validate_request_id(&input.request_id)?;
+        #[cfg(feature = "postgres")]
+        if let Some(store) = &self.managed {
+            let (store, scope, proxy_id) = (Arc::clone(store), scope.clone(), proxy_id.clone());
+            if tokio::task::spawn_blocking(move || store.is_managed(&scope, &proxy_id))
+                .await
+                .map_err(internal_status)?
+                .map_err(proxy_status)?
+            {
+                // Validation is a read-only report once desired authority is
+                // journal-managed, including validation of a newly edited draft.
+                return Ok(validated_response());
+            }
+        }
         self.lifecycle(
             scope.clone(),
             actor_id.clone(),
@@ -151,15 +109,7 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             false,
         )
         .await?;
-        Ok(Response::new(proto::ValidateProxyResponse {
-            report: Some(proto::ProxyValidationReport {
-                valid: true,
-                error_messages: vec![],
-                warning_messages: vec![],
-                validation_id: "validated".to_owned(),
-                redaction_status: proto::McpProxyRedactionStatus::Redacted as i32,
-            }),
-        }))
+        Ok(validated_response())
     }
 
     pub async fn deploy_proxy(
@@ -170,66 +120,23 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         let scope = scope(input.workspace_id.clone(), input.namespace_id.clone());
         let actor = self.authenticate_scope(&request, &scope)?;
         let input = request.into_inner();
-        let proxy_id = ProxyId::new(input.proxy_id).map_err(proxy_status)?;
-        let revision_id = super::ProxyRevisionId::new(input.revision_id).map_err(proxy_status)?;
-        let expected = parse_optional_revision(input.expected_revision_id)?;
-        let store = Arc::clone(&self.store);
-        let revision_scope = scope.clone();
-        let revision_proxy = proxy_id.clone();
-        let revision_copy = revision_id.clone();
-        let revision = tokio::task::spawn_blocking(move || {
-            store.get_revision(revision_scope, revision_proxy, revision_copy)
-        })
-        .await
-        .map_err(internal_status)?
-        .map_err(proxy_status)?;
-        let approved = match revision.spec.governance_binding.approval_mode {
-            super::ApprovalMode::None => true,
-            _ => {
-                let Some(authority) = &self.approvals else {
-                    return Err(Status::failed_precondition(
-                        "PROXY_APPROVAL_REQUIRED: request rejected safely",
-                    ));
-                };
-                authority
-                    .is_approved(super::ProxyApprovalRequest {
-                        scope: scope.clone(),
-                        proxy_id: proxy_id.clone(),
-                        revision_id: revision_id.clone(),
-                        actor_id: actor.clone(),
-                        action: "deploy".to_owned(),
-                    })
-                    .map_err(proxy_status)?
-            }
-        };
-        if !approved {
-            return Err(Status::failed_precondition(
-                "PROXY_APPROVAL_REQUIRED: request rejected safely",
-            ));
-        }
-        if self.runtime.is_none() {
-            return Err(Status::failed_precondition(
-                "PROXY_RUNTIME_UNAVAILABLE: request rejected safely",
-            ));
-        }
-        let proxy = self
-            .lifecycle(
-                scope.clone(),
-                actor.clone(),
-                input.request_id,
-                proxy_id.clone(),
-                revision_id.clone(),
-                expected,
-                "proxy.deploy".to_owned(),
-                super::LifecycleCommand::Deploy,
-                approved,
-            )
-            .await?;
-        let proxy = self
-            .reconcile_to_ready(scope, actor, proxy, revision_id)
+        let accepted = self
+            .accept_managed(super::super::super::ManagedLifecycleInput {
+                scope,
+                actor_id: actor,
+                request_id: input.request_id,
+                proxy_id: ProxyId::new(input.proxy_id).map_err(proxy_status)?,
+                revision_id: super::ProxyRevisionId::new(input.revision_id)
+                    .map_err(proxy_status)?,
+                expected_revision_id: parse_optional_revision(input.expected_revision_id)?,
+                reason_code: "proxy.deploy".to_owned(),
+                action: super::super::super::ManagedLifecycleAction::Deploy,
+                approved: false,
+            })
             .await?;
         Ok(Response::new(proto::DeployProxyResponse {
-            proxy: Some(proxy_to_proto(proxy)),
+            proxy: Some(accepted.proxy),
+            operation: Some(accepted.operation),
         }))
     }
 
@@ -237,9 +144,32 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         &self,
         request: Request<proto::PauseProxyRequest>,
     ) -> Result<Response<proto::PauseProxyResponse>, Status> {
-        self.pause_or_resume(request, super::LifecycleCommand::Pause)
-            .await
+        let input = request.get_ref();
+        let scope = scope(input.workspace_id.clone(), input.namespace_id.clone());
+        let actor = self.authenticate_scope(&request, &scope)?;
+        let input = request.into_inner();
+        let accepted = self
+            .accept_managed(super::super::super::ManagedLifecycleInput {
+                scope,
+                actor_id: actor,
+                request_id: input.request_id,
+                proxy_id: ProxyId::new(input.proxy_id).map_err(proxy_status)?,
+                revision_id: super::ProxyRevisionId::new(input.revision_id)
+                    .map_err(proxy_status)?,
+                expected_revision_id: parse_optional_revision(input.expected_revision_id)?,
+                reason_code: input
+                    .reason_code
+                    .unwrap_or_else(|| "proxy.pause".to_owned()),
+                action: super::super::super::ManagedLifecycleAction::Pause,
+                approved: false,
+            })
+            .await?;
+        Ok(Response::new(proto::PauseProxyResponse {
+            proxy: Some(accepted.proxy),
+            operation: Some(accepted.operation),
+        }))
     }
+
     pub async fn resume_proxy(
         &self,
         request: Request<proto::ResumeProxyRequest>,
@@ -248,66 +178,23 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
         let scope = scope(input.workspace_id.clone(), input.namespace_id.clone());
         let actor = self.authenticate_scope(&request, &scope)?;
         let input = request.into_inner();
-        if self.runtime.is_none() {
-            return Err(Status::failed_precondition(
-                "PROXY_RUNTIME_UNAVAILABLE: request rejected safely",
-            ));
-        }
-        let proxy_id = ProxyId::new(input.proxy_id).map_err(proxy_status)?;
-        let revision_id = super::ProxyRevisionId::new(input.revision_id).map_err(proxy_status)?;
-        let proxy = self
-            .lifecycle(
-                scope.clone(),
-                actor.clone(),
-                input.request_id,
-                proxy_id,
-                revision_id.clone(),
-                parse_optional_revision(input.expected_revision_id)?,
-                "proxy.resume".to_owned(),
-                super::LifecycleCommand::Resume,
-                false,
-            )
-            .await?;
-        let proxy = self
-            .reconcile_to_ready(scope, actor, proxy, revision_id)
+        let accepted = self
+            .accept_managed(super::super::super::ManagedLifecycleInput {
+                scope,
+                actor_id: actor,
+                request_id: input.request_id,
+                proxy_id: ProxyId::new(input.proxy_id).map_err(proxy_status)?,
+                revision_id: super::ProxyRevisionId::new(input.revision_id)
+                    .map_err(proxy_status)?,
+                expected_revision_id: parse_optional_revision(input.expected_revision_id)?,
+                reason_code: "proxy.resume".to_owned(),
+                action: super::super::super::ManagedLifecycleAction::Resume,
+                approved: false,
+            })
             .await?;
         Ok(Response::new(proto::ResumeProxyResponse {
-            proxy: Some(proxy_to_proto(proxy)),
-        }))
-    }
-
-    async fn pause_or_resume(
-        &self,
-        request: Request<proto::PauseProxyRequest>,
-        command: super::LifecycleCommand,
-    ) -> Result<Response<proto::PauseProxyResponse>, Status> {
-        let input = request.get_ref();
-        let scope = scope(input.workspace_id.clone(), input.namespace_id.clone());
-        let actor = self.authenticate_scope(&request, &scope)?;
-        let input = request.into_inner();
-        if self.runtime.is_none() {
-            return Err(Status::failed_precondition(
-                "PROXY_RUNTIME_UNAVAILABLE: request rejected safely",
-            ));
-        }
-        let reason = input
-            .reason_code
-            .unwrap_or_else(|| "proxy.pause".to_owned());
-        let proxy = self
-            .lifecycle(
-                scope,
-                actor,
-                input.request_id,
-                ProxyId::new(input.proxy_id).map_err(proxy_status)?,
-                super::ProxyRevisionId::new(input.revision_id).map_err(proxy_status)?,
-                parse_optional_revision(input.expected_revision_id)?,
-                reason,
-                command,
-                false,
-            )
-            .await?;
-        Ok(Response::new(proto::PauseProxyResponse {
-            proxy: Some(proxy_to_proto(proxy)),
+            proxy: Some(accepted.proxy),
+            operation: Some(accepted.operation),
         }))
     }
 
@@ -323,4 +210,16 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
             .map_err(internal_status)?
             .map_err(proxy_status)
     }
+}
+
+fn validated_response() -> Response<proto::ValidateProxyResponse> {
+    Response::new(proto::ValidateProxyResponse {
+        report: Some(proto::ProxyValidationReport {
+            valid: true,
+            error_messages: vec![],
+            warning_messages: vec![],
+            validation_id: "validated".into(),
+            redaction_status: proto::McpProxyRedactionStatus::Redacted as i32,
+        }),
+    })
 }

@@ -27,6 +27,25 @@ struct Installation {
 }
 
 impl Enrollment {
+    pub(super) fn permits_worker(
+        &self,
+        installation: &str,
+        worker: &str,
+        scopes: &[crate::ExactScope],
+    ) -> bool {
+        self.controllers.values().any(|value| value == worker)
+            && self
+                .installations
+                .get(installation)
+                .is_some_and(|installed| {
+                    !installed.revoked
+                        && scopes.iter().all(|scope| {
+                            installed
+                                .scopes
+                                .contains(&(scope.workspace_id.clone(), scope.namespace_id.clone()))
+                        })
+                })
+    }
     pub(super) fn parse_json(input: &[u8]) -> Result<Self, RuntimeAuthorityError> {
         preflight(input)?;
         // The only JSON decoder: retain original decoded-duplicate/entry checks.

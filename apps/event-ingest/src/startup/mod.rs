@@ -3,6 +3,7 @@
 mod auth;
 mod env;
 mod error;
+mod evidence;
 mod secrets;
 mod service;
 

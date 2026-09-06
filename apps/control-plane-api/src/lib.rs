@@ -53,6 +53,16 @@ mod inbox;
 mod keycloak;
 mod outbox;
 mod proxy;
+pub use proxy::{
+    AcceptedManagedLifecycle, LifecycleCommand, ManagedLifecycleAction, ManagedLifecycleInput,
+};
+#[cfg(feature = "postgres")]
+pub use proxy::{
+    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_proxy_governance_server,
+    bounded_managed_runtime_authority_server,
+};
+#[cfg(feature = "postgres")]
+pub use proxy::{RuntimeExecutionConfig, RuntimeExecutionOwner, RuntimeExecutionStatus};
 mod replay;
 mod service;
 mod status;
@@ -119,7 +129,7 @@ pub use proxy::{ProxyEvidenceRelayStatus, spawn_proxy_evidence_relay};
 pub use proxy::{
     RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
     RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
-    bounded_runtime_deployment_service_server,
+    bounded_runtime_deployment_registry_server, bounded_runtime_deployment_service_server,
 };
 pub use proxy::{RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash};
 pub use replay::{

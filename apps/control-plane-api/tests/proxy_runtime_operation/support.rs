@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::recovery::{Database, another_submission};
 #[path = "spec.rs"]
-mod spec;
+pub(super) mod spec;
 
 pub const REFUSED: &str = "PROXY_RUNTIME_OPERATION_NOT_CURRENT";
 pub const INVALID: &str = "INVALID_RUNTIME_OPERATION_CLAIMS";
@@ -36,6 +36,14 @@ impl Fixture {
     }
 
     pub fn desired(leased: bool, desired: proto::ProxyDesiredState) -> Self {
+        Self::with_spec(leased, desired, spec::supported_spec())
+    }
+
+    pub fn with_spec(
+        leased: bool,
+        desired: proto::ProxyDesiredState,
+        spec: apex_control_plane_api::ProxySpec,
+    ) -> Self {
         let database = Database::new();
         let application = format!("runtime_snapshot_{}", Uuid::now_v7().simple());
         let store = PostgresProxyStore::connect(&format!(
@@ -63,7 +71,7 @@ impl Fixture {
                 proxy_id: input.proxy_id.clone(),
                 expected_revision_id: None,
                 actor_id: "operator".into(),
-                spec: spec::supported_spec(),
+                spec,
             })
             .unwrap();
         let revision = store

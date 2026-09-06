@@ -137,6 +137,7 @@ fn observation_preserves_nested_readiness_without_equating_it_to_admission() {
         resource_url: "https://proxy.example.test/mcp".into(),
         stages: vec![],
         readiness: Some(report()),
+        launch_attestation: None,
     };
     let json = round_trip(&observation);
     assert_eq!(json["activeCalls"], LARGE.to_string());

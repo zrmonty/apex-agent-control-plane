@@ -1,4 +1,5 @@
 use super::*;
+mod managed;
 
 impl<R: OperatorCredentialResolver> McpProxyService<R> {
     pub(super) fn require_event_sink(&self) -> Result<Arc<dyn ProxyEventSink>, Status> {
@@ -17,6 +18,8 @@ impl<R: OperatorCredentialResolver> McpProxyService<R> {
 
     pub fn new(auth: OperatorTokenAuthenticator<R>, store: Arc<dyn ProxyStoreBackend>) -> Self {
         Self {
+            #[cfg(feature = "postgres")]
+            managed: None,
             auth: Arc::new(auth),
             store,
             runtime: None,

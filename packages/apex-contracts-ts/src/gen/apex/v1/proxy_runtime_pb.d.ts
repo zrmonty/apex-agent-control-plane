@@ -4,6 +4,7 @@
 
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
+import type { ProxyObservedState } from "./proxy_management_pb.js";
 import type { McpProxySpec } from "./mcp_proxy_pb.js";
 import type { ProxyStageTiming, ProxyTelemetryPolicy } from "./proxy_trace_pb.js";
 import type { ProxyApprovalMode } from "./proxy_approval_pb.js";
@@ -12,6 +13,87 @@ import type { ProxyApprovalMode } from "./proxy_approval_pb.js";
  * Describes the file apex/v1/proxy_runtime.proto.
  */
 export declare const file_apex_v1_proxy_runtime: GenFile;
+
+/**
+ * @generated from message apex.v1.RuntimeReconcileRequest
+ */
+export declare type RuntimeReconcileRequest = Message<"apex.v1.RuntimeReconcileRequest"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.RuntimeTarget target = 2;
+   */
+  target?: RuntimeTarget | undefined;
+
+  /**
+   * @generated from field: string operation_id = 3;
+   */
+  operationId: string;
+
+  /**
+   * @generated from field: string command_id = 4;
+   */
+  commandId: string;
+
+  /**
+   * @generated from field: string config_hash = 5;
+   */
+  configHash: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeReconcileRequest.
+ * Use `create(RuntimeReconcileRequestSchema)` to create a new message.
+ */
+export declare const RuntimeReconcileRequestSchema: GenMessage<RuntimeReconcileRequest>;
+
+/**
+ * Current operation correlation is distinct from immutable installed evidence.
+ * Echoed claims are not a grant. Missing runtime never establishes readiness or
+ * proves retirement cleanup; an effect owner must independently prove that.
+ *
+ * @generated from message apex.v1.RuntimeReconcileResponse
+ */
+export declare type RuntimeReconcileResponse = Message<"apex.v1.RuntimeReconcileResponse"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.RuntimeReconcileRequest claims = 2;
+   */
+  claims?: RuntimeReconcileRequest | undefined;
+
+  /**
+   * @generated from field: apex.v1.ProxyObservedState observed_state = 3;
+   */
+  observedState: ProxyObservedState;
+
+  /**
+   * Installed launch target/fence, including readiness.target, is never rewritten
+   * to the current claims on lease handoff, pause or reconciliation of old state.
+   *
+   * @generated from field: apex.v1.RuntimeObservation runtime = 4;
+   */
+  runtime?: RuntimeObservation | undefined;
+
+  /**
+   * Semantic owners accept bounded static codes only, never raw diagnostics.
+   *
+   * @generated from field: string error_code = 5;
+   */
+  errorCode: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeReconcileResponse.
+ * Use `create(RuntimeReconcileResponseSchema)` to create a new message.
+ */
+export declare const RuntimeReconcileResponseSchema: GenMessage<RuntimeReconcileResponse>;
 
 /**
  * @generated from message apex.v1.RuntimeTarget
@@ -425,6 +507,14 @@ export declare type RuntimeObservation = Message<"apex.v1.RuntimeObservation"> &
    * @generated from field: apex.v1.ReadinessReport readiness = 11;
    */
   readiness?: ReadinessReport | undefined;
+
+  /**
+   * Present only for a new fully sealed proof-bearing launch. No raw credential.
+   * Actual restricted-agent TLS, publication and profile joins remain mandatory.
+   *
+   * @generated from field: apex.v1.RuntimeLaunchAttestation launch_attestation = 12;
+   */
+  launchAttestation?: RuntimeLaunchAttestation | undefined;
 };
 
 /**
@@ -432,6 +522,47 @@ export declare type RuntimeObservation = Message<"apex.v1.RuntimeObservation"> &
  * Use `create(RuntimeObservationSchema)` to create a new message.
  */
 export declare const RuntimeObservationSchema: GenMessage<RuntimeObservation>;
+
+/**
+ * @generated from message apex.v1.RuntimeLaunchAttestation
+ */
+export declare type RuntimeLaunchAttestation = Message<"apex.v1.RuntimeLaunchAttestation"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: string installation_id = 2;
+   */
+  installationId: string;
+
+  /**
+   * @generated from field: apex.v1.RuntimeLaunchContext launch = 3;
+   */
+  launch?: RuntimeLaunchContext | undefined;
+
+  /**
+   * @generated from field: string instance_proof_sha256 = 4;
+   */
+  instanceProofSha256: string;
+
+  /**
+   * @generated from field: string staged_manifest_sha256 = 5;
+   */
+  stagedManifestSha256: string;
+
+  /**
+   * @generated from field: string image_id = 6;
+   */
+  imageId: string;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeLaunchAttestation.
+ * Use `create(RuntimeLaunchAttestationSchema)` to create a new message.
+ */
+export declare const RuntimeLaunchAttestationSchema: GenMessage<RuntimeLaunchAttestation>;
 
 /**
  * @generated from message apex.v1.UpstreamProbeObservation
@@ -927,6 +1058,23 @@ export enum ReadinessReason {
  * Describes the enum apex.v1.ReadinessReason.
  */
 export declare const ReadinessReasonSchema: GenEnum<ReadinessReason>;
+
+/**
+ * Production reconciliation ingress. Claims are correlation, never effect authority.
+ * Actual Controller mTLS and online current deployment resolution are required.
+ *
+ * @generated from service apex.v1.RuntimeExecutionService
+ */
+export declare const RuntimeExecutionService: GenService<{
+  /**
+   * @generated from rpc apex.v1.RuntimeExecutionService.ReconcileRuntime
+   */
+  reconcileRuntime: {
+    methodKind: "unary";
+    input: typeof RuntimeReconcileRequestSchema;
+    output: typeof RuntimeReconcileResponseSchema;
+  },
+}>;
 
 /**
  * Workload mTLS-only host boundary. No arbitrary exec, mount or image pull RPC.

@@ -223,6 +223,8 @@ message DeployProxyRequest {
 
 message DeployProxyResponse {
   McpProxy proxy = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message PauseProxyRequest {
@@ -242,6 +244,8 @@ message PauseProxyRequest {
 
 message PauseProxyResponse {
   McpProxy proxy = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message ResumeProxyRequest {
@@ -260,6 +264,8 @@ message ResumeProxyRequest {
 
 message ResumeProxyResponse {
   McpProxy proxy = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message RotateProxyCredentialsRequest {
@@ -280,6 +286,8 @@ message RotateProxyCredentialsRequest {
 
 message RotateProxyCredentialsResponse {
   McpProxyRevision revision = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message RollbackProxyRequest {
@@ -300,6 +308,8 @@ message RollbackProxyRequest {
 
 message RollbackProxyResponse {
   McpProxy proxy = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message RetireProxyRequest {
@@ -319,6 +329,8 @@ message RetireProxyRequest {
 
 message RetireProxyResponse {
   McpProxy proxy = 1;
+  // Durable acceptance; never proof of runtime readiness or cleanup.
+  ProxyOperation operation = 2;
 }
 
 message ListProxyActivityRequest {

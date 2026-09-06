@@ -14,10 +14,12 @@ use tonic::{
 
 use crate::proto;
 use proto::runtime_authority_service_client::RuntimeAuthorityServiceClient;
+use proto::runtime_deployment_registry_client::RuntimeDeploymentRegistryClient;
 use proto::runtime_deployment_service_client::RuntimeDeploymentServiceClient;
 
 mod configuration;
 mod deployment;
+mod registration;
 mod snapshot;
 pub use deployment::ResolvedDeployment;
 
@@ -50,6 +52,7 @@ pub struct AuthorityOperation<'a> {
 pub struct RuntimeAuthorityClient {
     client: RuntimeAuthorityServiceClient<Channel>,
     deployment_client: RuntimeDeploymentServiceClient<Channel>,
+    registration_client: RuntimeDeploymentRegistryClient<Channel>,
     slots: Semaphore,
     // Transport fields are moved into tonic at connect; only enrollment metadata remains.
     config: AuthorityClientConfig,
@@ -153,6 +156,9 @@ impl RuntimeAuthorityClient {
                 .await
                 .map_err(|_| AuthorityClientError::Transport)?;
             Ok(Self {
+                registration_client: RuntimeDeploymentRegistryClient::new(channel.clone())
+                    .max_encoding_message_size(registration::REQUEST_LIMIT)
+                    .max_decoding_message_size(registration::REPLY_LIMIT),
                 deployment_client: RuntimeDeploymentServiceClient::new(channel.clone())
                     .max_encoding_message_size(MESSAGE_LIMIT)
                     .max_decoding_message_size(deployment::MESSAGE_LIMIT),

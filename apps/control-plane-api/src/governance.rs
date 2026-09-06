@@ -37,6 +37,62 @@ pub struct GovernanceConfig {
 }
 
 impl GovernanceConfig {
+    /// Shared pure policy evaluation. Transport authentication stays separate.
+    pub(crate) fn evaluate(
+        &self,
+        input: proto::GovernanceAuthorizationRequest,
+    ) -> Result<proto::GovernanceAuthorizationDecision, Status> {
+        let request = parse_authorization_request(input)?;
+        let allowed = self.allows(&request);
+        Ok(proto::GovernanceAuthorizationDecision {
+            outcome: if allowed {
+                proto::GovernanceOutcome::Allowed
+            } else {
+                proto::GovernanceOutcome::Denied
+            } as i32,
+            policy_id: self.policy_id.as_str().to_owned(),
+            reason_code: if allowed {
+                ALLOWED_REASON
+            } else {
+                DENIED_REASON
+            }
+            .to_owned(),
+            field_restrictions: if allowed {
+                self.restrictions()
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        scope: proto::GovernanceScope,
+    ) -> Result<proto::GovernancePolicySnapshot, Status> {
+        let scope = GovernanceScope::new(scope.workspace_id, scope.namespace_id)
+            .map_err(|_| invalid_request())?;
+        if !self.allowed_scopes.contains(&scope) {
+            return Err(Status::permission_denied(
+                "GOVERNANCE_SCOPE_DENIED: request rejected safely",
+            ));
+        }
+        Ok(proto::GovernancePolicySnapshot {
+            scope: Some(proto::GovernanceScope {
+                workspace_id: scope.workspace_id().to_owned(),
+                namespace_id: scope.namespace_id().to_owned(),
+            }),
+            policy_id: self.policy_id.as_str().to_owned(),
+            revision: self.revision,
+        })
+    }
+
+    pub(crate) fn restrictions(&self) -> Vec<String> {
+        self.field_restrictions
+            .iter()
+            .map(|field| field.as_str().to_owned())
+            .collect()
+    }
+
     /// Builds the narrow policy from validated portfolio IDs and exact scopes.
     pub fn new<P, S, F, PI, SI, FI>(
         portfolio_ids: P,
@@ -132,29 +188,7 @@ impl proto::governance_gateway_server::GovernanceGateway for GovernanceGatewaySe
         self.auth
             .authenticate(request.metadata())
             .map_err(|error| error.into_status())?;
-        let request = parse_authorization_request(request.into_inner())?;
-        let allowed = self.config.allows(&request);
-        let decision = if allowed {
-            proto::GovernanceAuthorizationDecision {
-                outcome: proto::GovernanceOutcome::Allowed as i32,
-                policy_id: self.config.policy_id.as_str().to_owned(),
-                reason_code: ALLOWED_REASON.to_owned(),
-                field_restrictions: self
-                    .config
-                    .field_restrictions
-                    .iter()
-                    .map(|field| field.as_str().to_owned())
-                    .collect(),
-            }
-        } else {
-            proto::GovernanceAuthorizationDecision {
-                outcome: proto::GovernanceOutcome::Denied as i32,
-                policy_id: self.config.policy_id.as_str().to_owned(),
-                reason_code: DENIED_REASON.to_owned(),
-                field_restrictions: Vec::new(),
-            }
-        };
-        Ok(Response::new(decision))
+        Ok(Response::new(self.config.evaluate(request.into_inner())?))
     }
 
     async fn get_policy(
@@ -165,21 +199,7 @@ impl proto::governance_gateway_server::GovernanceGateway for GovernanceGatewaySe
             .authenticate(request.metadata())
             .map_err(|error| error.into_status())?;
         let scope = request.into_inner().scope.ok_or_else(invalid_request)?;
-        let scope = GovernanceScope::new(scope.workspace_id, scope.namespace_id)
-            .map_err(|_| invalid_request())?;
-        if !self.config.allowed_scopes.contains(&scope) {
-            return Err(Status::permission_denied(
-                "GOVERNANCE_SCOPE_DENIED: request rejected safely",
-            ));
-        }
-        Ok(Response::new(proto::GovernancePolicySnapshot {
-            scope: Some(proto::GovernanceScope {
-                workspace_id: scope.workspace_id().to_owned(),
-                namespace_id: scope.namespace_id().to_owned(),
-            }),
-            policy_id: self.config.policy_id.as_str().to_owned(),
-            revision: self.config.revision,
-        }))
+        Ok(Response::new(self.config.snapshot(scope)?))
     }
 }
 

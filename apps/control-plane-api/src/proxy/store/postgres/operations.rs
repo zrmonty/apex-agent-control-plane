@@ -14,6 +14,42 @@ pub(crate) struct ProxyEvidenceTarget {
 }
 
 impl PostgresProxyStore {
+    pub(crate) fn prepare_runtime_attempt_checked(
+        &self,
+        lease: &LeasedProxyOperation,
+        check: &impl Fn() -> Result<(), ProxyError>,
+    ) -> Result<proto::RuntimeReconcileRequest, ProxyError> {
+        super::attempts::prepare_checked(self, lease, check)
+    }
+    pub(crate) fn is_managed(
+        &self,
+        scope: &ExactScope,
+        proxy_id: &ProxyId,
+    ) -> Result<bool, ProxyError> {
+        let mut client = self.client.try_lock().map_err(|_| configuration_error())?;
+        let row = client.query_opt("SELECT deployment_generation FROM mcp_proxies WHERE workspace_id=$1 AND namespace_id=$2 AND proxy_id=$3",
+            &[&scope.workspace_id,&scope.namespace_id,proxy_id.as_uuid()]).map_err(|_| configuration_error())?
+            .ok_or_else(ProxyError::proxy_not_found)?;
+        Ok(row.get::<_, i64>(0) > 0)
+    }
+    pub fn prepare_runtime_attempt(
+        &self,
+        lease: &LeasedProxyOperation,
+    ) -> Result<proto::RuntimeReconcileRequest, ProxyError> {
+        super::attempts::prepare(self, lease)
+    }
+    pub fn accept_managed_lifecycle(
+        &self,
+        input: &super::super::ManagedLifecycleInput,
+    ) -> Result<super::super::AcceptedManagedLifecycle, ProxyError> {
+        super::managed::accept(self, input)
+    }
+    pub(crate) fn accepted_managed_retry(
+        &self,
+        input: &super::super::ManagedLifecycleInput,
+    ) -> Result<Option<super::super::AcceptedManagedLifecycle>, ProxyError> {
+        super::managed::accepted_retry(self, input)
+    }
     /// Internal controller inventory, never exposed as an unscoped browser API.
     /// Eight keys per page and sixteen intents per key bound worker allocation.
     pub(crate) fn pending_proxy_evidence_targets(

@@ -8,12 +8,27 @@ mod error;
 mod events;
 mod lifecycle;
 #[cfg(feature = "postgres")]
+mod managed_authority;
+#[cfg(feature = "postgres")]
+pub use managed_authority::{
+    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_proxy_governance_server,
+    bounded_managed_runtime_authority_server,
+};
+#[cfg(feature = "postgres")]
 mod operation_worker;
 mod provider;
 mod reconciler;
 #[cfg(feature = "postgres")]
 mod runtime_authority;
+#[cfg(feature = "postgres")]
+mod runtime_client;
 mod runtime_config;
+#[cfg(feature = "postgres")]
+mod runtime_controller;
+#[cfg(feature = "postgres")]
+pub use runtime_client::RuntimeExecutionConfig;
+#[cfg(feature = "postgres")]
+pub use runtime_controller::{RuntimeExecutionOwner, RuntimeExecutionStatus};
 mod service;
 mod store;
 mod validation;
@@ -34,7 +49,7 @@ pub use runtime_authority::RuntimeAuthorityObservations;
 pub use runtime_authority::{
     RuntimeAuthorityError, RuntimeAuthorityOwner, RuntimeAuthorityPolicyFiles,
     RuntimeAuthorityService, RuntimeAuthorityShutdown, bounded_runtime_authority_service_server,
-    bounded_runtime_deployment_service_server,
+    bounded_runtime_deployment_registry_server, bounded_runtime_deployment_service_server,
 };
 pub use runtime_config::{
     RuntimeDeploymentBindings, compile_runtime_config, runtime_manifest_hash,
@@ -47,6 +62,7 @@ pub use service::{
     ProxyLifecycleEvent, ProxyRuntimeProvider, bounded_mcp_proxy_service_server,
 };
 
+pub use store::{AcceptedManagedLifecycle, ManagedLifecycleAction, ManagedLifecycleInput};
 pub use store::{
     CreateProxy, CreateProxyResult, InMemoryProxyStore, ListProxies, ListProxiesPage,
     ListProxyActivity, ListProxyActivityPage, McpProxy, McpProxySummary, ProxyActivity,

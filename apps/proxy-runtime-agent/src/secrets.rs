@@ -25,9 +25,12 @@ mod linux;
 mod roots;
 #[cfg(target_os = "linux")]
 mod validation;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::proof::InstanceProof;
 
 /// Deployment-owned material metadata, resolved only in its exact target scope.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopedMaterial {
     pub workspace_id: String,
     pub namespace_id: String,
@@ -89,6 +92,26 @@ impl fmt::Debug for StagingOwner {
 }
 
 impl StagingOwner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn remove_managed(
+        &self,
+        instance: &str,
+        files: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), StagingError> {
+        self.inner.remove_managed(instance, files)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn managed(
+        &self,
+        launch: &crate::launch::PreparedLaunch,
+        selected: &crate::execution::metadata::Selected,
+        recover: bool,
+        expected: Option<&std::collections::BTreeMap<String, String>>,
+        proof: Option<&InstanceProof>,
+    ) -> Result<std::collections::BTreeMap<String, String>, StagingError> {
+        self.inner
+            .managed(launch, selected, recover, expected, proof)
+    }
     /// Open existing absolute trusted roots without following symlinks.
     ///
     /// # Errors

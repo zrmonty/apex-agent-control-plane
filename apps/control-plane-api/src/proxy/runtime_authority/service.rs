@@ -68,15 +68,24 @@ impl proto::runtime_authority_service_server::RuntimeAuthorityService for Runtim
         &self,
         request: tonic::Request<CheckRuntimeAuthorityRequest>,
     ) -> Result<tonic::Response<RuntimeAuthoritySnapshot>, tonic::Status> {
-        Ok(tonic::Response::new(
-            self.observe(request, false).await?.authority,
-        ))
+        let result = self.observe(request, false).await;
+        if let Err(error) = &result {
+            // All callback errors are locally constructed static redacted codes.
+            eprintln!(
+                "runtime_authority_refused code={:?} reason={}",
+                error.code(),
+                error.message()
+            );
+        }
+        Ok(tonic::Response::new(result?.authority))
     }
 }
 
 pub(super) struct Observation {
     pub authority: RuntimeAuthoritySnapshot,
     pub deployment: Option<(proto::RuntimeConfiguration, String)>,
+    pub lease: crate::LeasedProxyOperation,
+    pub recheck: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl RuntimeAuthorityService {
@@ -140,6 +149,12 @@ impl RuntimeAuthorityService {
         } else {
             None
         };
+        let lease = crate::LeasedProxyOperation {
+            operation: stored.operation.clone(),
+            worker_id: stored.worker_id.clone(),
+            fencing_token: stored.fencing_token,
+            lease_expires_at_micros: stored.lease_expires_at_unix_us,
+        };
         let response = RuntimeAuthoritySnapshot {
             schema_version: 1,
             target: claims.target.clone(),
@@ -180,9 +195,17 @@ impl RuntimeAuthorityService {
         self.shared
             .recheck(&selected)
             .map_err(RuntimeAuthorityError::status)?;
+        let shared = Arc::clone(&self.shared);
+        let recheck = Arc::new(move || {
+            check_elapsed(started, budget).is_ok()
+                && check_elapsed(started, Duration::from_micros(remaining)).is_ok()
+                && shared.recheck(&selected).is_ok()
+        });
         Ok(Observation {
             authority: response,
             deployment,
+            lease,
+            recheck,
         })
     }
 }

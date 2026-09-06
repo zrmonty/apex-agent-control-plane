@@ -5,6 +5,7 @@
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 import type { ProxyApproval } from "./proxy_approval_pb.js";
+import type { RuntimeTarget } from "./proxy_runtime_pb.js";
 
 /**
  * Describes the file apex/v1/governance.proto.
@@ -261,6 +262,11 @@ export declare type ManagedCallAuthorizationRequest = Message<"apex.v1.ManagedCa
    * @generated from field: string approval_id = 13;
    */
   approvalId: string;
+
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 14;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
 };
 
 /**
@@ -297,6 +303,20 @@ export declare type ManagedCallAuthorizationDecision = Message<"apex.v1.ManagedC
    * @generated from field: uint64 policy_revision = 5;
    */
   policyRevision: bigint;
+
+  /**
+   * Start permission only: measured from the client's original local request
+   * start, at most 10,000,000us. Unix expiry is informational, never subtracted
+   * from a different host's clock. Physical capacity requires exact completion.
+   *
+   * @generated from field: uint64 valid_for_us = 6;
+   */
+  validForUs: bigint;
+
+  /**
+   * @generated from field: uint64 epoch = 7;
+   */
+  epoch: bigint;
 };
 
 /**
@@ -304,6 +324,279 @@ export declare type ManagedCallAuthorizationDecision = Message<"apex.v1.ManagedC
  * Use `create(ManagedCallAuthorizationDecisionSchema)` to create a new message.
  */
 export declare const ManagedCallAuthorizationDecisionSchema: GenMessage<ManagedCallAuthorizationDecision>;
+
+/**
+ * @generated from message apex.v1.ManagedDeploymentBinding
+ */
+export declare type ManagedDeploymentBinding = Message<"apex.v1.ManagedDeploymentBinding"> & {
+  /**
+   * @generated from field: string installation_id = 1;
+   */
+  installationId: string;
+
+  /**
+   * @generated from field: apex.v1.RuntimeTarget target = 2;
+   */
+  target?: RuntimeTarget | undefined;
+
+  /**
+   * @generated from field: string process_instance_id = 3;
+   */
+  processInstanceId: string;
+
+  /**
+   * @generated from field: string config_hash = 4;
+   */
+  configHash: string;
+
+  /**
+   * @generated from field: string launch_context_hash = 5;
+   */
+  launchContextHash: string;
+};
+
+/**
+ * Describes the message apex.v1.ManagedDeploymentBinding.
+ * Use `create(ManagedDeploymentBindingSchema)` to create a new message.
+ */
+export declare const ManagedDeploymentBindingSchema: GenMessage<ManagedDeploymentBinding>;
+
+/**
+ * Acknowledges an actually issued decision, not a caller-chosen future epoch.
+ * active_calls counts owned physical work, not merely unresolved promises.
+ *
+ * @generated from message apex.v1.ManagedGrantAcknowledgement
+ */
+export declare type ManagedGrantAcknowledgement = Message<"apex.v1.ManagedGrantAcknowledgement"> & {
+  /**
+   * @generated from field: string decision_id = 1;
+   */
+  decisionId: string;
+
+  /**
+   * @generated from field: uint64 epoch = 2;
+   */
+  epoch: bigint;
+
+  /**
+   * @generated from field: bool admitting = 3;
+   */
+  admitting: boolean;
+
+  /**
+   * @generated from field: uint32 active_calls = 4;
+   */
+  activeCalls: number;
+};
+
+/**
+ * Describes the message apex.v1.ManagedGrantAcknowledgement.
+ * Use `create(ManagedGrantAcknowledgementSchema)` to create a new message.
+ */
+export declare const ManagedGrantAcknowledgementSchema: GenMessage<ManagedGrantAcknowledgement>;
+
+/**
+ * @generated from message apex.v1.ManagedDeploymentRenewal
+ */
+export declare type ManagedDeploymentRenewal = Message<"apex.v1.ManagedDeploymentRenewal"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 2;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * @generated from field: apex.v1.ManagedGrantAcknowledgement applied = 3;
+   */
+  applied?: ManagedGrantAcknowledgement | undefined;
+
+  /**
+   * Increasing for the lifetime of this exact process instance. A durable
+   * server high-water mark rejects replay after bounded decision-history pruning.
+   *
+   * @generated from field: uint64 renewal_sequence = 4;
+   */
+  renewalSequence: bigint;
+};
+
+/**
+ * Describes the message apex.v1.ManagedDeploymentRenewal.
+ * Use `create(ManagedDeploymentRenewalSchema)` to create a new message.
+ */
+export declare const ManagedDeploymentRenewalSchema: GenMessage<ManagedDeploymentRenewal>;
+
+/**
+ * @generated from message apex.v1.ManagedDeploymentGrant
+ */
+export declare type ManagedDeploymentGrant = Message<"apex.v1.ManagedDeploymentGrant"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 2;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * @generated from field: string decision_id = 3;
+   */
+  decisionId: string;
+
+  /**
+   * @generated from field: uint64 epoch = 4;
+   */
+  epoch: bigint;
+
+  /**
+   * @generated from field: apex.v1.ManagedGrantMode mode = 5;
+   */
+  mode: ManagedGrantMode;
+
+  /**
+   * At most 10,000,000us, measured from the client's local request START.
+   * Receipt time and remote Unix clocks never extend this interval.
+   *
+   * @generated from field: uint64 valid_for_us = 6;
+   */
+  validForUs: bigint;
+
+  /**
+   * @generated from field: uint64 renewal_sequence = 7;
+   */
+  renewalSequence: bigint;
+};
+
+/**
+ * Describes the message apex.v1.ManagedDeploymentGrant.
+ * Use `create(ManagedDeploymentGrantSchema)` to create a new message.
+ */
+export declare const ManagedDeploymentGrantSchema: GenMessage<ManagedDeploymentGrant>;
+
+/**
+ * Read-only candidate preflight. It cannot reserve or execute a business call.
+ *
+ * @generated from message apex.v1.ManagedPolicyRequest
+ */
+export declare type ManagedPolicyRequest = Message<"apex.v1.ManagedPolicyRequest"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 2;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message apex.v1.ManagedPolicyRequest.
+ * Use `create(ManagedPolicyRequestSchema)` to create a new message.
+ */
+export declare const ManagedPolicyRequestSchema: GenMessage<ManagedPolicyRequest>;
+
+/**
+ * @generated from message apex.v1.ManagedPolicySnapshot
+ */
+export declare type ManagedPolicySnapshot = Message<"apex.v1.ManagedPolicySnapshot"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 2;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * @generated from field: string policy_id = 3;
+   */
+  policyId: string;
+
+  /**
+   * @generated from field: uint64 revision = 4;
+   */
+  revision: bigint;
+
+  /**
+   * @generated from field: repeated string field_restrictions = 5;
+   */
+  fieldRestrictions: string[];
+};
+
+/**
+ * Describes the message apex.v1.ManagedPolicySnapshot.
+ * Use `create(ManagedPolicySnapshotSchema)` to create a new message.
+ */
+export declare const ManagedPolicySnapshotSchema: GenMessage<ManagedPolicySnapshot>;
+
+/**
+ * Permission expiry ends authority to start, not physical call ownership.
+ * Completion requires the exact registered instance, admission and call after
+ * actual upstream cleanup; repeated completion is idempotent.
+ *
+ * @generated from message apex.v1.ManagedCallCompletion
+ */
+export declare type ManagedCallCompletion = Message<"apex.v1.ManagedCallCompletion"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: string admission_id = 2;
+   */
+  admissionId: string;
+
+  /**
+   * @generated from field: string call_id = 3;
+   */
+  callId: string;
+};
+
+/**
+ * Describes the message apex.v1.ManagedCallCompletion.
+ * Use `create(ManagedCallCompletionSchema)` to create a new message.
+ */
+export declare const ManagedCallCompletionSchema: GenMessage<ManagedCallCompletion>;
+
+/**
+ * @generated from message apex.v1.ManagedCallCompletionReceipt
+ */
+export declare type ManagedCallCompletionReceipt = Message<"apex.v1.ManagedCallCompletionReceipt"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: string admission_id = 2;
+   */
+  admissionId: string;
+
+  /**
+   * @generated from field: string call_id = 3;
+   */
+  callId: string;
+
+  /**
+   * @generated from field: bool released = 4;
+   */
+  released: boolean;
+};
+
+/**
+ * Describes the message apex.v1.ManagedCallCompletionReceipt.
+ * Use `create(ManagedCallCompletionReceiptSchema)` to create a new message.
+ */
+export declare const ManagedCallCompletionReceiptSchema: GenMessage<ManagedCallCompletionReceipt>;
 
 /**
  * @generated from enum apex.v1.GovernanceOutcome
@@ -334,6 +627,36 @@ export enum GovernanceOutcome {
  * Describes the enum apex.v1.GovernanceOutcome.
  */
 export declare const GovernanceOutcomeSchema: GenEnum<GovernanceOutcome>;
+
+/**
+ * @generated from enum apex.v1.ManagedGrantMode
+ */
+export enum ManagedGrantMode {
+  /**
+   * @generated from enum value: MANAGED_GRANT_MODE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: MANAGED_GRANT_MODE_PREPARE = 1;
+   */
+  PREPARE = 1,
+
+  /**
+   * @generated from enum value: MANAGED_GRANT_MODE_SERVE = 2;
+   */
+  SERVE = 2,
+
+  /**
+   * @generated from enum value: MANAGED_GRANT_MODE_CLOSED = 3;
+   */
+  CLOSED = 3,
+}
+
+/**
+ * Describes the enum apex.v1.ManagedGrantMode.
+ */
+export declare const ManagedGrantModeSchema: GenEnum<ManagedGrantMode>;
 
 /**
  * Narrow, service-to-service governance boundary used by the thin MCP
@@ -375,5 +698,39 @@ export declare const ManagedProxyGovernance: GenService<{
     methodKind: "unary";
     input: typeof ManagedCallAuthorizationRequestSchema;
     output: typeof ManagedCallAuthorizationDecisionSchema;
+  },
+}>;
+
+/**
+ * Workload authority, never exposed through operator/browser RPCs. The original
+ * TLS leaf, protected credential profile and separate binary instance proof are
+ * required in addition to this body binding. Claims alone grant nothing.
+ *
+ * @generated from service apex.v1.ManagedRuntimeAuthority
+ */
+export declare const ManagedRuntimeAuthority: GenService<{
+  /**
+   * @generated from rpc apex.v1.ManagedRuntimeAuthority.RenewDeployment
+   */
+  renewDeployment: {
+    methodKind: "unary";
+    input: typeof ManagedDeploymentRenewalSchema;
+    output: typeof ManagedDeploymentGrantSchema;
+  },
+  /**
+   * @generated from rpc apex.v1.ManagedRuntimeAuthority.GetManagedPolicy
+   */
+  getManagedPolicy: {
+    methodKind: "unary";
+    input: typeof ManagedPolicyRequestSchema;
+    output: typeof ManagedPolicySnapshotSchema;
+  },
+  /**
+   * @generated from rpc apex.v1.ManagedRuntimeAuthority.CompleteManagedCall
+   */
+  completeManagedCall: {
+    methodKind: "unary";
+    input: typeof ManagedCallCompletionSchema;
+    output: typeof ManagedCallCompletionReceiptSchema;
   },
 }>;

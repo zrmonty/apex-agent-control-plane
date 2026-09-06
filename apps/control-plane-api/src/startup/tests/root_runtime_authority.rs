@@ -20,6 +20,7 @@ mod recovery;
 use super::root_browser::support;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Case {
     Live,
     Disabled,
@@ -27,6 +28,10 @@ enum Case {
     Missing,
     Occupied,
     Immediate,
+    Managed,
+    ManagedMissing,
+    ManagedOccupied,
+    Registration,
 }
 
 macro_rules! cases {
@@ -45,4 +50,12 @@ cases! {
     (missing_initial_metadata_refuses_before_listener_start, Missing),
     (occupied_listener_retains_and_cleans_authority_workers, Occupied),
     (immediate_shutdown_cleans_workers_before_any_callback, Immediate),
+}
+
+#[cfg(target_os = "linux")]
+cases! {
+    (managed_root_registers_workload_routes_and_joins_workers, Managed),
+    (managed_root_missing_profile_refuses_before_listener, ManagedMissing),
+    (managed_root_occupied_listener_joins_workers, ManagedOccupied),
+    (registration_root_requires_both_configured_owners_and_catalog, Registration),
 }

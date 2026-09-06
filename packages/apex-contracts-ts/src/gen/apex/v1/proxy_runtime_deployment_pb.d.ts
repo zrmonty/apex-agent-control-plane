@@ -4,14 +4,70 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
-import type { CheckRuntimeAuthorityRequestSchema, RuntimeAuthoritySnapshot } from "./proxy_runtime_authority_pb.js";
-import type { RuntimeAuthentication, RuntimeConfiguration, RuntimeNetworkGrant, RuntimeToolSchema } from "./proxy_runtime_pb.js";
+import type { CheckRuntimeAuthorityRequest, CheckRuntimeAuthorityRequestSchema, RuntimeAuthoritySnapshot } from "./proxy_runtime_authority_pb.js";
+import type { RuntimeAuthentication, RuntimeConfiguration, RuntimeLaunchAttestation, RuntimeNetworkGrant, RuntimeToolSchema } from "./proxy_runtime_pb.js";
+import type { ManagedDeploymentBinding } from "./governance_pb.js";
 import type { ProxyTelemetryPolicy } from "./proxy_trace_pb.js";
 
 /**
  * Describes the file apex/v1/proxy_runtime_deployment.proto.
  */
 export declare const file_apex_v1_proxy_runtime_deployment: GenFile;
+
+/**
+ * @generated from message apex.v1.RegisterRuntimeDeploymentRequest
+ */
+export declare type RegisterRuntimeDeploymentRequest = Message<"apex.v1.RegisterRuntimeDeploymentRequest"> & {
+  /**
+   * @generated from field: apex.v1.CheckRuntimeAuthorityRequest authority = 1;
+   */
+  authority?: CheckRuntimeAuthorityRequest | undefined;
+
+  /**
+   * Original immutable launch, even when the current controller fence is newer.
+   * Contains only proof/material digests and references, never raw secrets.
+   *
+   * @generated from field: apex.v1.RuntimeLaunchAttestation attestation = 2;
+   */
+  attestation?: RuntimeLaunchAttestation | undefined;
+};
+
+/**
+ * Describes the message apex.v1.RegisterRuntimeDeploymentRequest.
+ * Use `create(RegisterRuntimeDeploymentRequestSchema)` to create a new message.
+ */
+export declare const RegisterRuntimeDeploymentRequestSchema: GenMessage<RegisterRuntimeDeploymentRequest>;
+
+/**
+ * Durable identity receipt, NOT a grant, readiness, routing or execution permit.
+ *
+ * @generated from message apex.v1.RuntimeDeploymentRegistrationReceipt
+ */
+export declare type RuntimeDeploymentRegistrationReceipt = Message<"apex.v1.RuntimeDeploymentRegistrationReceipt"> & {
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 1;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: string attestation_sha256 = 2;
+   */
+  attestationSha256: string;
+
+  /**
+   * Fresh callback observation, not the stored first-registration provenance.
+   * Lets the agent recheck enrolled versions and the original local lease span.
+   *
+   * @generated from field: apex.v1.RuntimeAuthoritySnapshot authority = 3;
+   */
+  authority?: RuntimeAuthoritySnapshot | undefined;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeDeploymentRegistrationReceipt.
+ * Use `create(RuntimeDeploymentRegistrationReceiptSchema)` to create a new message.
+ */
+export declare const RuntimeDeploymentRegistrationReceiptSchema: GenMessage<RuntimeDeploymentRegistrationReceipt>;
 
 /**
  * Point-in-time authoritative data, NOT permission for container effects.
@@ -206,5 +262,22 @@ export declare const RuntimeDeploymentService: GenService<{
     methodKind: "unary";
     input: typeof CheckRuntimeAuthorityRequestSchema;
     output: typeof RuntimeDeploymentSnapshotSchema;
+  },
+}>;
+
+/**
+ * Agent-only mTLS callback after sealed staging. Current operation authentication
+ * and protected launch enrollment are required; no workload token fallback.
+ *
+ * @generated from service apex.v1.RuntimeDeploymentRegistry
+ */
+export declare const RuntimeDeploymentRegistry: GenService<{
+  /**
+   * @generated from rpc apex.v1.RuntimeDeploymentRegistry.RegisterDeployment
+   */
+  registerDeployment: {
+    methodKind: "unary";
+    input: typeof RegisterRuntimeDeploymentRequestSchema;
+    output: typeof RuntimeDeploymentRegistrationReceiptSchema;
   },
 }>;

@@ -3,6 +3,7 @@ syntax = "proto3";
 package apex.v1;
 
 import "apex/v1/proxy_approval.proto";
+import "apex/v1/proxy_runtime.proto";
 
 // Narrow, service-to-service governance boundary used by the thin MCP
 // gateway. This is not an operator command surface: it has its own mTLS
@@ -81,6 +82,7 @@ message ManagedCallAuthorizationRequest {
   string arguments_hash = 11;
   GovernanceTrace trace = 12;
   string approval_id = 13;
+  ManagedDeploymentBinding binding = 14;
 }
 message ManagedCallAuthorizationDecision {
   GovernanceAuthorizationDecision decision = 1;
@@ -88,4 +90,89 @@ message ManagedCallAuthorizationDecision {
   string admission_id = 3;
   uint64 expires_at_unix_us = 4;
   uint64 policy_revision = 5;
+  // Start permission only: measured from the client's original local request
+  // start, at most 10,000,000us. Unix expiry is informational, never subtracted
+  // from a different host's clock. Physical capacity requires exact completion.
+  uint64 valid_for_us = 6;
+  uint64 epoch = 7;
+}
+
+// Workload authority, never exposed through operator/browser RPCs. The original
+// TLS leaf, protected credential profile and separate binary instance proof are
+// required in addition to this body binding. Claims alone grant nothing.
+service ManagedRuntimeAuthority {
+  rpc RenewDeployment(ManagedDeploymentRenewal) returns (ManagedDeploymentGrant);
+  rpc GetManagedPolicy(ManagedPolicyRequest) returns (ManagedPolicySnapshot);
+  rpc CompleteManagedCall(ManagedCallCompletion) returns (ManagedCallCompletionReceipt);
+}
+
+message ManagedDeploymentBinding {
+  string installation_id = 1;
+  RuntimeTarget target = 2;
+  string process_instance_id = 3;
+  string config_hash = 4;
+  string launch_context_hash = 5;
+}
+
+enum ManagedGrantMode {
+  MANAGED_GRANT_MODE_UNSPECIFIED = 0;
+  MANAGED_GRANT_MODE_PREPARE = 1;
+  MANAGED_GRANT_MODE_SERVE = 2;
+  MANAGED_GRANT_MODE_CLOSED = 3;
+}
+
+// Acknowledges an actually issued decision, not a caller-chosen future epoch.
+// active_calls counts owned physical work, not merely unresolved promises.
+message ManagedGrantAcknowledgement {
+  string decision_id = 1;
+  uint64 epoch = 2;
+  bool admitting = 3;
+  uint32 active_calls = 4;
+}
+message ManagedDeploymentRenewal {
+  ManagedDeploymentBinding binding = 1;
+  bytes nonce = 2;
+  ManagedGrantAcknowledgement applied = 3;
+  // Increasing for the lifetime of this exact process instance. A durable
+  // server high-water mark rejects replay after bounded decision-history pruning.
+  uint64 renewal_sequence = 4;
+}
+message ManagedDeploymentGrant {
+  ManagedDeploymentBinding binding = 1;
+  bytes nonce = 2;
+  string decision_id = 3;
+  uint64 epoch = 4;
+  ManagedGrantMode mode = 5;
+  // At most 10,000,000us, measured from the client's local request START.
+  // Receipt time and remote Unix clocks never extend this interval.
+  uint64 valid_for_us = 6;
+  uint64 renewal_sequence = 7;
+}
+
+// Read-only candidate preflight. It cannot reserve or execute a business call.
+message ManagedPolicyRequest {
+  ManagedDeploymentBinding binding = 1;
+  bytes nonce = 2;
+}
+message ManagedPolicySnapshot {
+  ManagedDeploymentBinding binding = 1;
+  bytes nonce = 2;
+  string policy_id = 3;
+  uint64 revision = 4;
+  repeated string field_restrictions = 5;
+}
+
+// Permission expiry ends authority to start, not physical call ownership.
+// Completion requires the exact registered instance, admission and call after
+// actual upstream cleanup; repeated completion is idempotent.
+message ManagedCallCompletion {
+  ManagedDeploymentBinding binding = 1;
+  string admission_id = 2;
+  string call_id = 3;
+}
+message ManagedCallCompletionReceipt {
+  ManagedDeploymentBinding binding = 1;
+  string admission_id = 2;
+  string call_id = 3;
+  bool released = 4;
 }

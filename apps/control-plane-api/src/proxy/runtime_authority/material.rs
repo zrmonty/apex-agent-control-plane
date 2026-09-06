@@ -10,7 +10,7 @@ use super::RuntimeAuthorityError;
 // That source also defines read_credential_table, unused by this metadata loader.
 #[allow(dead_code)]
 #[path = "../../startup/secrets.rs"]
-mod startup_secrets;
+pub(in crate::proxy) mod startup_secrets;
 
 pub(super) fn read_document(base: &Path, path: &Path) -> Result<Vec<u8>, RuntimeAuthorityError> {
     read_document_with_limit(base, path, 65_536)

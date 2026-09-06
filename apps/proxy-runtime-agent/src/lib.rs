@@ -2,20 +2,30 @@
 //!
 //! The mTLS authority client returns a point-in-time snapshot, not an execution
 //! permit. Linux signature verification and confined secret staging are separate
-//! synchronous boundaries. There is no production listener, engine call or
-//! admission here. Online resolution binds RuntimeConfiguration to publication;
-//! launch-context/material binding and owned effect composition must still be
-//! settled before any future Ensure side effect.
+//! synchronous boundaries. The Linux production reconciliation listener binds
+//! actual Controller TLS to online deployment resolution and protected launch
+//! preparation. Configured execution owns durable dormant provisioning only;
+//! authentication, preparation and container creation never establish readiness.
 
 pub mod authority;
 #[cfg(target_os = "linux")]
 mod command;
+#[cfg(any(target_os = "linux", test))]
+mod config;
 mod error;
+#[cfg(any(target_os = "linux", test))]
+mod execution;
 pub mod image_catalog;
 mod inspect;
 mod inspect_decode;
+pub mod launch;
 mod manifest;
+pub mod network_catalog;
+#[cfg(any(target_os = "linux", test))]
+mod owner;
 pub mod secrets;
+#[cfg(any(target_os = "linux", test))]
+pub mod service;
 mod shapes;
 pub mod signature;
 mod target;

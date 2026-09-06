@@ -3,21 +3,23 @@
   "files": {
     "apex/v1/control_pb.d.ts": "368c2a4237484918baffe3c0f588fa467a07c2d4e13e0b97d789d6fad870b779",
     "apex/v1/control_pb.js": "339cc94bc85c5bdc1477f2305928e89e51653678d9024d457a90744a86a5c543",
-    "apex/v1/governance_pb.d.ts": "c6e0331728de44f2b2b334bded70d10c9813d87b335edadbc896f6f15f411a6c",
-    "apex/v1/governance_pb.js": "cc8a13bd10ed5292ada3fff2bc556b3279e3ffa9beb87523dd07e4e15b566d3a",
-    "apex/v1/mcp_proxy_pb.d.ts": "359c9c8736dd2a5c278d1526ea51fe310b5795a1cb925447bcb2db2f6945ed28",
-    "apex/v1/mcp_proxy_pb.js": "c61b4de8f9379e6701cd114d8170089d3da77bd027465b62d2f033d053fdd03b",
+    "apex/v1/governance_pb.d.ts": "6659702e8ce0a6611b22f10658acec2b15a6a8ffbb34b90b147ebd355f73d99c",
+    "apex/v1/governance_pb.js": "3ec4cb9e1c80e63736e442a20c0b1788eb2d2e6c5a0f7c4c85a63b7b2df1159d",
+    "apex/v1/mcp_proxy_pb.d.ts": "9aa851aadbdb7ed93496cc7a24e2e6a9ed5d0bebe8b7b2e064c83ae9b642227c",
+    "apex/v1/mcp_proxy_pb.js": "5095f2b8e937dc3437a8aa97cd53b8ab43040f39b45d0a446cf38cbde3d952c7",
     "apex/v1/proxy_approval_pb.d.ts": "3380f4073df57d3eb2759a28896b9b9ad63b9423cfd36b8f9ecfe66c8b4a1014",
     "apex/v1/proxy_approval_pb.js": "36c774bd7261617302b90a5436f5e3ce422267e7ae63fc5f21197dc7c6f779fb",
     "apex/v1/proxy_management_pb.d.ts": "e6a7a40bc5ec7c2ba570bba89e0323cd437a7099def3199298724973f78c39a9",
     "apex/v1/proxy_management_pb.js": "f7ac8c4d6f6b04825d3dbd413c69d6f929451ef8fd9a94f3d52570b49c6538a4",
     "apex/v1/proxy_runtime_authority_pb.d.ts": "891cd668898301d78b1564682f8a6b1d3b8c324faa3485f4fcfed46752a1aef8",
     "apex/v1/proxy_runtime_authority_pb.js": "5d42358aefebe9759890a96217400083fe1dda221ca971d34a8611158d8eb37e",
-    "apex/v1/proxy_runtime_deployment_pb.d.ts": "e050021571a00e673313d0556c417af058b880e9a6c25c496ac4d8377f3e66c0",
-    "apex/v1/proxy_runtime_deployment_pb.js": "39d241033376c7ef75a4d2194eba94329a99e80c94a263488da46a4dc742c45d",
-    "apex/v1/proxy_runtime_pb.d.ts": "6a5c514b8453e86185d2c78bcebb0eef4bea346900958e3ed94951e9b9153991",
-    "apex/v1/proxy_runtime_pb.js": "774e1c3c93c38bc9a6b61ed8ae6957d0e6439bede10edf966fb01d48e17f3cd0",
+    "apex/v1/proxy_runtime_deployment_pb.d.ts": "1e558ee063d6793cf4f20c324ae03212301de5bd72ff72d2b5ab8eff1ee0caa9",
+    "apex/v1/proxy_runtime_deployment_pb.js": "d94c911c1c9a10df524f3c5bcd05666cb4b9b4681715b8b3e7f230eb7bbf7aae",
+    "apex/v1/proxy_runtime_pb.d.ts": "7823eceba308414bccc7bdd0b85484426223b7ec6379f6ba12879cd9dff03399",
+    "apex/v1/proxy_runtime_pb.js": "56934b17091d9b27ea89ce23a66f67bef583a590aa0e5061312f9cc977bca8fc",
     "apex/v1/proxy_trace_pb.d.ts": "b8aad6d8e7165bde46194a6c1fb947004509da7cb4e2168cb1c1141fc34782a7",
-    "apex/v1/proxy_trace_pb.js": "45fb5c4b0f75cdd93dbb9abeda1de430a4e1ffdba1371f8dd83d0a430198cd6c"
+    "apex/v1/proxy_trace_pb.js": "45fb5c4b0f75cdd93dbb9abeda1de430a4e1ffdba1371f8dd83d0a430198cd6c",
+    "event/apex/v1/event_pb.d.ts": "02f4c7759e10b7fc1295c177e18b4e1f1960ad4272df2368142bbbba7cc8261d",
+    "event/apex/v1/event_pb.js": "bcc3d1be90d9ea02d61cb7e4e5a4db8189f16e3b0b7edbc9e8b7e5c226f8b4f4"
   }
 }

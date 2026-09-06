@@ -5,11 +5,13 @@ use super::{
 use crate::ExactScope;
 
 mod canonical;
+mod managed;
 mod memory;
 #[cfg(feature = "postgres")]
 mod operations;
 mod publish_capabilities;
 mod shared;
+pub use managed::{AcceptedManagedLifecycle, ManagedLifecycleAction, ManagedLifecycleInput};
 mod transitions;
 #[cfg(feature = "postgres")]
 pub use operations::{LeasedProxyOperation, SubmitProxyOperation};
@@ -19,7 +21,18 @@ mod postgres;
 
 pub use memory::InMemoryProxyStore;
 #[cfg(feature = "postgres")]
+pub(crate) use postgres::admissions::ManagedCallReservation;
+#[cfg(all(feature = "postgres", test, target_os = "linux"))]
+pub(crate) use postgres::serving::CandidateReadiness;
+#[cfg(feature = "postgres")]
+pub(crate) use postgres::serving::DeploymentRegistration;
+#[cfg(feature = "postgres")]
 pub use postgres::{PostgresProxyStore, RuntimeOperationSnapshot};
+
+#[cfg(feature = "postgres")]
+pub(crate) fn published_config_hash(spec: &ProxySpec) -> String {
+    shared::hash_hex(shared::spec_json(spec).as_bytes())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpProxy {

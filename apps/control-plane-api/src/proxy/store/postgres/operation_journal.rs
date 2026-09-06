@@ -280,6 +280,7 @@ pub(super) fn observe_operation(
         {
             return Err(ProxyError::idempotency_conflict());
         }
+        recheck_observation_lease(&mut tx, target, lease)?;
         tx.commit().map_err(db_error)?;
         return Ok(original);
     }
@@ -315,7 +316,9 @@ pub(super) fn observe_operation(
     }
     let changed = tx
         .execute(
-            "UPDATE mcp_proxies SET observed_status = $4 WHERE workspace_id = $1
+            "UPDATE mcp_proxies SET observed_status = $4, lifecycle_state = CASE
+                WHEN $6=3 THEN 'ready' WHEN $6=4 THEN 'paused' WHEN $6=5 THEN 'retired'
+                WHEN desired_state='retired' THEN 'retiring' ELSE 'provisioning' END WHERE workspace_id = $1
         AND namespace_id = $2 AND proxy_id = $3 AND deployment_generation = $5",
             &[
                 &target.scope.workspace_id,
@@ -323,6 +326,7 @@ pub(super) fn observe_operation(
                 target.proxy_id.as_uuid(),
                 &state.as_str_name(),
                 &generation,
+                &(state as i32),
             ],
         )
         .map_err(db_error)?;
@@ -330,8 +334,28 @@ pub(super) fn observe_operation(
         return Err(stale_fence());
     }
     insert_intent(&mut tx, target, &result, &intent)?;
+    recheck_observation_lease(&mut tx, target, lease)?;
     tx.commit().map_err(db_error)?;
     Ok(result)
+}
+
+fn recheck_observation_lease(
+    tx: &mut Transaction<'_>,
+    target: Target<'_>,
+    lease: &LeasedOperation,
+) -> Result<(), ProxyError> {
+    let now = database_now(tx)?;
+    exact_live_lease_expiry(
+        tx,
+        target,
+        &request_uuid(&lease.operation.operation_id)?,
+        sql_u64(lease.operation.generation)?,
+        &lease.worker_id,
+        sql_u64(lease.fencing_token)?,
+        now,
+    )?
+    .ok_or_else(stale_fence)?;
+    Ok(())
 }
 
 /// Read bounded relay batches; unmarked retries retain original bytes and hash.

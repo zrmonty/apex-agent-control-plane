@@ -1,11 +1,16 @@
+pub(crate) mod admissions;
 mod connection;
 use apex_durability::PostgresClientOps;
+mod attempts;
+mod execution;
 mod idempotency;
 mod lifecycle;
+mod managed;
 mod operation_journal;
 mod operations;
 mod rows;
 mod runtime_operation;
+pub(crate) mod serving;
 mod transitions;
 
 pub use runtime_operation::RuntimeOperationSnapshot;
@@ -74,6 +79,30 @@ impl PostgresProxyStore {
             &mut client,
             PROXY_SCHEMA_LOCK,
             include_str!("../../../../../deploy/postgres/mcp_proxy_operations.sql"),
+        )
+        .map_err(|_| configuration_error())?;
+        apex_durability::apply_postgres_schema(
+            &mut client,
+            PROXY_SCHEMA_LOCK,
+            include_str!("../../../../../deploy/postgres/mcp_proxy_managed.sql"),
+        )
+        .map_err(|_| configuration_error())?;
+        apex_durability::apply_postgres_schema(
+            &mut client,
+            PROXY_SCHEMA_LOCK,
+            include_str!("../../../../../deploy/postgres/mcp_proxy_serving.sql"),
+        )
+        .map_err(|_| configuration_error())?;
+        apex_durability::apply_postgres_schema(
+            &mut client,
+            PROXY_SCHEMA_LOCK,
+            include_str!("../../../../../deploy/postgres/mcp_proxy_admissions.sql"),
+        )
+        .map_err(|_| configuration_error())?;
+        apex_durability::apply_postgres_schema(
+            &mut client,
+            PROXY_SCHEMA_LOCK,
+            include_str!("../../../../../deploy/postgres/mcp_proxy_attestations.sql"),
         )
         .map_err(|_| configuration_error())?;
         Ok(Self {
@@ -357,7 +386,7 @@ impl ProxyStore for PostgresProxyStore {
         )
         .map_err(|_| configuration_error())?;
         tx.execute(
-            "UPDATE mcp_proxies SET active_revision_id = $1 WHERE proxy_id = $2",
+            "UPDATE mcp_proxies SET active_revision_id = $1 WHERE proxy_id = $2 AND deployment_generation = 0",
             &[revision_id.as_uuid(), input.proxy_id.as_uuid()],
         )
         .map_err(|_| configuration_error())?;
@@ -506,6 +535,7 @@ impl ProxyRevisionStore for PostgresProxyStore {
             return Err(ProxyError::revision_conflict());
         }
         let prior_state = proxy.lifecycle_state;
+        lifecycle::refuse_managed(&mut tx, &input.proxy_id)?;
         tx.execute(
             "UPDATE mcp_proxies
              SET lifecycle_state = 'retired', desired_state = 'retired', retired_at_micros = $2

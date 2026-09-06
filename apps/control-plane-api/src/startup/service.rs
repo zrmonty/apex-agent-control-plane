@@ -24,6 +24,10 @@ use super::fanout::prepare_control_fanout;
 mod authority;
 #[cfg(feature = "postgres")]
 mod browser;
+#[cfg(feature = "postgres")]
+mod execution;
+#[cfg(feature = "postgres")]
+mod managed;
 mod proxy;
 mod resolvers;
 mod storage;
@@ -61,6 +65,10 @@ pub(crate) fn run_until(
     signal: impl std::future::Future<Output = ()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority_settings = super::env::runtime_authority_env()?;
+    #[cfg(not(feature = "postgres"))]
+    if std::env::var_os("APEX_CONTROL_MANAGED_AUTHORITY_FILE").is_some() {
+        return Err(io::Error::other("managed authority requires PostgreSQL").into());
+    }
     let browser_settings = super::env::browser_env()?;
     #[cfg(not(feature = "postgres"))]
     debug_assert!(browser_settings.is_none() && authority_settings.is_none());
@@ -75,6 +83,12 @@ pub(crate) fn run_until(
     let tls = load_server_tls(&trusted_base)?;
     #[cfg(feature = "postgres")]
     let mut authority = authority::prepare(authority_settings, &trusted_base)?;
+    #[cfg(feature = "postgres")]
+    let mut execution = execution::prepare(&trusted_base, authority.is_some())?;
+    #[cfg(not(feature = "postgres"))]
+    if std::env::var_os("APEX_CONTROL_RUNTIME_EXECUTION_CONFIG_FILE").is_some() {
+        return Err(io::Error::other("runtime execution requires PostgreSQL").into());
+    }
     let outbox = Arc::new(open_outbox()?);
     let inbox = Arc::new(open_inbox()?);
     let proxy_store = open_proxy_store()?;
@@ -91,7 +105,10 @@ pub(crate) fn run_until(
     #[cfg(feature = "postgres")]
     let browser_resolver = Arc::clone(&resolver.0);
     let agent_resolver = build_agent_resolver(&trusted_base)?;
-    let governance_service = build_governance_service(&trusted_base)?;
+    let governance_config = resolvers::build_governance_config()?;
+    let governance_service = build_governance_service(&trusted_base, governance_config.clone())?;
+    #[cfg(feature = "postgres")]
+    let mut managed = managed::prepare(&trusted_base, governance_config)?;
     let auth = OperatorTokenAuthenticator::new(resolver.clone());
     let proxy_events = Arc::new(apex_control_plane_api::DurableProxyEventSink::new(
         Arc::clone(&outbox),
@@ -102,6 +119,10 @@ pub(crate) fn run_until(
         proxy_store.backend,
     )
     .with_event_sink(proxy_events);
+    #[cfg(feature = "postgres")]
+    if let Some(store) = &proxy_store.operations {
+        proxy_service = proxy_service.with_managed_store(Arc::clone(store));
+    }
     let proxy_is_serving = runtime_provider.is_some();
     if let Some(runtime_provider) = runtime_provider {
         proxy_service = proxy_service.with_runtime_provider(runtime_provider);
@@ -171,10 +192,34 @@ pub(crate) fn run_until(
     let authority_service = authority.as_mut().map(|owner| owner.start()).transpose();
     #[cfg(feature = "postgres")]
     let authority_stop = authority.as_ref();
+    #[cfg(feature = "postgres")]
+    let managed_service = managed.as_mut().map(|owner| owner.start()).transpose();
+    #[cfg(feature = "postgres")]
+    let managed_stop = managed.as_ref();
+    #[cfg(feature = "postgres")]
+    let execution_started = execution
+        .as_mut()
+        .map(|owner| {
+            authority
+                .as_ref()
+                .ok_or_else(|| io::Error::other("runtime authority required"))?
+                .validate_execution_owner(owner)?;
+            owner.start()?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .transpose();
+    #[cfg(feature = "postgres")]
+    let execution_status = execution.as_ref().map(|owner| owner.status());
+    #[cfg(feature = "postgres")]
+    let execution_stop = execution_status.clone();
     let stop = supervisor::StopOnDrop(shutdown.clone());
     let outcome = runtime.block_on(async move {
         #[cfg(feature = "postgres")]
         let authority_service = authority_service?;
+        #[cfg(feature = "postgres")]
+        let managed_service = managed_service?;
+        #[cfg(feature = "postgres")]
+        execution_started?;
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_service_status(
@@ -227,8 +272,16 @@ pub(crate) fn run_until(
             .filter(|service| service.deployment_resolution_enabled()).cloned()
             .map(apex_control_plane_api::bounded_runtime_deployment_service_server));
         #[cfg(feature = "postgres")]
+        let server = server.add_optional_service(authority_service.as_ref()
+            .filter(|service| service.deployment_resolution_enabled())
+            .zip(managed_service.as_ref())
+            .map(|(authority, managed)| apex_control_plane_api::bounded_runtime_deployment_registry_server(authority.clone(), managed.clone())));
+        #[cfg(feature = "postgres")]
         let server = server.add_optional_service(authority_service.map(
             apex_control_plane_api::bounded_runtime_authority_service_server));
+        #[cfg(feature = "postgres")]
+        let server = server.add_optional_service(managed_service.clone().map(apex_control_plane_api::bounded_managed_runtime_authority_server))
+            .add_optional_service(managed_service.map(apex_control_plane_api::bounded_managed_proxy_governance_server));
         #[cfg(feature = "postgres")]
         let browser_listener = match browser.as_ref() {
             Some(browser) => Some(tokio::net::TcpListener::bind(browser.bind_addr).await?),
@@ -288,6 +341,23 @@ pub(crate) fn run_until(
                 .map_err(|_| io::Error::other("control mTLS listener failed"))
         });
         #[cfg(feature = "postgres")]
+        let execution_health = execution_status.map(|status| {
+            // Callback accept task already spawned. Background connections are
+            // concurrent with it, never startup self-connect on a blocked root.
+            status.activate();
+            let reporter=health_reporter.clone();
+            let shutdown=shutdown.clone();
+            tokio::spawn(async move {
+                while !shutdown.is_requested() {
+                    reporter.set_service_status("apex.v1.McpProxyService.RuntimeExecution",
+                        if status.healthy(){tonic_health::ServingStatus::Serving}else{tonic_health::ServingStatus::NotServing}).await;
+                    tokio::select! { _=shutdown.wait()=>break,_=tokio::time::sleep(std::time::Duration::from_secs(1))=>{} }
+                }
+                status.request_shutdown();
+                reporter.set_service_status("apex.v1.McpProxyService.RuntimeExecution",tonic_health::ServingStatus::NotServing).await;
+            })
+        });
+        #[cfg(feature = "postgres")]
         if let (Some(browser), Some(listener)) = (browser, browser_listener) {
             // The already-bound gRPC accept loop is polled concurrently with
             // this task's bounded mTLS connection; no self-connect deadlock.
@@ -297,6 +367,10 @@ pub(crate) fn run_until(
         shutdown.request();
         #[cfg(feature = "postgres")]
         if let Some(owner) = authority_stop { owner.request_shutdown(); }
+        #[cfg(feature = "postgres")]
+        if let Some(owner) = managed_stop { owner.request_shutdown(); }
+        #[cfg(feature = "postgres")]
+        if let Some(status) = execution_stop { status.request_shutdown(); }
         health_reporter.set_service_status("apex.v1.ControlGateway", tonic_health::ServingStatus::NotServing).await;
         health_reporter.set_service_status("apex.v1.McpProxyService", tonic_health::ServingStatus::NotServing).await;
         let drain_result = supervisor::drain(&mut servers).await;
@@ -304,6 +378,8 @@ pub(crate) fn run_until(
             .shutdowns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut worker_failed = false;
+        #[cfg(feature = "postgres")]
+        if let Some(handle) = execution_health {worker_failed |= handle.await.is_err();}
         if let Some(handle) = fanout_worker {
             worker_failed |= handle.await.is_err();
         }
@@ -328,6 +404,10 @@ pub(crate) fn run_until(
     if let Some(owner) = authority.as_ref() {
         owner.request_shutdown();
     }
+    #[cfg(feature = "postgres")]
+    if let Some(owner) = managed.as_ref() {
+        owner.request_shutdown();
+    }
     // Also runs after bind/TLS errors before the async cleanup tail was reached.
     #[cfg(feature = "postgres")]
     let session_result = runtime.block_on(async {
@@ -341,7 +421,11 @@ pub(crate) fn run_until(
     });
     drop(runtime);
     #[cfg(feature = "postgres")]
+    let execution_result = execution.as_mut().map(|owner| owner.shutdown()).transpose();
+    #[cfg(feature = "postgres")]
     let authority_result = authority::finish(authority.as_mut());
+    #[cfg(feature = "postgres")]
+    let managed_result = managed.as_mut().map(|owner| owner.shutdown()).transpose();
     // The observation worker is startup-owned, never implicitly joined by an
     // async destructor. Loss/incomplete output is not an authorization result.
     #[cfg(feature = "postgres")]
@@ -351,8 +435,16 @@ pub(crate) fn run_until(
     };
     #[cfg(feature = "postgres")]
     let outcome = authority::report_cleanup(outcome, authority_result, &mut std::io::stderr());
+    #[cfg(feature = "postgres")]
+    if managed_result.is_err() {
+        eprintln!("MANAGED_AUTHORITY_CLEANUP_INCOMPLETE");
+    }
     drop(roots);
     outcome?;
+    #[cfg(feature = "postgres")]
+    execution_result?;
+    #[cfg(feature = "postgres")]
+    managed_result?;
     #[cfg(feature = "postgres")]
     session_result?;
     #[cfg(feature = "postgres")]

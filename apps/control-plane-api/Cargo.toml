@@ -75,6 +75,10 @@ prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Reuse the already locked agent dependency for architecture-correct held-FD opens.
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
 [dev-dependencies]
 # Real loopback HTTPS provider fixtures; reuse the workspace ring TLS stack.
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
