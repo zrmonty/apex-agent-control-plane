@@ -36,12 +36,35 @@ pub(crate) struct CommandInput<'a> {
 }
 
 pub(crate) fn run(input: CommandInput<'_>) -> Result<Vec<u8>, CommandError> {
-    let started = Instant::now();
-    let budget = input.budget.min(Duration::from_secs(30));
+    let deadline = Instant::now() + input.budget.min(Duration::from_secs(30));
+    run_until(input, deadline)
+}
+
+pub(crate) fn run_until(
+    input: CommandInput<'_>,
+    deadline: Instant,
+) -> Result<Vec<u8>, CommandError> {
+    run_inner(input, deadline, None)
+}
+pub(crate) fn run_guarded(
+    input: CommandInput<'_>,
+    gate: &mut crate::execution::network_owner::DispatchGate<'_>,
+) -> Result<Vec<u8>, &'static str> {
+    let deadline = gate.deadline()?;
+    run_inner(input, deadline, Some(gate)).map_err(|_| "RUNTIME_NETWORK_COMMAND_REFUSED")
+}
+fn run_inner(
+    input: CommandInput<'_>,
+    deadline: Instant,
+    mut gate: Option<&mut crate::execution::network_owner::DispatchGate<'_>>,
+) -> Result<Vec<u8>, CommandError> {
+    let deadline = std::cell::Cell::new(
+        deadline.min(Instant::now() + input.budget.min(Duration::from_secs(30))),
+    );
     let check = || {
         if input.cancelled.load(Ordering::Acquire) {
             Err(CommandError::Cancelled)
-        } else if started.elapsed() >= budget {
+        } else if Instant::now() >= deadline.get() {
             Err(CommandError::Deadline)
         } else {
             Ok(())
@@ -71,14 +94,44 @@ pub(crate) fn run(input: CommandInput<'_>) -> Result<Vec<u8>, CommandError> {
     if let Some(home) = input.home {
         command.env("HOME", home);
     }
-    let child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|_| CommandError::Io)?;
+        .process_group(0);
+    check()?;
+    #[cfg(test)]
+    crate::execution::testing::at(crate::execution::testing::Point::Spawn, None)
+        .map_err(|_| CommandError::Cancelled)?;
+    check()?;
+    if let Some(gate) = &mut gate {
+        #[cfg(test)]
+        crate::execution::testing::at(
+            crate::execution::testing::Point::NetworkSpawn,
+            Some(deadline.get()),
+        )
+        .map_err(|_| CommandError::Cancelled)?;
+        gate.check().map_err(|_| CommandError::Cancelled)?;
+        // A fresh callback may shorten its lease. Never keep the earlier, longer
+        // command clock, nor extend the original job/command cap on renewal.
+        deadline.set(
+            deadline
+                .get()
+                .min(gate.deadline().map_err(|_| CommandError::Deadline)?),
+        );
+        check()?;
+        gate.spawn_attempt();
+    }
+    let child = command.spawn().map_err(|_| CommandError::Io)?;
     let mut owned = OwnedChild(Some(child));
+    #[cfg(test)]
+    if gate.is_some() {
+        crate::execution::testing::at(
+            crate::execution::testing::Point::NetworkChild,
+            Some(deadline.get()),
+        )
+        .map_err(|_| CommandError::Cancelled)?;
+    }
     let child = owned.0.as_mut().ok_or(CommandError::Io)?;
     let mut stdout = child.stdout.take().ok_or(CommandError::Io)?;
     let mut stderr = child.stderr.take().ok_or(CommandError::Io)?;

@@ -6,40 +6,55 @@ import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2
 import { file_apex_v1_proxy_runtime } from "./proxy_runtime_pb.js";
 import { file_apex_v1_proxy_runtime_authority } from "./proxy_runtime_authority_pb.js";
 import { file_apex_v1_proxy_trace } from "./proxy_trace_pb.js";
+import { file_apex_v1_governance } from "./governance_pb.js";
 
 /**
  * Describes the file apex/v1/proxy_runtime_deployment.proto.
  */
 export const file_apex_v1_proxy_runtime_deployment = /*@__PURE__*/
-  fileDesc("CiZhcGV4L3YxL3Byb3h5X3J1bnRpbWVfZGVwbG95bWVudC5wcm90bxIHYXBleC52MSLEAQoZUnVudGltZURlcGxveW1lbnRTbmFwc2hvdBIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRI0CglhdXRob3JpdHkYAiABKAsyIS5hcGV4LnYxLlJ1bnRpbWVBdXRob3JpdHlTbmFwc2hvdBI0Cg1jb25maWd1cmF0aW9uGAMgASgLMh0uYXBleC52MS5SdW50aW1lQ29uZmlndXJhdGlvbhIjChtkZXBsb3ltZW50X2JpbmRpbmdzX3ZlcnNpb24YBCABKAkiuQEKIVJ1bnRpbWVEZXBsb3ltZW50QmluZGluZ3NEb2N1bWVudBIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIPCgd2ZXJzaW9uGAIgASgJEhoKEnZhbGlkX2Zyb21fdW5peF91cxgDIAEoBBIaChJleHBpcmVzX2F0X3VuaXhfdXMYBCABKAQSMwoIcHJvZmlsZXMYBSADKAsyIS5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50UHJvZmlsZSI7ChZSdW50aW1lRGVwbG95bWVudEltYWdlEg4KBmRpZ2VzdBgBIAEoCRIRCglpbWFnZV9yZWYYAiABKAki/AMKGFJ1bnRpbWVEZXBsb3ltZW50UHJvZmlsZRIXCg9pbnN0YWxsYXRpb25faWQYASABKAkSFAoMd29ya3NwYWNlX2lkGAIgASgJEhQKDG5hbWVzcGFjZV9pZBgDIAEoCRIQCghwcm94eV9pZBgEIAEoCRITCgtyZXZpc2lvbl9pZBgFIAEoCRIbChNob3N0X3BvbGljeV92ZXJzaW9uGAYgASgJEhQKDHJlc291cmNlX3VybBgHIAEoCRIvCgZpbWFnZXMYCCADKAsyHy5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50SW1hZ2USEwoLc2VjcmV0X3JlZnMYCSADKAkSMAoMdG9vbF9zY2hlbWFzGAogAygLMhouYXBleC52MS5SdW50aW1lVG9vbFNjaGVtYRIgChhhcHByb3ZlZF9vdXRwdXRfcHJvZmlsZXMYCyADKAkSNAoObmV0d29ya19ncmFudHMYDCADKAsyHC5hcGV4LnYxLlJ1bnRpbWVOZXR3b3JrR3JhbnQSLAoEYXV0aBgNIAEoCzIeLmFwZXgudjEuUnVudGltZUF1dGhlbnRpY2F0aW9uEjAKCXRlbGVtZXRyeRgOIAEoCzIdLmFwZXgudjEuUHJveHlUZWxlbWV0cnlQb2xpY3kSEQoJcGlkX2xpbWl0GA8gASgNMoEBChhSdW50aW1lRGVwbG95bWVudFNlcnZpY2USZQoYUmVzb2x2ZVJ1bnRpbWVEZXBsb3ltZW50EiUuYXBleC52MS5DaGVja1J1bnRpbWVBdXRob3JpdHlSZXF1ZXN0GiIuYXBleC52MS5SdW50aW1lRGVwbG95bWVudFNuYXBzaG90YgZwcm90bzM", [file_apex_v1_proxy_runtime, file_apex_v1_proxy_runtime_authority, file_apex_v1_proxy_trace]);
+  fileDesc("CiZhcGV4L3YxL3Byb3h5X3J1bnRpbWVfZGVwbG95bWVudC5wcm90bxIHYXBleC52MSKUAQogUmVnaXN0ZXJSdW50aW1lRGVwbG95bWVudFJlcXVlc3QSOAoJYXV0aG9yaXR5GAEgASgLMiUuYXBleC52MS5DaGVja1J1bnRpbWVBdXRob3JpdHlSZXF1ZXN0EjYKC2F0dGVzdGF0aW9uGAIgASgLMiEuYXBleC52MS5SdW50aW1lTGF1bmNoQXR0ZXN0YXRpb24irAEKJFJ1bnRpbWVEZXBsb3ltZW50UmVnaXN0cmF0aW9uUmVjZWlwdBIyCgdiaW5kaW5nGAEgASgLMiEuYXBleC52MS5NYW5hZ2VkRGVwbG95bWVudEJpbmRpbmcSGgoSYXR0ZXN0YXRpb25fc2hhMjU2GAIgASgJEjQKCWF1dGhvcml0eRgDIAEoCzIhLmFwZXgudjEuUnVudGltZUF1dGhvcml0eVNuYXBzaG90IsQBChlSdW50aW1lRGVwbG95bWVudFNuYXBzaG90EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEjQKCWF1dGhvcml0eRgCIAEoCzIhLmFwZXgudjEuUnVudGltZUF1dGhvcml0eVNuYXBzaG90EjQKDWNvbmZpZ3VyYXRpb24YAyABKAsyHS5hcGV4LnYxLlJ1bnRpbWVDb25maWd1cmF0aW9uEiMKG2RlcGxveW1lbnRfYmluZGluZ3NfdmVyc2lvbhgEIAEoCSK5AQohUnVudGltZURlcGxveW1lbnRCaW5kaW5nc0RvY3VtZW50EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEg8KB3ZlcnNpb24YAiABKAkSGgoSdmFsaWRfZnJvbV91bml4X3VzGAMgASgEEhoKEmV4cGlyZXNfYXRfdW5peF91cxgEIAEoBBIzCghwcm9maWxlcxgFIAMoCzIhLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRQcm9maWxlIjsKFlJ1bnRpbWVEZXBsb3ltZW50SW1hZ2USDgoGZGlnZXN0GAEgASgJEhEKCWltYWdlX3JlZhgCIAEoCSL8AwoYUnVudGltZURlcGxveW1lbnRQcm9maWxlEhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoCRIUCgx3b3Jrc3BhY2VfaWQYAiABKAkSFAoMbmFtZXNwYWNlX2lkGAMgASgJEhAKCHByb3h5X2lkGAQgASgJEhMKC3JldmlzaW9uX2lkGAUgASgJEhsKE2hvc3RfcG9saWN5X3ZlcnNpb24YBiABKAkSFAoMcmVzb3VyY2VfdXJsGAcgASgJEi8KBmltYWdlcxgIIAMoCzIfLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRJbWFnZRITCgtzZWNyZXRfcmVmcxgJIAMoCRIwCgx0b29sX3NjaGVtYXMYCiADKAsyGi5hcGV4LnYxLlJ1bnRpbWVUb29sU2NoZW1hEiAKGGFwcHJvdmVkX291dHB1dF9wcm9maWxlcxgLIAMoCRI0Cg5uZXR3b3JrX2dyYW50cxgMIAMoCzIcLmFwZXgudjEuUnVudGltZU5ldHdvcmtHcmFudBIsCgRhdXRoGA0gASgLMh4uYXBleC52MS5SdW50aW1lQXV0aGVudGljYXRpb24SMAoJdGVsZW1ldHJ5GA4gASgLMh0uYXBleC52MS5Qcm94eVRlbGVtZXRyeVBvbGljeRIRCglwaWRfbGltaXQYDyABKA0ygQEKGFJ1bnRpbWVEZXBsb3ltZW50U2VydmljZRJlChhSZXNvbHZlUnVudGltZURlcGxveW1lbnQSJS5hcGV4LnYxLkNoZWNrUnVudGltZUF1dGhvcml0eVJlcXVlc3QaIi5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50U25hcHNob3QyiwEKGVJ1bnRpbWVEZXBsb3ltZW50UmVnaXN0cnkSbgoSUmVnaXN0ZXJEZXBsb3ltZW50EikuYXBleC52MS5SZWdpc3RlclJ1bnRpbWVEZXBsb3ltZW50UmVxdWVzdBotLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRSZWdpc3RyYXRpb25SZWNlaXB0YgZwcm90bzM", [file_apex_v1_proxy_runtime, file_apex_v1_proxy_runtime_authority, file_apex_v1_proxy_trace, file_apex_v1_governance]);
+
+/**
+ * Describes the message apex.v1.RegisterRuntimeDeploymentRequest.
+ * Use `create(RegisterRuntimeDeploymentRequestSchema)` to create a new message.
+ */
+export const RegisterRuntimeDeploymentRequestSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 0);
+
+/**
+ * Describes the message apex.v1.RuntimeDeploymentRegistrationReceipt.
+ * Use `create(RuntimeDeploymentRegistrationReceiptSchema)` to create a new message.
+ */
+export const RuntimeDeploymentRegistrationReceiptSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 1);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentSnapshot.
  * Use `create(RuntimeDeploymentSnapshotSchema)` to create a new message.
  */
 export const RuntimeDeploymentSnapshotSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 0);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 2);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentBindingsDocument.
  * Use `create(RuntimeDeploymentBindingsDocumentSchema)` to create a new message.
  */
 export const RuntimeDeploymentBindingsDocumentSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 1);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 3);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentImage.
  * Use `create(RuntimeDeploymentImageSchema)` to create a new message.
  */
 export const RuntimeDeploymentImageSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 2);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 4);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentProfile.
  * Use `create(RuntimeDeploymentProfileSchema)` to create a new message.
  */
 export const RuntimeDeploymentProfileSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 3);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 5);
 
 /**
  * mTLS-only online resolution. Caller configuration is never accepted.
@@ -48,3 +63,12 @@ export const RuntimeDeploymentProfileSchema = /*@__PURE__*/
  */
 export const RuntimeDeploymentService = /*@__PURE__*/
   serviceDesc(file_apex_v1_proxy_runtime_deployment, 0);
+
+/**
+ * Agent-only mTLS callback after sealed staging. Current operation authentication
+ * and protected launch enrollment are required; no workload token fallback.
+ *
+ * @generated from service apex.v1.RuntimeDeploymentRegistry
+ */
+export const RuntimeDeploymentRegistry = /*@__PURE__*/
+  serviceDesc(file_apex_v1_proxy_runtime_deployment, 1);

@@ -8,6 +8,8 @@ use super::{
 use apex_control_plane_api::proto::{CheckRuntimeAuthorityRequest, RuntimeAuthorityAction};
 use std::{net::TcpListener, process::Command};
 use zeroize::Zeroizing;
+#[path = "config/registration.rs"]
+mod registration;
 
 pub(super) const CHILD: &str = "APEX_RUNTIME_ROOT_CHILD";
 pub(super) const APPLICATION: &str = "APEX_RUNTIME_ROOT_APPLICATION";
@@ -50,6 +52,8 @@ impl RootFixture {
             observed_controller_certificate_sha256: pki.pin(pki::CONTROLLER).to_vec(),
         };
         directory.write("query.json", &serde_json::to_vec(&request).unwrap());
+        directory.write("managed.json", br#"{"schema_version":1,"version":"v1","valid_from_unix_us":"1","expires_at_unix_us":"9223372036854775807","profiles":[]}"#);
+        registration::write(&directory, operation);
         let name = format!("authority_root_{}", uuid::Uuid::now_v7().simple());
         let url = format!("{}&application_name={name}", operation.database.url);
         let socket = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -119,7 +123,26 @@ impl RootFixture {
                 );
             }
         }
-        if case != Case::Occupied {
+        if matches!(
+            case,
+            Case::Managed | Case::ManagedMissing | Case::ManagedOccupied | Case::Registration
+        ) {
+            command.env(
+                "APEX_CONTROL_MANAGED_AUTHORITY_FILE",
+                if case == Case::ManagedMissing {
+                    self.directory.path.join("missing-managed.json")
+                } else {
+                    self.directory.path.join("managed.json")
+                },
+            );
+        }
+        if case == Case::Registration {
+            command.env(
+                "APEX_CONTROL_RUNTIME_DEPLOYMENT_BINDINGS_FILE",
+                "deployment.json",
+            );
+        }
+        if !matches!(case, Case::Occupied | Case::ManagedOccupied) {
             drop(self.socket.take());
         }
     }

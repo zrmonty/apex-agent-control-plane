@@ -92,8 +92,9 @@ fn load_revision_map(
             "SELECT proxy_id, revision_id, spec_json, config_hash, lifecycle_state, redaction_status,
                     created_by, created_at, is_published
              FROM mcp_proxy_revisions
-             WHERE proxy_id = $1",
-            &[proxy.proxy_id.as_uuid()],
+             WHERE proxy_id = $1 AND revision_id IN ($2, $3)",
+            &[proxy.proxy_id.as_uuid(), &proxy.active_revision_id.as_ref().map(ProxyRevisionId::as_uuid),
+              &proxy.draft_revision_id.as_ref().map(ProxyRevisionId::as_uuid)],
         )
         .map_err(|_| configuration_error())?;
     let mut revisions = std::collections::HashMap::new();

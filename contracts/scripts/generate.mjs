@@ -13,6 +13,16 @@ export function generate(destination = generatedRoot) {
       local: [process.execPath, plugin], out: destination, opt: ["target=js+dts", "import_extension=js"]
     }] })]);
   });
+  // Frozen EventIngest has its own ControlAction enum. Generate independently;
+  // never merge descriptors or expose its RPCs through management/browser APIs.
+  const eventDestination = join(destination, "event");
+  mkdirSync(eventDestination, { recursive: true });
+  withInput(input => {
+    buf(["build", input, "--as-file-descriptor-set", "--exclude-source-info", "-o", join(eventDestination, "descriptor.binpb")]);
+    buf(["generate", input, "--template", JSON.stringify({ version: "v2", plugins: [{
+      local: [process.execPath, plugin], out: eventDestination, opt: ["target=js+dts", "import_extension=js"]
+    }] })]);
+  }, ["event"]);
   const descriptor = fromBinary(FileDescriptorSetSchema, readFileSync(join(destination, "descriptor.binpb")));
   const approved = new Set(["apex.v1.McpProxyService"]);
   const methods = descriptor.file.flatMap(file => file.service.flatMap(service => {
@@ -26,8 +36,8 @@ export function generate(destination = generatedRoot) {
   })).sort((a, b) => a.path.localeCompare(b.path, "en"));
   writeFileSync(join(destination, "browser-rpcs.json"), JSON.stringify(methods, null, 2) + "\n");
   const files = {};
-  for (const entry of readdirSync(join(destination, "apex/v1")).sort()) {
-    const name = "apex/v1/" + entry;
+  for (const directory of ["apex/v1", "event/apex/v1"]) for (const entry of readdirSync(join(destination, directory)).sort()) {
+    const name = directory + "/" + entry;
     // Proto comments can preserve checkout line endings. Canonicalize generated
     // text before hashing so Windows and Linux produce identical artifacts.
     const path = join(destination, name);

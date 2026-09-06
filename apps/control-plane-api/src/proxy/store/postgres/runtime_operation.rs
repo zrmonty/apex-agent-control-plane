@@ -158,7 +158,11 @@ fn read_checked<'a>(
     {
         return Err(not_current());
     }
-    validate_publish_capabilities(&stored.revision.spec).map_err(|_| not_current())?;
+    // Cleanup of authenticated owned history needs immutable publication/hash
+    // and a current cleanup lease, not today's eligibility for new execution.
+    if operation.desired_state == crate::proto::ProxyDesiredState::Serving as i32 {
+        validate_publish_capabilities(&stored.revision.spec).map_err(|_| not_current())?;
+    }
     if hash_hex(spec_json(&stored.revision.spec).as_bytes()) != stored.revision.config_hash {
         return Err(not_current());
     }

@@ -4,10 +4,33 @@ package apex.v1;
 import "apex/v1/proxy_runtime.proto";
 import "apex/v1/proxy_runtime_authority.proto";
 import "apex/v1/proxy_trace.proto";
+import "apex/v1/governance.proto";
 
 // mTLS-only online resolution. Caller configuration is never accepted.
 service RuntimeDeploymentService {
   rpc ResolveRuntimeDeployment(CheckRuntimeAuthorityRequest) returns (RuntimeDeploymentSnapshot);
+}
+
+// Agent-only mTLS callback after sealed staging. Current operation authentication
+// and protected launch enrollment are required; no workload token fallback.
+service RuntimeDeploymentRegistry {
+  rpc RegisterDeployment(RegisterRuntimeDeploymentRequest) returns (RuntimeDeploymentRegistrationReceipt);
+}
+
+message RegisterRuntimeDeploymentRequest {
+  CheckRuntimeAuthorityRequest authority = 1;
+  // Original immutable launch, even when the current controller fence is newer.
+  // Contains only proof/material digests and references, never raw secrets.
+  RuntimeLaunchAttestation attestation = 2;
+}
+
+// Durable identity receipt, NOT a grant, readiness, routing or execution permit.
+message RuntimeDeploymentRegistrationReceipt {
+  ManagedDeploymentBinding binding = 1;
+  string attestation_sha256 = 2;
+  // Fresh callback observation, not the stored first-registration provenance.
+  // Lets the agent recheck enrolled versions and the original local lease span.
+  RuntimeAuthoritySnapshot authority = 3;
 }
 
 // Point-in-time authoritative data, NOT permission for container effects.

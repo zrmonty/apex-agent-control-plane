@@ -12,12 +12,13 @@ mod enrollment;
 mod error;
 mod executor;
 mod lifecycle;
-mod material;
+pub(super) mod material;
 #[cfg(feature = "test-support")]
 mod observations;
 mod owner;
 mod policy;
 mod refresh;
+mod registration_service;
 mod request;
 mod service;
 
@@ -25,6 +26,7 @@ pub use deployment_service::bounded_runtime_deployment_service_server;
 pub use error::RuntimeAuthorityError;
 #[cfg(feature = "test-support")]
 pub use observations::RuntimeAuthorityObservations;
+pub use registration_service::bounded_runtime_deployment_registry_server;
 pub use service::{RuntimeAuthorityService, bounded_runtime_authority_service_server};
 
 /// Fixed deployment paths; no RPC-selected file or implicit enrollment source.
@@ -101,6 +103,25 @@ pub struct RuntimeAuthorityOwner {
 }
 
 impl RuntimeAuthorityOwner {
+    /// Configuration compatibility only. Actual Controller TLS is still checked
+    /// by the agent and by every authority callback before physical effects.
+    pub fn validate_execution_owner(
+        &self,
+        execution: &super::RuntimeExecutionOwner,
+    ) -> Result<(), RuntimeAuthorityError> {
+        let selected = self.workers.shared.current()?;
+        let config = execution.configuration();
+        if selected.deployment.is_none()
+            || !selected.enrollment.permits_worker(
+                &config.installation_id,
+                &config.worker_id,
+                &config.scopes,
+            )
+        {
+            return Err(RuntimeAuthorityError::EnrollmentDenied);
+        }
+        Ok(())
+    }
     /// Read-only bounded scheduling witness, unavailable in production builds.
     #[cfg(feature = "test-support")]
     pub fn observations(&self) -> RuntimeAuthorityObservations {

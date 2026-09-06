@@ -7,6 +7,26 @@ use crate::{
 };
 use tonic::{Code, Request};
 
+#[test]
+fn managed_store_outage_is_retryable_and_idempotency_conflict_is_a_conflict() {
+    assert_eq!(
+        super::proxy_status(crate::ProxyError::new(
+            "PROXY_STORE_UNAVAILABLE",
+            "Store unavailable."
+        ))
+        .code(),
+        Code::Unavailable
+    );
+    assert_eq!(
+        super::proxy_status(crate::ProxyError::new(
+            "PROXY_IDEMPOTENCY_CONFLICT",
+            "Request conflict."
+        ))
+        .code(),
+        Code::Aborted
+    );
+}
+
 use super::super::{
     LifecycleCommand, McpProxyService, ProxyEventSink, ProxyLifecycleEvent, ProxyRuntimeProvider,
 };
@@ -158,7 +178,7 @@ fn deploy_refuses_missing_approval() {
 }
 
 #[tokio::test]
-async fn rollback_accepts_the_active_ready_immutable_revision() {
+async fn rollback_refuses_preview_backend_even_with_historical_ready_revision() {
     let store = Arc::new(InMemoryProxyStore::default());
     let revision = published(&store);
     transition(&store, 30, &revision, LifecycleCommand::Validate, false);
@@ -183,17 +203,12 @@ async fn rollback_accepts_the_active_ready_immutable_revision() {
         reason_code: Some("proxy.rollback".into()),
     });
     authorize(&mut request);
-    let response = service
-        .rollback_proxy(request)
-        .await
-        .unwrap()
-        .into_inner()
-        .proxy
-        .unwrap();
-    assert_eq!(response.active_revision_id, revision.to_string());
+    let error = service.rollback_proxy(request).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("PROXY_RUNTIME_UNAVAILABLE"));
     assert_eq!(
-        response.lifecycle_state,
-        proto::McpProxyLifecycleState::Ready as i32
+        store.get(scope(), proxy()).unwrap().active_revision_id,
+        Some(revision)
     );
 }
 

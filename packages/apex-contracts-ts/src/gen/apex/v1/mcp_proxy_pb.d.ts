@@ -4,7 +4,7 @@
 
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
-import type { GetProxyCapabilitiesRequestSchema, GetProxyCapabilitiesResponseSchema, GetProxyOperationRequestSchema, GetProxyOperationResponseSchema, GetProxyTraceRequestSchema, GetProxyTraceResponseSchema, ListProxyApprovalsRequestSchema, ListProxyApprovalsResponseSchema, ListProxyBindingsRequestSchema, ListProxyBindingsResponseSchema, ListProxyRevisionsRequestSchema, ProxyActivitySummary } from "./proxy_management_pb.js";
+import type { GetProxyCapabilitiesRequestSchema, GetProxyCapabilitiesResponseSchema, GetProxyOperationRequestSchema, GetProxyOperationResponseSchema, GetProxyTraceRequestSchema, GetProxyTraceResponseSchema, ListProxyApprovalsRequestSchema, ListProxyApprovalsResponseSchema, ListProxyBindingsRequestSchema, ListProxyBindingsResponseSchema, ListProxyRevisionsRequestSchema, ProxyActivitySummary, ProxyOperation } from "./proxy_management_pb.js";
 import type { DecideProxyApprovalRequestSchema, DecideProxyApprovalResponseSchema } from "./proxy_approval_pb.js";
 
 /**
@@ -558,6 +558,13 @@ export declare type DeployProxyResponse = Message<"apex.v1.DeployProxyResponse">
    * @generated from field: apex.v1.McpProxy proxy = 1;
    */
   proxy?: McpProxy | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**
@@ -627,6 +634,13 @@ export declare type PauseProxyResponse = Message<"apex.v1.PauseProxyResponse"> &
    * @generated from field: apex.v1.McpProxy proxy = 1;
    */
   proxy?: McpProxy | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**
@@ -691,6 +705,13 @@ export declare type ResumeProxyResponse = Message<"apex.v1.ResumeProxyResponse">
    * @generated from field: apex.v1.McpProxy proxy = 1;
    */
   proxy?: McpProxy | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**
@@ -765,6 +786,13 @@ export declare type RotateProxyCredentialsResponse = Message<"apex.v1.RotateProx
    * @generated from field: apex.v1.McpProxyRevision revision = 1;
    */
   revision?: McpProxyRevision | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**
@@ -839,6 +867,13 @@ export declare type RollbackProxyResponse = Message<"apex.v1.RollbackProxyRespon
    * @generated from field: apex.v1.McpProxy proxy = 1;
    */
   proxy?: McpProxy | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**
@@ -908,6 +943,13 @@ export declare type RetireProxyResponse = Message<"apex.v1.RetireProxyResponse">
    * @generated from field: apex.v1.McpProxy proxy = 1;
    */
   proxy?: McpProxy | undefined;
+
+  /**
+   * Durable acceptance; never proof of runtime readiness or cleanup.
+   *
+   * @generated from field: apex.v1.ProxyOperation operation = 2;
+   */
+  operation?: ProxyOperation | undefined;
 };
 
 /**

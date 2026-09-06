@@ -49,6 +49,7 @@ pub(super) fn transition(
     }
     let proxy = locked_proxy;
     ensure_scope_match(&proxy.scope, &input.scope)?;
+    refuse_managed(&mut tx, &input.proxy_id)?;
     if proxy.active_revision_id != input.expected_revision_id
         || proxy.active_revision_id.as_ref() != Some(&input.revision_id)
     {
@@ -141,6 +142,7 @@ pub(super) fn rotate_credentials(
         );
     }
     ensure_scope_match(&proxy.scope, &input.scope)?;
+    refuse_managed(&mut tx, &input.proxy_id)?;
     if proxy.lifecycle_state == super::super::ProxyLifecycleState::Retired
         || proxy.active_revision_id != input.expected_revision_id
         || proxy.active_revision_id.as_ref() != Some(&input.revision_id)
@@ -259,6 +261,7 @@ pub(super) fn rollback(
         return load_proxy(&mut *client, &record.proxy_id, None);
     }
     ensure_scope_match(&proxy.scope, &input.scope)?;
+    refuse_managed(&mut tx, &input.proxy_id)?;
     if proxy.active_revision_id != input.expected_revision_id
         || proxy.active_revision_id.as_ref() != Some(&input.revision_id)
     {
@@ -374,4 +377,20 @@ pub(super) fn list_activity(
         activity,
         next_page_token,
     })
+}
+
+pub(super) fn refuse_managed(
+    tx: &mut apex_durability::PostgresTransaction<'_>,
+    proxy_id: &crate::ProxyId,
+) -> Result<(), ProxyError> {
+    let row = tx
+        .query_one(
+            "SELECT deployment_generation FROM mcp_proxies WHERE proxy_id=$1",
+            &[proxy_id.as_uuid()],
+        )
+        .map_err(|_| super::super::shared::configuration_error())?;
+    if row.get::<_, i64>(0) > 0 {
+        return Err(ProxyError::invalid_lifecycle_transition());
+    }
+    Ok(())
 }

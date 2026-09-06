@@ -49,6 +49,7 @@ impl apex_control_plane_api::OperatorCredentialResolver for SharedOperatorResolv
 /// into an operator or workload authority.
 pub(super) fn build_governance_service(
     trusted_base: &Path,
+    config: GovernanceConfig,
 ) -> Result<GovernanceGatewayService, Box<dyn std::error::Error>> {
     let token_path = trusted_secret_path(
         &path("APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE")?,
@@ -60,6 +61,10 @@ pub(super) fn build_governance_service(
     let token = read_credential_table(&token_path, 4096, "APEX_CONTROL_MCP_GATEWAY_TOKEN_FILE")?;
     let auth = GatewayTokenAuthenticator::new(token.trim())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid MCP gateway token"))?;
+    Ok(GovernanceGatewayService::new(config, auth))
+}
+
+pub(super) fn build_governance_config() -> Result<GovernanceConfig, io::Error> {
     let portfolios = csv_values(
         optional("APEX_CONTROL_MCP_ALLOWED_PORTFOLIOS").as_deref(),
         "northstar-401k",
@@ -68,7 +73,7 @@ pub(super) fn build_governance_service(
         optional("APEX_CONTROL_MCP_ALLOWED_SCOPES").as_deref(),
         "acme/prod",
     );
-    let config = GovernanceConfig::new(
+    GovernanceConfig::new(
         portfolios,
         scopes,
         "apex-mcp-read-v1",
@@ -78,8 +83,7 @@ pub(super) fn build_governance_service(
             "client.tax_id",
             "positions.cost_basis",
         ],
-    )?;
-    Ok(GovernanceGatewayService::new(config, auth))
+    )
 }
 
 fn csv_values(raw: Option<&str>, default: &str) -> Vec<String> {

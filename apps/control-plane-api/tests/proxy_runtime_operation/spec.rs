@@ -1,6 +1,6 @@
 use apex_control_plane_api::*;
 
-pub(super) fn supported_spec() -> ProxySpec {
+pub(crate) fn supported_spec() -> ProxySpec {
     ProxySpec {
         ingress: Ingress {
             transport: ProxyTransport::StreamableHttp,

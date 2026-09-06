@@ -78,6 +78,79 @@ pub(super) fn run(case: Case) {
                 .await;
             callback.set(Some(response));
         }
+        if matches!(case, Case::Managed | Case::Registration) {
+            let channel = Endpoint::from_shared(format!("https://{address}"))
+                .unwrap()
+                .tls_config(
+                    ClientTlsConfig::new()
+                        .domain_name("control-plane-api")
+                        .ca_certificate(Certificate::from_pem(pki.read("trusted-host", "ca.pem")))
+                        .identity(pki.identity("trusted-host", pki::OTHER)),
+                )
+                .unwrap()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(6))
+                .connect()
+                .await
+                .unwrap();
+            use apex_control_plane_api::proto::{
+                ManagedCallAuthorizationRequest, ManagedCallCompletion, ManagedDeploymentRenewal,
+                ManagedPolicyRequest,
+                managed_proxy_governance_client::ManagedProxyGovernanceClient,
+                managed_runtime_authority_client::ManagedRuntimeAuthorityClient,
+            };
+            let mut workload = ManagedRuntimeAuthorityClient::new(channel.clone());
+            // Empty enrollment rejects every body; PermissionDenied proves the
+            // actual configured root route, not an unregistered Unimplemented.
+            assert_eq!(
+                workload
+                    .renew_deployment(ManagedDeploymentRenewal::default())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+            assert_eq!(
+                workload
+                    .get_managed_policy(ManagedPolicyRequest::default())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+            assert_eq!(
+                workload
+                    .complete_managed_call(ManagedCallCompletion::default())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+            let mut registry = apex_control_plane_api::proto::runtime_deployment_registry_client::RuntimeDeploymentRegistryClient::new(channel.clone());
+            assert_eq!(
+                registry
+                    .register_deployment(
+                        apex_control_plane_api::proto::RegisterRuntimeDeploymentRequest::default()
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                if case == Case::Registration {
+                    tonic::Code::InvalidArgument
+                } else {
+                    tonic::Code::Unimplemented
+                }
+            );
+            let mut governance = ManagedProxyGovernanceClient::new(channel);
+            assert_eq!(
+                governance
+                    .authorize_managed_call(ManagedCallAuthorizationRequest::default())
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
     });
     assert!(tokio::runtime::Handle::try_current().is_err());
     let until = Instant::now() + Duration::from_secs(8);
@@ -110,12 +183,14 @@ pub(super) fn run(case: Case) {
                 tonic::Code::Unimplemented
             );
         }
-        Case::Immediate => assert!(result.is_ok() && entered.get()),
-        Case::Partial | Case::Missing => assert!(
+        Case::Immediate | Case::Managed | Case::Registration => {
+            assert!(result.is_ok() && entered.get())
+        }
+        Case::Partial | Case::Missing | Case::ManagedMissing => assert!(
             result.is_err() && !entered.get(),
             "invalid explicit authority must fail before serving"
         ),
-        Case::Occupied => {
+        Case::Occupied | Case::ManagedOccupied => {
             assert!(!entered.get());
             assert!(
                 result

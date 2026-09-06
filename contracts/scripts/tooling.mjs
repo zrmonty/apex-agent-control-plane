@@ -16,11 +16,11 @@ export function buf(args) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || "buf failed");
   return result.stdout;
 }
-export function withInput(callback) {
+export function withInput(callback, selectedSources = sources) {
   const temporary = mkdtempSync(join(tmpdir(), "apex-contract-input-"));
   try {
     mkdirSync(join(temporary, "apex/v1"), { recursive: true });
-    for (const source of sources) {
+    for (const source of selectedSources) {
       const input = join(contractsRoot, "proto/apex/v1", source + ".proto");
       if (existsSync(input)) copyFileSync(input, join(temporary, "apex/v1", source + ".proto"));
     }

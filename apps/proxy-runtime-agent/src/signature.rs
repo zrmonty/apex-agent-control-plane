@@ -2,7 +2,7 @@
 use crate::image_catalog::ImageCatalog;
 use std::{fmt, path::Path, sync::atomic::AtomicBool, time::Duration};
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 mod output;
 

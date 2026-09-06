@@ -104,7 +104,7 @@ fn command_error(error: CommandError) -> Error {
     }
 }
 
-fn protected(path: &Path, directory: bool) -> Result<OwnedFd, Error> {
+pub(crate) fn protected(path: &Path, directory: bool) -> Result<OwnedFd, Error> {
     let uid = geteuid().as_raw();
     if !path.is_absolute() || path.as_os_str().len() > 4096 {
         return Err(Error::InvalidConfiguration);

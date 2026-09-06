@@ -20,6 +20,17 @@ use std::{
 use zeroize::Zeroizing;
 
 const MAX_SOURCE: usize = 65_536;
+fn mount_id(fd: &impl AsFd) -> Result<u64, StagingError> {
+    let s = fs::statx(fd, "", fs::AtFlags::EMPTY_PATH, fs::StatxFlags::MNT_ID)
+        .map_err(|_| StagingError::InvalidSource)?;
+    if s.stx_mask & fs::StatxFlags::MNT_ID.bits() == 0 {
+        return Err(StagingError::InvalidSource);
+    }
+    Ok(s.stx_mnt_id)
+}
+mod cleanup;
+mod managed;
+pub(crate) mod proof;
 
 pub(super) struct Owner {
     state: Root,

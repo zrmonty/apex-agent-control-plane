@@ -4,9 +4,7 @@ mod durability;
 mod support;
 
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 use apex_event_ingest::{
     AuthenticatedGrpcService, AuthenticatedIngestAdapter, BearerTokenVerifier, FindingJournal,
@@ -15,17 +13,13 @@ use apex_event_ingest::{
 };
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
-use super::auth::{
-    FileBearerResolver, bearer_agent_id, bearer_peer_certificate_sha256, bearer_subject,
-    require_single_agent_file_bearer_ack,
-};
 use super::env::{
-    admission_concurrency, allowed_scopes, attempts, backlog_alert_age_secs, backlog_alert_depth,
+    admission_concurrency, attempts, backlog_alert_age_secs, backlog_alert_depth,
     backlog_monitor_interval_secs, fanout_workers, optional_path, outbox_retention_interval_secs,
     outbox_retention_secs, path, required,
 };
 use super::error::startup_gateway_error;
-use super::secrets::{read_bounded, read_token, trusted_secret_path};
+use super::secrets::{read_bounded, trusted_secret_path};
 
 use durability::{build_fanout_publisher, open_durability_stores};
 use support::{build_ephemeral_store, spawn_idempotency_reaper};
@@ -196,30 +190,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         admission_adapters.push(AuthenticatedIngestAdapter::new(gateway));
     }
-    let token_path = trusted_secret_path(
-        &path("APEX_BEARER_TOKEN_FILE")?,
-        &trusted_base,
-        4096,
-        true,
-        "APEX_BEARER_TOKEN_FILE",
-    )?;
-    let token = Zeroizing::new(read_token(&token_path, "APEX_BEARER_TOKEN_FILE")?);
-    require_single_agent_file_bearer_ack()?;
-    let agent_id = bearer_agent_id()?;
-    let subject = bearer_subject(&agent_id)?;
-    let bearer_peer_certificate = bearer_peer_certificate_sha256()?;
-    let scopes = allowed_scopes()?;
+    let (resolver, evidence_owner) = super::evidence::build(&trusted_base)?;
     let ephemeral_store = build_ephemeral_store(&trusted_base)?;
-    let verifier = BearerTokenVerifier::new_strict(FileBearerResolver::new(
-        token,
-        token_path,
-        trusted_base.clone(),
-        subject,
-        agent_id,
-        Arc::new(scopes),
-        bearer_peer_certificate,
-    ))
-    .with_ephemeral_store(ephemeral_store.clone());
+    let verifier =
+        BearerTokenVerifier::new_strict(resolver).with_ephemeral_store(ephemeral_store.clone());
     let mut service = AuthenticatedGrpcService::with_pool(admission_adapters, verifier);
     service = service.with_ephemeral_store(ephemeral_store);
     let server_cert_path = trusted_secret_path(
@@ -268,7 +242,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(async move {
+    // Rebind after runtime construction: on unwind the reader is joined before
+    // runtime destruction. Retain this owner at the synchronous process root.
+    let evidence_owner = evidence_owner;
+    let result = runtime.block_on(async move {
         let _idempotency_reaper = spawn_idempotency_reaper(capacity)?;
         // Phase 0.6: the dedicated fanout workers are now the PRIMARY fanout
         // path, and they deliberately do not go through `service`/the
@@ -322,7 +299,9 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             .serve(listen)
             .await?;
         Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    });
+    drop(evidence_owner);
+    result?;
     Ok(())
 }
 

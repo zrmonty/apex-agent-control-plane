@@ -2,15 +2,14 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+#[cfg(feature = "postgres")]
+pub(super) use super::ApprovalMode;
 pub(super) use super::validate_proxy_spec;
-pub(super) use super::{
-    ApprovalMode, LifecycleCommand, MAX_SECRET_REFS, ProxyLifecycleState, ProxyRevisionId,
-    ProxySpec, RollbackProxy, RotateProxyCredentials, SecretRef,
-};
 use super::{
     CreateProxy, ListProxies, ListProxyActivity, McpProxy, McpProxyRevision, ProxyError, ProxyId,
     ProxyStoreBackend, PublishRevision, TransitionProxyLifecycle, UpdateProxyDraft,
 };
+pub(super) use super::{LifecycleCommand, ProxyRevisionId, ProxySpec, SecretRef};
 use crate::{ExactScope, OperatorCredentialResolver, OperatorTokenAuthenticator, proto};
 
 mod operations;
@@ -58,6 +57,8 @@ pub trait ProxyEventSink: Send + Sync {
 }
 
 pub struct McpProxyService<R: OperatorCredentialResolver> {
+    #[cfg(feature = "postgres")]
+    managed: Option<Arc<super::PostgresProxyStore>>,
     auth: Arc<OperatorTokenAuthenticator<R>>,
     store: Arc<dyn ProxyStoreBackend>,
     runtime: Option<Arc<dyn ProxyRuntimeProvider>>,
@@ -93,7 +94,7 @@ fn internal_status<T>(_error: T) -> Status {
     Status::internal("PROXY_INTERNAL: request failed safely")
 }
 
-fn proxy_to_proto(proxy: McpProxy) -> proto::McpProxy {
+pub(crate) fn proxy_to_proto(proxy: McpProxy) -> proto::McpProxy {
     proto::McpProxy {
         proxy_id: proxy.proxy_id.to_string(),
         workspace_id: proxy.scope.workspace_id,
@@ -132,7 +133,7 @@ fn summary_to_proto(proxy: super::McpProxySummary) -> proto::McpProxySummary {
     }
 }
 
-fn revision_to_proto(revision: super::McpProxyRevision) -> proto::McpProxyRevision {
+pub(crate) fn revision_to_proto(revision: super::McpProxyRevision) -> proto::McpProxyRevision {
     proto::McpProxyRevision {
         revision_id: revision.revision_id.to_string(),
         proxy_id: revision.proxy_id.to_string(),
@@ -199,10 +200,11 @@ fn proxy_status(error: impl std::fmt::Display) -> Status {
         "PROXY_IDENTITY_CONFLICT" => {
             Status::already_exists("PROXY_IDENTITY_CONFLICT: request rejected safely")
         }
-        "PROXY_REVISION_CONFLICT" => {
+        "PROXY_REVISION_CONFLICT" | "PROXY_IDEMPOTENCY_CONFLICT" => {
             Status::aborted("PROXY_REVISION_CONFLICT: request rejected safely")
         }
         "PROXY_RUNTIME_UNAVAILABLE"
+        | "PROXY_STORE_UNAVAILABLE"
         | "PROXY_EVENT_SINK_UNAVAILABLE"
         | "PROXY_ACTIVITY_UNAVAILABLE" => {
             Status::unavailable("PROXY_DEPENDENCY_UNAVAILABLE: request rejected safely")
@@ -335,9 +337,9 @@ impl<R: OperatorCredentialResolver> proto::mcp_proxy_service_server::McpProxySer
     }
     async fn get_proxy_operation(
         &self,
-        _request: Request<proto::GetProxyOperationRequest>,
+        request: Request<proto::GetProxyOperationRequest>,
     ) -> Result<Response<proto::GetProxyOperationResponse>, Status> {
-        Err(Status::unimplemented("managed capability is not wired"))
+        McpProxyService::get_proxy_operation(self, request).await
     }
     async fn list_proxy_bindings(
         &self,

@@ -2,6 +2,47 @@ use super::proto;
 use super::{GatewayTokenAuthenticator, GovernanceConfig, GovernanceGatewayService};
 use tonic::metadata::{MetadataMap, MetadataValue};
 
+#[test]
+fn managed_and_legacy_use_the_same_actual_policy_and_exact_revision() {
+    let config = config();
+    let resource =
+        "portfolio:sha256:8994d7d97baa4a58a0fbc8192815c60605caa16a9106d50af6548810f52eaf31";
+    let decision = config.evaluate(request(resource)).unwrap();
+    assert_eq!(decision.outcome, proto::GovernanceOutcome::Allowed as i32);
+    assert_eq!(decision.policy_id, "apex-mcp-read-v1");
+    assert_eq!(
+        decision.field_restrictions,
+        [
+            "client.account_number",
+            "client.tax_id",
+            "positions.cost_basis"
+        ]
+    );
+    let denied = config
+        .evaluate(request(
+            "portfolio:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .unwrap();
+    assert_eq!(denied.outcome, proto::GovernanceOutcome::Denied as i32);
+    assert!(denied.field_restrictions.is_empty());
+    let snapshot = config
+        .snapshot(proto::GovernanceScope {
+            workspace_id: "northstar".into(),
+            namespace_id: "research".into(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.revision, 1);
+    assert_eq!(snapshot.policy_id, decision.policy_id);
+    assert!(
+        config
+            .snapshot(proto::GovernanceScope {
+                workspace_id: "northstar".into(),
+                namespace_id: "foreign".into()
+            })
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn governance_wire_contract_exposes_typed_rpc_surface() {
     let request = proto::GovernanceAuthorizationRequest {

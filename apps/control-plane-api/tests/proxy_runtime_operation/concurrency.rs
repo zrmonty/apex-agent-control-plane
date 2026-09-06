@@ -222,3 +222,63 @@ fn two_connection_takeover_race_retains_the_database_fence_and_refuses_stale_fol
     );
     assert_eq!(f.bytes(), before);
 }
+
+#[test]
+fn observation_rechecks_expiry_after_held_sql_including_exact_event_retry() {
+    for retry in [false, true] {
+        let f = Fixture::new(true);
+        let event = f.observation();
+        let observe = || {
+            f.store.observe_proxy_operation(
+                &f.input.scope,
+                &f.input.proxy_id,
+                f.lease.as_ref().unwrap(),
+                proto::ProxyObservedState::NotServing,
+                Some("RUNTIME_UNAVAILABLE"),
+                &event,
+            )
+        };
+        if retry {
+            observe().unwrap();
+        }
+        let pid = pid(&f);
+        let expiry: i64 = f.client().query_one(
+            "UPDATE mcp_proxy_controller_leases SET expires_at_micros= floor(extract(epoch FROM clock_timestamp())*1000000)::bigint+1000000 WHERE proxy_id=$1 RETURNING expires_at_micros",
+            &[f.input.proxy_id.as_uuid()],
+        ).unwrap().get(0);
+        let before = f.bytes();
+        let mut blocker = f.client();
+        let mut lock = blocker.transaction().unwrap();
+        lock.batch_execute("LOCK TABLE mcp_proxy_evidence_intents IN ACCESS EXCLUSIVE MODE")
+            .unwrap();
+        std::thread::scope(|scope| {
+            let job = scope.spawn(observe);
+            let blocked = wait_for_lock(&f, pid, "FROM mcp_proxy_evidence_intents");
+            let mut clock = f.client();
+            let early = database_now(&mut clock) < u64::try_from(expiry).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while database_now(&mut clock) < u64::try_from(expiry).unwrap()
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            lock.rollback().unwrap();
+            let result = job.join().unwrap();
+            assert!(
+                blocked && early,
+                "must hold real SQL after initial live-fence check"
+            );
+            assert_eq!(
+                result
+                    .expect_err("expired observation must roll back, including exact retry")
+                    .code(),
+                "PROXY_STALE_FENCE"
+            );
+        });
+        assert_eq!(
+            f.bytes(),
+            before,
+            "expired observation preserves all durable bytes"
+        );
+    }
+}

@@ -6,6 +6,7 @@ pub use apex_contract::{RedactedProstCodec, RedactedProstDecoder, RedactedProstE
 
 mod auth;
 mod gateway;
+pub mod managed_evidence;
 pub mod http_sinks {
     pub use apex_durability::{
         ArchiveHttpPublisher, AuthenticatedHttpConfig, ClickHouseHttpPublisher,

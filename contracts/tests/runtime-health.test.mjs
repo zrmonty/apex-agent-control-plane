@@ -93,6 +93,7 @@ const fields = {
     [7, "observed_at_unix_us", "scalar", "UINT64"], [8, "error_code", "scalar", "STRING"],
     [9, "resource_url", "scalar", "STRING"], [10, "stages", "list", "apex.v1.ProxyStageTiming"],
     [11, "readiness", "message", "apex.v1.ReadinessReport"],
+    [12, "launch_attestation", "message", "apex.v1.RuntimeLaunchAttestation"],
   ],
 };
 for (const [name, expected] of Object.entries(fields)) {

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.js",
     "./json": "./src/json.js",
+    "./event": "./src/gen/event/apex/v1/event_pb.js",
     "./gen/*": "./src/gen/*"
   },
   "dependencies": {

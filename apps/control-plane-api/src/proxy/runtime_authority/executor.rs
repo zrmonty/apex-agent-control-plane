@@ -189,6 +189,7 @@ pub(super) fn run<B: Backend>(
 }
 
 fn store_status(error: ProxyError) -> tonic::Status {
+    eprintln!("runtime_authority_store_refused code={}", error.code());
     use tonic::Code;
     let code = match error.code() {
         "RUNTIME_AUTHORITY_CANCELLED" => Code::Cancelled,

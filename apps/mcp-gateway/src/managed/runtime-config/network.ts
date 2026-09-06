@@ -103,3 +103,7 @@ function permitted(range: Range, privateDestination: boolean): boolean {
     [0x3fffn << 112n, (0x3fff1000n << 96n) - 1n],
   ].some(overlaps);
 }
+
+// Pure range helpers shared by compiled metadata and guarded address selection.
+// They establish no DNS provenance, host policy or socket confinement.
+export { address, cidr, contains };

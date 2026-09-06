@@ -27,8 +27,30 @@ impl DurableProxyEventSink {
             crate::envelope::time::rfc3339_from_uuidv7(&event.request_id).ok_or_else(|| {
                 ProxyError::invalid_proxy_spec("Proxy lifecycle IDs must be UUIDv7 values.")
             })?;
+        let event_id = if event.operation == "validation_succeeded" {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(format!("proxy-validation-succeeded:{}", event.request_id));
+            let mut bytes = *uuid::Uuid::parse_str(&event.request_id)
+                .map_err(|_| ProxyError::invalid_request_id())?
+                .as_bytes();
+            bytes[6..].copy_from_slice(&digest[..10]);
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            uuid::Uuid::from_bytes(bytes).to_string()
+        } else {
+            event.request_id.clone()
+        };
+        Self::encode_at(event, &event_id, timestamp)
+    }
+
+    fn encode_at(
+        event: &ProxyLifecycleEvent,
+        event_id: &str,
+        timestamp: String,
+    ) -> Result<IngestRequest, ProxyError> {
+        validate_event(event)?;
         let envelope = apex_durability::proto::EventEnvelope {
-            event_id: event.request_id.clone(),
+            event_id: event_id.to_owned(),
             timestamp,
             r#type: 7, // EventType::WORKFLOW
             agent_id: PRODUCER_AGENT_ID.to_owned(),
@@ -70,6 +92,36 @@ impl DurableProxyEventSink {
     }
 }
 
+/// The journal freezes this identity and actual wall-clock sample on acceptance.
+#[cfg(feature = "postgres")]
+pub(crate) fn managed_event(
+    event: &ProxyLifecycleEvent,
+    event_id: &str,
+    unix_us: u64,
+) -> Result<apex_durability::proto::EventEnvelope, ProxyError> {
+    use prost::Message;
+    if event_id == event.request_id
+        || !super::validation::is_lowercase_uuidv7(event_id)
+        || unix_us == 0
+        || unix_us > i64::MAX as u64
+    {
+        return Err(ProxyError::invalid_request_id());
+    }
+    // Authenticated subjects allow 256 bytes, including opaque values that the
+    // evidence secret scanner correctly refuses to publish verbatim. The exact
+    // subject remains in lifecycle history/idempotency; evidence uses its hash.
+    let mut redacted = event.clone();
+    use sha2::{Digest, Sha256};
+    redacted.actor_id = format!("{:x}", Sha256::digest(event.actor_id.as_bytes()));
+    let request = DurableProxyEventSink::encode_at(
+        &redacted,
+        event_id,
+        crate::envelope::time::format_rfc3339_micros(u128::from(unix_us)),
+    )?;
+    apex_durability::proto::EventEnvelope::decode(request.envelope())
+        .map_err(|_| ProxyError::event_sink_unavailable())
+}
+
 impl ProxyEventSink for DurableProxyEventSink {
     fn emit(&self, event: ProxyLifecycleEvent) -> Result<(), ProxyError> {
         let request = Self::encode(&event)?;
@@ -84,8 +136,8 @@ fn validate_event(event: &ProxyLifecycleEvent) -> Result<(), ProxyError> {
         || !super::validation::is_scope_identifier(&event.scope.workspace_id)
         || !super::validation::is_scope_identifier(&event.scope.namespace_id)
         || !super::validation::is_scope_identifier(&event.operation)
-        || !super::validation::is_scope_identifier(&event.actor_id)
-        || !super::validation::is_scope_identifier(&event.reason_code)
+        || super::validation::bounded_required_string(event.actor_id.clone()).is_err()
+        || super::validation::bounded_required_string(event.reason_code.clone()).is_err()
     {
         return Err(ProxyError::invalid_proxy_spec(
             "Proxy lifecycle events require bounded metadata identifiers.",
@@ -179,6 +231,22 @@ mod tests {
         sink.emit(lifecycle).unwrap();
 
         assert_eq!(backend.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn two_validation_stages_of_one_request_have_distinct_stable_evidence() {
+        let backend = Arc::new(ControlOutboxBackend::new(Box::new(
+            apex_durability::InMemoryOutbox::new(8).unwrap(),
+        )));
+        let sink = DurableProxyEventSink::new(Arc::clone(&backend));
+        let mut lifecycle = event();
+        lifecycle.operation = "validate_proxy".into();
+        sink.emit(lifecycle.clone()).unwrap();
+        lifecycle.operation = "validation_succeeded".into();
+        sink.emit(lifecycle.clone())
+            .expect("distinct validation outcome identity");
+        sink.emit(lifecycle).unwrap();
+        assert_eq!(backend.pending_count().unwrap(), 2);
     }
 
     #[test]

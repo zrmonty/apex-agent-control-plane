@@ -3,6 +3,33 @@ package apex.v1;
 import "apex/v1/mcp_proxy.proto";
 import "apex/v1/proxy_trace.proto";
 import "apex/v1/proxy_approval.proto";
+import "apex/v1/proxy_management.proto";
+
+// Production reconciliation ingress. Claims are correlation, never effect authority.
+// Actual Controller mTLS and online current deployment resolution are required.
+service RuntimeExecutionService {
+  rpc ReconcileRuntime(RuntimeReconcileRequest) returns (RuntimeReconcileResponse);
+}
+message RuntimeReconcileRequest {
+  uint32 schema_version = 1;
+  RuntimeTarget target = 2;
+  string operation_id = 3;
+  string command_id = 4;
+  string config_hash = 5;
+}
+// Current operation correlation is distinct from immutable installed evidence.
+// Echoed claims are not a grant. Missing runtime never establishes readiness or
+// proves retirement cleanup; an effect owner must independently prove that.
+message RuntimeReconcileResponse {
+  uint32 schema_version = 1;
+  RuntimeReconcileRequest claims = 2;
+  ProxyObservedState observed_state = 3;
+  // Installed launch target/fence, including readiness.target, is never rewritten
+  // to the current claims on lease handoff, pause or reconciliation of old state.
+  RuntimeObservation runtime = 4;
+  // Semantic owners accept bounded static codes only, never raw diagnostics.
+  string error_code = 5;
+}
 
 // Workload mTLS-only host boundary. No arbitrary exec, mount or image pull RPC.
 service ProxyRuntimeAgent {
@@ -96,6 +123,17 @@ message RuntimeObservation {
   // Additive wire evidence, not authority. Validated owners must check target,
   // outer/report consistency and bounded freshness; ready never implies admitting.
   ReadinessReport readiness = 11;
+  // Present only for a new fully sealed proof-bearing launch. No raw credential.
+  // Actual restricted-agent TLS, publication and profile joins remain mandatory.
+  RuntimeLaunchAttestation launch_attestation = 12;
+}
+message RuntimeLaunchAttestation {
+  uint32 schema_version = 1;
+  string installation_id = 2;
+  RuntimeLaunchContext launch = 3;
+  string instance_proof_sha256 = 4;
+  string staged_manifest_sha256 = 5;
+  string image_id = 6;
 }
 message UpstreamProbeObservation {
   RuntimeTarget target = 1;
