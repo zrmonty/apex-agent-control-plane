@@ -1,2 +1,2 @@
 src/gen/** text eol=lf
-src/gen/*.binpb -text
+src/gen/**/*.binpb -text
