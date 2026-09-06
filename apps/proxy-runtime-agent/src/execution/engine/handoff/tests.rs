@@ -19,6 +19,7 @@ fn fixture() -> Installed {
         tools_json: "{}".into(), publication_hash: "a".repeat(64), image_id: format!("sha256:{}", "b".repeat(64)),
         mount_profile: "private-stage-v1".into(), unset_env: vec![], container_id: String::new(),
         phase: super::super::super::record::Phase::CreateIntent, files: BTreeMap::new(), instance_proof_version: Some(1), network: None,
+        guard_stage: None,
     };
     for name in [
         "instance-proof",

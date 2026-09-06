@@ -13,7 +13,7 @@ use std::{
 };
 pub(super) const DORMANT: &str = "RUNTIME_NETWORK_ENFORCEMENT_UNAVAILABLE";
 const ERROR: &str = "RUNTIME_PROVISIONING_QUARANTINED";
-fn budget(job: &Job) -> Result<Duration, &'static str> {
+pub(super) fn budget(job: &Job) -> Result<Duration, &'static str> {
     deadline(job)?
         .checked_duration_since(Instant::now())
         .ok_or("RUNTIME_LEASE_EXPIRED")
@@ -210,6 +210,7 @@ pub(super) fn run(
             files: Default::default(),
             instance_proof_version: Some(1),
             network: None,
+            guard_stage: None,
         });
         ctx.resources.journal.save(&record)?;
     }
@@ -220,42 +221,7 @@ pub(super) fn run(
         .journal
         .network_reserved(&ctx.installation, record.installed.as_ref().ok_or(ERROR)?)?;
     if metadata.network.is_some() || reserved {
-        let catalog = metadata.network.as_ref().ok_or(DORMANT)?;
-        let (_, now) = checkpoint(ctx, job, Some(&metadata))?;
-        let i = record.installed.as_mut().ok_or(ERROR)?;
-        super::network::prepare(catalog, &ctx.installation, i, now.checked_at_unix_us)?;
-        let binding = ctx
-            .resources
-            .journal
-            .reserve_network(catalog, &ctx.installation, i)?;
-        if i.network.as_ref().is_some_and(|old| old != &binding) {
-            return Err(ERROR);
-        }
-        i.network = Some(binding);
-        ctx.resources.journal.save(&record)?;
-        super::network_owner::prepare_empty(
-            ctx,
-            job,
-            &metadata,
-            record.installed.as_ref().ok_or(ERROR)?,
-        )?;
-        let (_, now) = checkpoint(ctx, job, Some(&metadata))?;
-        let i = record.installed.as_ref().ok_or(ERROR)?;
-        let history = ctx.resources.journal.topology_history(&ctx.installation)?;
-        let observed = history.get(&i.instance).ok_or(DORMANT)?;
-        let _guard_data = super::guard_stage::produce(super::guard_stage::Inputs {
-            installation: &ctx.installation,
-            installed: i,
-            launch: &launch,
-            selected: &selected,
-            catalog,
-            images: &catalogs.images,
-            source_digest: metadata.digest(),
-            observed,
-            now: now.checked_at_unix_us,
-        })
-        .map_err(|_| DORMANT)?;
-        // Guard data and an empty network are not a stage or activation permit.
+        super::guard_staging::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
         return Err(DORMANT);
     }
     checkpoint(ctx, job, Some(&metadata))?;

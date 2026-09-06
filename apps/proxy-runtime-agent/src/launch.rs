@@ -75,7 +75,7 @@ impl PreparedLaunch {
 }
 
 impl LaunchCatalog {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn fixture_prepare_data(
         &self,
         authority: &proto::RuntimeAuthoritySnapshot,

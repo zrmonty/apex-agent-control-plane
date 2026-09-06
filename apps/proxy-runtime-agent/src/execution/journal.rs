@@ -125,6 +125,12 @@ impl Journal {
             return Err(ERROR);
         }
         for i in [&r.installed, &r.predecessor].into_iter().flatten() {
+            if let Some(stage) = &i.guard_stage {
+                if stage.root_identity.is_none() {
+                    return Err(ERROR);
+                }
+                stage.validate(installation, i)?;
+            }
             if let Some(binding) = &i.network {
                 binding.validate(installation, i)?;
                 if i.phase != super::record::Phase::Intent

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createSecureServer, type ServerHttp2Session, type ServerHttp2Stream, type IncomingHttpHeaders } from "node:http2";
+import { createSecureServer, type ClientHttp2Session, type ClientHttp2Stream,
+  type ServerHttp2Session, type ServerHttp2Stream, type IncomingHttpHeaders } from "node:http2";
 import type { AddressInfo, Socket } from "node:net";
 import test, { type TestContext } from "node:test";
 import { certificate, key } from "../authority/testing-tls.js";
@@ -174,13 +175,92 @@ test("captured destination and native key buffers cannot change during connectio
   owner.cancel(); await owner.closed;
 });
 
-test("real GOAWAY revokes the published session and closes guarded sockets", async t => {
-  const f = await fixture(t, stream => stream.resume());
+async function assertNativeRequestRefused(session: ClientHttp2Session): Promise<"synchronous" | "asynchronous"> {
+  let stream: ClientHttp2Stream;
+  try { stream = session.request({ ":path": "/" }); }
+  catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, "ERR_HTTP2_INVALID_SESSION");
+    return "synchronous";
+  }
+  // Node 24.20 defers session-state errors to the returned stream. Observe its
+  // error AND native close; a returned stream alone is neither success nor failure.
+  const errors: Error[] = [];
+  let responses = 0;
+  stream.on("error", error => errors.push(error));
+  stream.on("response", () => { responses++; });
+  await new Promise<void>(done => stream.once("close", done));
+  assert.equal(responses, 0);
+  assert.equal(errors.length, 1);
+  assert.equal((errors[0] as NodeJS.ErrnoException).code, "ERR_HTTP2_INVALID_SESSION");
+  assert(stream.destroyed);
+  assert.equal(stream.id, undefined, "refused request must never acquire a wire stream ID");
+  return "asynchronous";
+}
+
+test("real GOAWAY revokes the published session and closes guarded sockets", { timeout: 10_000 }, async t => {
+  let dispatched = 0;
+  const f = await fixture(t, stream => { dispatched++; stream.resume(); });
+  const anchor = f.start(); await anchor.result;
+  const anchorPeer = [...f.sessions][0], open = GuardedTlsConnector.prototype.open;
+  let exchangeClosed = false, tlsClosed = false, h2Closed = false;
+  // Observe the real receipt, which requires both raw TCP and TLS close events.
+  const observation = t.mock.method(GuardedTlsConnector.prototype, "open", function (
+    this: GuardedTlsConnector, ...args: Parameters<typeof open>
+  ) {
+    const exchange = open.apply(this, args);
+    void exchange.closed.then(() => { exchangeClosed = true; });
+    return exchange;
+  });
   const owner = f.start(), session = await owner.result;
-  [...f.sessions][0].goaway(); await owner.closed;
-  assert(session.destroyed); assert.throws(() => session.request({ ":path": "/" }));
-  const replacement = f.start(); await replacement.result; replacement.cancel(); await replacement.closed;
+  observation.mock.restore();
+  session.socket.once("close", () => { tlsClosed = true; });
+  session.once("close", () => { h2Closed = true; });
+  let duringGoaway: ReturnType<typeof f.start> | undefined;
+  session.once("goaway", () => { duringGoaway = f.start(); });
+  const peer = [...f.sessions].find(value => value !== anchorPeer)!;
+  peer.goaway(); await owner.closed;
+  assert(session.destroyed);
+  assert(exchangeClosed, "owner.closed must await the actual TCP/TLS exchange receipt");
+  assert(tlsClosed); assert(h2Closed);
+  assert(duringGoaway, "the real peer GOAWAY must reach the published session");
+  await assert.rejects(duringGoaway.result, /guarded HTTP\/2 connection refused safely/);
+  await duringGoaway.closed;
+  t.diagnostic(`native destroyed-session request refusal: ${await assertNativeRequestRefused(session)}`);
+  assert.equal(dispatched, 0, "no request may reach upstream after revocation");
+  // Anchor still occupies the other slot, so this proves the revoked slot recovers.
+  const replacement = f.start(); await replacement.result;
+  const full = f.start(); await assert.rejects(full.result, /refused safely/); await full.closed;
+  replacement.cancel(); anchor.cancel(); await Promise.all([replacement.closed, anchor.closed]);
 });
+
+for (const kind of ["authority", "evidence"] as const) {
+  test(`real GOAWAY aborts owned ${kind} RPCs and refuses new dispatch`, { timeout: 10_000 }, async t => {
+    let dispatched = 0, received!: () => void;
+    const seen = new Promise<void>(done => { received = done; });
+    const f = await fixture(t, stream => { dispatched++; stream.resume(); received(); });
+    const owner = f.start(), session = await owner.result;
+    const channel = kind === "authority"
+      ? new OwnedAuthorityChannel(session, { token: "test-only-workload-token", instanceProof: Buffer.alloc(32, 7) })
+      : new OwnedEvidenceChannel(session, "test-only-evidence-token");
+    const start = () => {
+      if (channel instanceof OwnedAuthorityChannel) {
+        return channel.start("/apex.v1.ManagedRuntimeAuthority/RenewDeployment", Buffer.alloc(0));
+      }
+      const now = process.hrtime.bigint();
+      return channel.start(Buffer.alloc(0), now, now + 5_000_000_000n);
+    };
+    const request = start();
+    const rejected = assert.rejects(request.result, new RegExp(`managed ${kind} refused safely`));
+    await seen; assert.equal(dispatched, 1);
+    const peer = [...f.sessions][0];
+    const peerClosed = new Promise<void>(done => peer.once("close", done));
+    peer.goaway();
+    await rejected; await request.closed; await owner.closed;
+    assert.throws(start, new RegExp(`managed ${kind} refused safely`));
+    await channel.close(); await peerClosed;
+    assert.equal(dispatched, 1, "revoked channel must dispatch zero additional RPCs");
+  });
+}
 
 test("clock reentry cannot exceed the two physical connection roots", async t => {
   const f = await fixture(t, stream => stream.resume());

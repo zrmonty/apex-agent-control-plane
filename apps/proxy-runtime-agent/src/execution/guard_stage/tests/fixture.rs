@@ -118,6 +118,7 @@ impl Fixture {
             files: BTreeMap::new(),
             instance_proof_version: Some(1),
             network: None,
+            guard_stage: None,
         };
         let mut network_json = crate::network_catalog::tests::fixture();
         network_json["valid_from_unix_us"] = json!(NOW);

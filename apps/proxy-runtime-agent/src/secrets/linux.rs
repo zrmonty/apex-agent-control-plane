@@ -29,6 +29,7 @@ fn mount_id(fd: &impl AsFd) -> Result<u64, StagingError> {
     Ok(s.stx_mnt_id)
 }
 mod cleanup;
+pub(crate) mod guard_staging;
 mod managed;
 pub(crate) mod proof;
 

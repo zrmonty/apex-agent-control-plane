@@ -26,6 +26,8 @@ mod roots;
 #[cfg(target_os = "linux")]
 mod validation;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::guard_staging::{GuardIdentity, GuardRoot};
+#[cfg(target_os = "linux")]
 pub(crate) use linux::proof::InstanceProof;
 
 /// Deployment-owned material metadata, resolved only in its exact target scope.
@@ -92,6 +94,23 @@ impl fmt::Debug for StagingOwner {
 }
 
 impl StagingOwner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn guard_root(&self) -> Result<GuardRoot, StagingError> {
+        self.inner.guard_root()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn guard(
+        &self,
+        instance: &str,
+        config: &[u8],
+        recover: bool,
+        expected: Option<&GuardIdentity>,
+        expected_root: &GuardRoot,
+        check: &mut impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<GuardIdentity, StagingError> {
+        self.inner
+            .guard(instance, config, recover, expected, expected_root, check)
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn remove_managed(
         &self,
