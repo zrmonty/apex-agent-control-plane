@@ -20,8 +20,11 @@ remain open: five and four aggregate acceptance checkboxes, respectively.
 The parent plan still has 17 tasks not fully closed.
 
 Task 4U's guard data producer is reviewed and committed in `71dc905`.
-It supplies data only. Next are protected paired
-staging, verified gateway/guard creation and start/recovery, then actual HTTPS
+It supplies data only. Task 4W connects signature-gated protected guard
+staging and exact recovery; scoped verification and independent review passed.
+Task4W is committed in `cdbcd1f`. This guard
+half remains NotServing. Next are paired gateway staging,
+verified gateway/guard creation and start/recovery, then actual HTTPS
 composition, readiness, route selection, renewal and lifecycle drain. Trace
 projection, scoped queries, UI and full release acceptance remain open.
 
@@ -234,3 +237,28 @@ Scope/spec/quality review passed. This supersedes only the data-production part
 of the previous next step: no stage write, signature, paired container start,
 readiness, route/admission or Serving authority was added. Continue protected
 paired staging and lifecycle composition; Task4/Task5 aggregate gates remain open.
+
+### Task 4W protected guard staging — 2026-09-06
+
+Implemented and independently reviewed after published merge `e01f23e`, then
+committed in `cdbcd1f`. Remote checks remain an exact-integration-SHA gate.
+The [guard-staging composition](../../operations/managed-guard-staging.md) verifies
+the real selected image signature, retains original data/signing/topology/root
+identity in durable intent, and exclusively seals the key-free guard configuration.
+Recovery accepts only an exact complete seal, rechecks current authority/metadata
+and native topology, and syncs recovered files/directories before recording Sealed.
+Missing, partial, replaced or changed state remains quarantined. Legacy checksums
+and network owner identity remain compatible; no container start is added.
+
+Exact formatted-source Linux image `de33a911ae500baa27a985e1e4ba5007b446b80c1f70f3cad88f133090d65cf1`
+matches all25 Rust sources. Linux303 tests passed with36 explicit ignores; Windows170
+passed with5 explicit ignores. Separately executed native network/signature-refusal
+tests11 and same-inode bind-mount refusal1 passed. Linux/Windows strict Clippy and
+scoped formatting passed; largest owned Rust file539lines. All94 unrelated dirty
+file hashes and the complete pre-existing11-network inventory remain unchanged.
+
+No positive signed production guard-stage or paired runtime acceptance is claimed.
+Recovery covers service-process restart with retained mounts, not remount/reboot
+or agent-container recreation. Paired gateway staging, verified paired container
+lifecycle, HTTPS readiness/routes/admission and Task5 tracing remain open. Parent
+task counts and Task4/Task5 aggregate checkboxes do not change.

@@ -2,6 +2,8 @@
 use super::*;
 mod collision;
 mod gate;
+#[path = "guard_staging.rs"]
+mod guard_staging;
 mod recovery;
 fn docker(args: &[&str]) -> Value {
     let out = Command::new("/apex-engine-tools/docker")

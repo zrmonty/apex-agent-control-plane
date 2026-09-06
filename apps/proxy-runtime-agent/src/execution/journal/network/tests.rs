@@ -53,6 +53,7 @@ fn installed() -> Installed {
         files: Default::default(),
         instance_proof_version: Some(1),
         network: None,
+        guard_stage: None,
     }
 }
 #[test]

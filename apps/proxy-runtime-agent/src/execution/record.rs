@@ -30,6 +30,13 @@ pub(super) struct Installed {
         skip_serializing_if = "Option::is_none"
     )]
     pub network: Option<super::network::Binding>,
+    #[cfg(target_os = "linux")]
+    #[serde(
+        default,
+        deserialize_with = "super::guard_staging::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub guard_stage: Option<super::guard_staging::GuardStage>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Phase {

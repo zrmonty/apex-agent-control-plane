@@ -8,8 +8,10 @@ use super::{metadata::Selected, network_owner::topology::Document, record::Insta
 use crate::proto;
 use crate::{image_catalog::ImageCatalog, launch::PreparedLaunch, network_catalog::NetworkCatalog};
 use std::collections::BTreeMap;
+mod frozen;
 mod routes;
 mod serialize;
+pub(super) use frozen::reproduce;
 
 const ERROR: &str = "RUNTIME_GUARD_STAGE_REFUSED";
 pub(super) struct Inputs<'a> {

@@ -4,6 +4,8 @@ mod engine;
 #[cfg(target_os = "linux")]
 mod guard_stage;
 #[cfg(target_os = "linux")]
+mod guard_staging;
+#[cfg(target_os = "linux")]
 mod journal;
 #[cfg(target_os = "linux")]
 pub(crate) mod metadata;

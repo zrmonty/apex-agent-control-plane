@@ -12,9 +12,9 @@ tasks**. Component completion does not imply full task acceptance.
 The separate runtime continuation has completed Tasks 1–3 and two open tasks,
 4–5. Its nine unchecked acceptance items are not nine additional parent tasks.
 
-Integration baseline: `fe8ce35618474880914b15bab42c71c7e1970188`, the previous
-CI authority-observation fix merge. Task 4U's reviewed guard data producer is
-committed in `71dc905`; this documentation records its integration checkpoint.
+Previous published integration baseline: `e01f23e0a12cf409595b520c1a8cddabe2a48398`.
+Task4U's guard producer was committed in `71dc905`; Task4W's reviewed protected
+guard-staging continuation and Node24 HTTP/2 regression fix are committed in `cdbcd1f`.
 GitHub CI status must be checked for the exact release SHA; no remote CI success
 or production release is asserted by this document.
 
@@ -53,7 +53,20 @@ After the pushed checkpoint, Task4U implemented and independently reviewed the
 Rust tests, actual Rust-to-TypeScript handoff and native dormant-path regression
 passed. This does not close any stage-write or execution boundary below.
 
-1. Connect protected staging and verified gateway/guard container provisioning,
+Task4W's [protected guard staging](managed-guard-staging.md) implementation
+passed scoped verification and independent review. It freezes guard data and signing
+identity before exclusive storage effects, verifies exact sealed recovery, and
+keeps missing/partial/changed state quarantined. Recovery evidence is limited to
+service-process restart with the original mounts retained; it is not host reboot,
+agent-container recreation, positive signed Apex deployment, or Serving acceptance.
+
+Task4W verification: Linux303 passed/36 explicit ignores, Windows170 passed/5
+explicit ignores, plus separately executed native network/signature refusal11 and
+same-inode bind-mount refusal1. Strict Clippy on both platforms and scoped formatting
+passed. Exact Linux image matched all25 Rust sources; largest owned Rust file539
+lines. Original11-network inventory and94 unrelated dirty-file hashes were unchanged.
+
+1. Finish paired gateway staging and verified gateway/guard container provisioning,
    inspect actual networking, and implement start/recovery without weakening
    current-operation checks or uncertain-effect quarantine.
 2. Compose the actual gateway HTTPS/session root with live authority, upstream and

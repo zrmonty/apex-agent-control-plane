@@ -8,8 +8,12 @@ container effects. The control plane uses authenticated `ReconcileRuntime` calls
 the production agent does not register legacy mutation RPCs.
 
 This is not managed Serving. Protected paired gateway/guard staging and verified
-paired creation/start/recovery remain unfinished. The reviewed local guard data
-producer writes no stage and grants no execution permission. See the
+paired creation/start/recovery remain unfinished. The guard data producer itself
+writes no stage. The [Task4W guard-staging composition](managed-guard-staging.md)
+adds real signature verification, durable intent and confined sealing/recovery;
+scoped verification and independent review passed, and implementation is committed
+in `cdbcd1f`. Positive production staging with approved signed Apex images is unproven.
+It grants no execution permission. See the
 [integration checkpoint](managed-runtime-checkpoint.md) and
 [runtime continuation](../superpowers/plans/2026-09-05-runtime-execution-continuation.md)
 for scoped acceptance and current publication status. Neither a callback snapshot,
@@ -57,8 +61,8 @@ match and returns borrowed signing constraints. It performs no network or engine
 
 ## Remaining execution gates, in order
 
-1. Bind the produced guard data to protected paired staging. Verify the selected
-   gateway and guard images under the approved signing policy. Retain exact
+1. Finish protected paired gateway staging after the guard-staging boundary.
+   Verify the selected gateway and guard images under the approved signing policy. Retain exact
    publication, launch, material, topology and durable ownership joins.
 2. Connect paired create/inspect/start/recovery. Recheck current authority at each
    effect boundary. Preserve uncertain-effect quarantine and inspect actual network

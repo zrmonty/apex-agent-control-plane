@@ -70,7 +70,9 @@ The [runtime execution continuation](superpowers/plans/2026-09-05-runtime-execut
 
 The reviewed [guard-stage data producer](operations/managed-guard-stage-producer.md) is committed in `71dc905`. It derives exact bounded configuration, manifest and environment from the current publication/catalog and original validated topology. Actual Rust output passes the unchanged TypeScript consumers, including integer expiry above 2^53. This produces data only, not a written stage or execution permission.
 
-Next: durably stage that data with verified gateway/guard creation, start and recovery; then wire the actual HTTPS/session root, readiness, route selection, admission renewal and lifecycle drain. The managed gateway entry still fails closed. Production usability and end-to-end trace projection/query/UI remain open; integer-microsecond fields and isolated transport tests do not close those gates.
+The implemented and independently reviewed [Task 4W guard-staging boundary](operations/managed-guard-staging.md), committed in `cdbcd1f`, connects real signature verification to durable intent, protected sealing and exact restart recovery. Linux storage/native refusal checks pass; positive production staging with approved signed Apex images remains unproven. It stages only the guard configuration and remains NotServing; it does not complete paired staging or container execution. Remote CI must be checked against the exact integration SHA.
+
+Next: finish paired gateway staging and verified gateway/guard creation, start and recovery; then wire the actual HTTPS/session root, readiness, route selection, admission renewal and lifecycle drain. The managed gateway entry still fails closed. Production usability and end-to-end trace projection/query/UI remain open; integer-microsecond fields and isolated transport tests do not close those gates.
 
 The added tracing requirement is microsecond-level elapsed measurement and precision-preserving evidence, queries and UI. Clock source, uncertainty and incomplete spans must be visible; millisecond timestamps padded with zeros do not pass.
 
