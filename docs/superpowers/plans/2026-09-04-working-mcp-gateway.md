@@ -27,61 +27,55 @@
 ## Status and authorization
 
 Execution was authorized by the subsequent request to execute this plan.
-Tasks 1-5 are implemented, verified and independently reviewed: publication
-restrictions are in `33a053a`, the browser/UI and compiler foundation in
-`cc30a1c`, and the complete generated runtime chain in `2ec1297`.
-Fresh evidence includes 305 UI tests, three consecutive actual browser journeys,
-all 79 startup tests and 486 gateway tests with one existing Windows
-symlink skip. The startup subprocess finding is closed. Managed composition remains
-deliberately unavailable until real network/admission enforcement is connected.
-Task 6's rebuilt image passes the independently reviewed packaging harness.
-Explicit startup profiles and truthful bootstrap configuration are committed
-in `b973488`; additive launch/readiness contracts are committed in `a6fc19b`.
-Pure launch metadata validation is committed in `0ba80dc`; Rust health-wire
-precision checks are in `79de522`. The corrected image startup suite passes all
-eight cases and rejects the older image's implicit-standalone behavior (`3679446`).
-The bounded readiness monitor is committed in `6dafe00` after shutdown/nested
-startup regression fixes, independent re-review, and fresh full gateway checks.
-The shared report validator is committed in `09c04fa`, and bounded authenticated
-loopback health transport in `6c4cc95`, after independent review and fresh
-full-suite/typecheck/build checks. The fixed Linux staged-health-material loader
-has also passed independent review, 51 component cases and 15 actual Linux
-cases after its timer/currentness corrections. Trusted staging and real probe-owner
-composition remain open; these checks do not establish managed serving or
-end-to-end tracing.
-Task 7's pure runtime-agent identity/configuration/inspection boundary is committed
-in `b5d0391` (43 tests); authenticated authority and provisioning remain open.
-Shared producer/agent manifest hashing and exact certificate-role/scope policy
-are committed in `d652276` after independent review and real local mTLS tests.
-Their CI coverage reuses the existing Rust job and fixtures (`68d8d77`).
-The current PostgreSQL operation/lease/publication lookup is committed in
-`aff8ae3` after real database tests and independent review. The authenticated
-callback and actual runtime effects remained open at that store checkpoint;
-neither a peer check nor a point-in-time store snapshot is an execution permit.
-The additive check-only authority wire, shared Agent/observed-Controller pair
-check and redacted generated decoder are reviewed and verified. The 2026-09-05
-continuation implements the server-side callback, paired metadata reader, owned
-bounded PostgreSQL worker and explicit startup registration. Actual mTLS/PG and
-production-root tests pass on Windows and Linux. The runtime-agent callback
-client now validates actual Controller TLS and every snapshot binding; a test-only
-two-hop ingress reaches the real production control root and PostgreSQL.
-Provisioning now includes strict image-catalog selection, real Linux Cosign
-verification and confined secret staging. Required CI acceptance exercises the
-actual verifier and root filesystem behavior. The approved
-[online deployment-binding continuation](2026-09-05-runtime-deployment-binding.md)
-adds published RuntimeConfiguration resolution through the real control root and
-agent client. Production ingress, launch-context/material binding, bounded
-blocking-owner composition and durable engine effects remain open;
-these primitives are not connected to EnsureRuntime and do not establish Serving.
-See the [provisioning guide](../../operations/mcp-runtime-provisioning.md),
-[callback guide](../../operations/mcp-runtime-authority.md) and
-[runtime evidence continuation](../../operations/mcp-gateway-runtime-evidence.md)
-for the exact slice boundaries and post-review verification.
-The Task 16 integer clock primitives are implemented, not end-to-end tracing.
-Full readiness, remaining tasks and G0-G3 aggregate gates are incomplete. See
-the [release evidence ledger](../../operations/mcp-gateway-release-evidence.md)
-for tested checkpoints and limitations. Execution authorization does not supply
-production credentials or enable real mutating business tools.
+
+### Current status — 2026-09-06
+
+**Five parent tasks are complete; 17 are not fully closed.** This counts accepted
+deliverables, not remaining effort or untouched code. The plan still has 22 tasks.
+
+| Parent task IDs | Status | Remaining boundary |
+| --- | --- | --- |
+| 1–5 | Complete | Contracts, durable desired state, browser/session/API, real UI client and immutable configuration compiler are accepted at their task boundaries. |
+| 6–10 | Open; substantial partial implementation | Finish protected paired staging, verified gateway/guard start/recovery, HTTPS serving, readiness, routing and lifecycle. |
+| 11–16 | Open; component work exists | Integrate generic tools, inbound/outbound auth, approvals/admission, CLI/stdio, durable activity and end-to-end microsecond spans/storage/query. |
+| 17–22 | Open; foundation and registry work exists | Complete operator workflows, trace waterfall, installation, live acceptance and security/performance/recovery release proof. |
+
+The [runtime execution continuation](2026-09-05-runtime-execution-continuation.md)
+decomposes unfinished runtime work and its tracing/acceptance dependencies.
+Its Tasks 1–3 are complete for publication-bound launch/material selection,
+authenticated production ingress and durable **stopped-container** provisioning.
+Its Tasks 4–5 remain open, with nine aggregate acceptance checkboxes. These are
+not two remaining tasks for the whole product and are not added to the parent count.
+
+Current components include managed deployment/call authority, workload enrollment,
+durable evidence admission, protected stage readers, credential preflight, guarded
+upstream clients, guard relays, control transports and owned empty-network recovery.
+The reviewed Task 4U guard data producer is committed in `71dc905`.
+Data production is not protected staging or execution permission.
+
+Integration baseline: `fe8ce35618474880914b15bab42c71c7e1970188`, the previous
+CI authority-observation fix merge. Task 4U's `71dc905` follows that baseline.
+See the [integration checkpoint](../../operations/managed-runtime-checkpoint.md)
+for current boundaries and resume order. The
+[release evidence ledger](../../operations/mcp-gateway-release-evidence.md)
+retains historical commands, counts, failures and their limitations.
+
+### Completion rules
+
+- Keep parent tasks open until their full acceptance boundary is verified.
+  Earlier unchecked step lists can contain work completed by later continuations;
+  do not use a raw checkbox count as a count of unimplemented work.
+- Do not equate a completed sub-slice, a running container or a successful RPC with
+  managed Serving. The production gateway factory still fails closed.
+- Task 16 clock primitives and integer-preserving admission tests are component
+  evidence. Full spans, durable projection, scoped queries and the UI waterfall
+  remain required. Preserve exact integer microseconds, monotonic elapsed timing,
+  clock metadata and explicit incomplete spans.
+- G0–G3 remain open. The 15-case release registry has no implemented live runners.
+  Existing native/component journeys do not substitute for that integrated gate.
+- Record local uncommitted work separately from merged work and exact-SHA CI.
+  Execution authorization does not supply production credentials, approve release
+  signing or enable real mutating business tools.
 
 The assessment baseline is `1a6df0908de0a604415fd5c1631f697656d679ee`. Existing components should be repaired/reused, not rewritten automatically. Earlier plans are context; this task sequence resolves the observed usability gaps and includes the subsequent explicit microsecond-tracing requirement.
 

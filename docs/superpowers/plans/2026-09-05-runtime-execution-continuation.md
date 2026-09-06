@@ -10,6 +10,26 @@
 
 **Spec:** [Approved delivery design](../specs/2026-09-04-working-mcp-gateway-design.md), especially sections 4, 6, 8 and 9. This continuation decomposes the unfinished [runtime plan](2026-09-04-working-mcp-gateway-02-runtime.md); the user authorized the full sequence after CI passed on `179a770`.
 
+## Current status — 2026-09-06
+
+This continuation is a breakdown of work in the [22-task parent plan](2026-09-04-working-mcp-gateway.md),
+not a replacement for it. Continuation Tasks 1–3 are complete for launch binding,
+authenticated ingress and durable **stopped-container** provisioning. Task 4
+(enforced routing/lifecycle) and Task 5 (microsecond tracing/integrated acceptance)
+remain open: five and four aggregate acceptance checkboxes, respectively.
+The parent plan still has 17 tasks not fully closed.
+
+Task 4U's guard data producer is reviewed and committed in `71dc905`.
+It supplies data only. Next are protected paired
+staging, verified gateway/guard creation and start/recovery, then actual HTTPS
+composition, readiness, route selection, renewal and lifecycle drain. Trace
+projection, scoped queries, UI and full release acceptance remain open.
+
+Use the [integration checkpoint](../../operations/managed-runtime-checkpoint.md)
+for the current resume order. Dated execution entries below retain historical
+failures and intermediate next steps. Later checkpoints supersede those next
+steps; they do not retroactively establish Serving or close parent tasks.
+
 ## Global Constraints
 
 - Work only in `E:/Agent Control Plane/.worktrees/working-mcp-gateway`; preserve unrelated UI formatting and the main checkout's concurrent work.
@@ -197,3 +217,20 @@ Task4/Task5 acceptance checkboxes. Guard-stage production, verified paired
 container creation/start/recovery, actual gateway HTTPS/session composition,
 readiness, route/admission lifecycle, and end-to-end trace projection/query/UI
 remain unfinished. See the [checkpoint and resume order](../../operations/managed-runtime-checkpoint.md).
+
+### Task 4U guard data producer — 2026-09-06
+
+Implemented after checkpoint merge and independently reviewed: exact bounded
+key-free configuration, one-file manifest, fixed environment and guard image
+selection from held publication/catalog inputs and original validated topology.
+All required purpose grants intersect without widening. Current validity retains
+exact integer microseconds through i64::MAX. Actual Rust output passes unchanged
+TypeScript configuration/environment consumers. Final scoped tests passed17,
+cross-language tests118, agent regression287 (34explicitly ignored), and native
+empty-network/dormant regression10. An earlier existing service-test timing failure
+is retained in the report, not claimed fixed by this producer.
+
+Scope/spec/quality review passed. This supersedes only the data-production part
+of the previous next step: no stage write, signature, paired container start,
+readiness, route/admission or Serving authority was added. Continue protected
+paired staging and lifecycle composition; Task4/Task5 aggregate gates remain open.

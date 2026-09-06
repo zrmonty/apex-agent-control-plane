@@ -6,7 +6,18 @@ Apex helps teams observe, govern, evaluate, secure, and control agent workloads.
 
 > **Status:** Phase 0, the out-of-band control gateway (cooperative controls plus a supervisor-enacted `force_stop`), the Rust workspace and shared crates, durable admission/fanout separation, and the Apex governance contract boundary are complete. The thin TypeScript MCP gateway in `apps/mcp-gateway` exposes one read-only `portfolio.read` tool, and its live authorization/event path through `control-plane-api` and `event-ingest` has passed the narrow vertical-slice gate. The active milestone is now the managed MCP proxy platform: one hardened isolated container per proxy, with lifecycle and governance controls in the operator UI. The operator UI has a real `MCP proxies` route that talks to the control-plane browser edge, but the rest of the UI is still a placeholder shell, and a usable managed product is not delivered yet. All other roadmap work remains on hold. See the [Apex execution roadmap](docs/roadmap.md).
 
-## What Apex provides
+The [working MCP gateway plan](docs/superpowers/plans/2026-09-04-working-mcp-gateway.md)
+has 22 parent tasks. As of 2026-09-06, five are complete and 17 are not fully
+closed. Authenticated runtime-agent ingress and durable stopped-container
+provisioning are implemented. Managed serving, full lifecycle integration and
+end-to-end microsecond traces remain open. See the
+[current integration checkpoint](docs/operations/managed-runtime-checkpoint.md)
+for tested boundaries, local uncommitted work and the resume order.
+
+## Product scope
+
+The list below describes the overall product scope. It is not a list of delivered
+features. Only the MCP proxy roadmap is active; unrelated surfaces remain on hold.
 
 - A GUI-first console for fleets, traces, workflows, evaluations, incidents, policies, compliance, and cost.
 - Durable event ingest for runs, model calls, tool calls, decisions, errors, evaluations, memory activity, and workflow topology.
@@ -43,7 +54,7 @@ Also see [Phase 0 progress](docs/phase-0-progress.md) and [Phase 0.5 progress](d
 
 Documentation style: [ASD-STE100 Simplified Technical English](docs/writing-style-ste100.md).
 
-## Operator UI preview
+## Operator UI
 
 The operator UI is a local React 19 + TypeScript + Vite application. Only the `MCP proxies` routes (`/mcp-proxies`, `/mcp-proxies/new`, `/mcp-proxies/$proxyId`) call a backend: they use a typed `@apex/contracts` client against the optional browser edge that the `control-plane-api` binary can serve (session, logout, and `McpProxyService` management calls; see [docs/operations/mcp-browser-edge.md](docs/operations/mcp-browser-edge.md)). That browser edge is a development checkpoint with Keycloak login and PostgreSQL-backed sessions, not a published production surface. Every other route (agent groups, events, findings, evidence, retention, deployment, settings) is a placeholder with an explicit empty state and calls nothing.
 
@@ -207,7 +218,7 @@ apps/
   event-ingest/            gRPC ingestion, event validation, durable outbox, replay fanout
   mcp-gateway/             Thin TypeScript MCP gateway; read-only `portfolio.read`; managed proxy runtime image
   operator-ui/             React operator console; `MCP proxies` routes are live, other routes are placeholders
-  proxy-runtime-agent/     Rust wire/inspection boundary for managed proxy runtimes (no listener or provisioning yet)
+  proxy-runtime-agent/     Authenticated Rust runtime agent; durable stopped-container provisioning, not Serving
   reference-providers/     Python mTLS reference ClickHouse-projection and archive-provider services for local/CI
 crates/
   apex-contract/           Generated Protobuf types and contract compatibility evidence

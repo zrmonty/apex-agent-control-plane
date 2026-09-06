@@ -9,6 +9,14 @@
 
 ## Global constraints
 
+Status on 2026-09-06: all six parent tasks (11–16) remain open. Reviewed authority,
+enrollment, call/evidence transport and clock components already exist. They do
+not close generic tool, CLI/stdio, activity-query or end-to-end tracing acceptance.
+Use the [execution index](2026-09-04-working-mcp-gateway.md) for task counts and the
+[integration checkpoint](../../operations/managed-runtime-checkpoint.md) for the
+current boundaries. Original checklist steps are requirements, not an inventory
+of untouched code.
+
 - Apex remains the only policy and durable evidence authority.
 - Inbound credentials are never passed through to upstreams.
 - CLI execution uses approved executables and typed argv with shell interpretation disabled.

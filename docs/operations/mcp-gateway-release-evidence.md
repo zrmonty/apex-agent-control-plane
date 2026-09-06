@@ -1,12 +1,43 @@
 # Working MCP gateway release evidence
 
-## Current status: registry only; release gate failed
+## Current status — 2026-09-06: integrated release gate incomplete
+
+The product is not registry-only: parent Tasks 1–5 are complete and substantial
+runtime, authority and evidence components are implemented. Seventeen parent
+tasks remain not fully closed. See the [execution index](../superpowers/plans/2026-09-04-working-mcp-gateway.md)
+and [current runtime checkpoint](managed-runtime-checkpoint.md). Managed serving
+and full microsecond trace projection/query/UI remain open.
+
+The integration baseline is `fe8ce35` (CI authority-observation test fix).
+Task 4U's reviewed guard data producer is committed in `71dc905`. This ledger
+does not assert remote CI success for the integration or an approved production image.
+
+### Release harness boundary
 
 This ledger covers the acceptance registry portion of [task 1](../superpowers/plans/2026-09-04-working-mcp-gateway-01-control.md) and the matrix in [task 21, subplan 04](../superpowers/plans/2026-09-04-working-mcp-gateway-04-operator-release.md).
 All 15 required live cases are registered and **unimplemented**. Selecting any case produces `ACCEPTANCE_NOT_IMPLEMENTED`, a failed result and exit 1. No case is counted as skipped or passed.
-This does not complete task 1's contracts, task 21's live runners, any G0-G3 gate, or the [implementation plan](../superpowers/plans/2026-09-04-working-mcp-gateway.md).
+Task 1's contracts are complete through separate implementation evidence. Registry
+behavior alone does not establish that completion. Task 21's live runners, all
+G0–G3 gates and the full implementation plan remain incomplete.
 
-## Implementation checkpoints — not live acceptance
+Documentation reconciliation on 2026-09-06 reran the registry checks at `fe8ce35`
+with local documentation and Task 4U changes present:
+
+- `node --test scripts/tests/verify-working-mcp-gateway.test.mjs`: five component
+  tests passed; zero failed or skipped.
+- `node scripts/verify-working-mcp-gateway.mjs --profile ci --suite all`: exit 1;
+  15 selected, zero passed, 15 failed/unimplemented, zero skipped.
+  `liveExecution` was `not-started`; no live resources or artifacts were created.
+
+This confirms the documented refusal behavior. It is not a new live acceptance
+run or a production release result.
+
+## Historical implementation checkpoints — not live acceptance
+
+The entries below retain the state and results observed at each checkpoint.
+Statements such as "uncommitted", "in progress" and "remain open" apply to that
+entry's date or base revision. Later checkpoints and the current summary supersede
+earlier next steps. They do not turn component test counts into release acceptance.
 
 - Task 7 provisioning prerequisites (2026-09-05, uncommitted after `1a040b8`):
   real Linux Cosign verification, bounded child ownership and confined secret

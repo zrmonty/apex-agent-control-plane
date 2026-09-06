@@ -1,17 +1,25 @@
 # MCP runtime provisioning boundary
 
-Task 7 provisioning is **not operational yet**. The agent has a current-operation
-callback/resolution client, deployment-owned image catalog, Linux Cosign verifier and confined
-Linux secret-staging primitive. It does not yet have a production listener or
-container effect owner. These independently tested boundaries are not connected
-to EnsureRuntime. Neither a callback snapshot, signature nor staged directory
-can enable `Serving`.
+Status on 2026-09-06: authenticated production ingress and durable
+**stopped-container provisioning** are implemented. The agent combines current
+operation/configuration resolution, publication-bound launch/material selection,
+protected catalogs, Linux Cosign verification, confined staging and bounded durable
+container effects. The control plane uses authenticated `ReconcileRuntime` calls;
+the production agent does not register legacy mutation RPCs.
+
+This is not managed Serving. Protected paired gateway/guard staging and verified
+paired creation/start/recovery remain unfinished. The reviewed local guard data
+producer writes no stage and grants no execution permission. See the
+[integration checkpoint](managed-runtime-checkpoint.md) and
+[runtime continuation](../superpowers/plans/2026-09-05-runtime-execution-continuation.md)
+for scoped acceptance and current publication status. Neither a callback snapshot,
+signature nor staged directory can enable `Serving` by itself.
 
 ## Image catalog selection
 
 `apex_proxy_runtime_agent::image_catalog::ImageCatalog::parse` accepts trusted bytes,
-not an RPC-provided catalog or arbitrary file path. Its owner must eventually load
-and refresh a protected deployment file. The parser does not establish file ownership,
+not an RPC-provided catalog or arbitrary file path. The production metadata owner
+loads and refreshes the protected deployment file. The parser alone does not establish file ownership,
 metadata freshness, registry reachability, image contents or signature validity.
 
 Schema 1 supports exact-identity keyless signing constraints for the Cosign
@@ -49,25 +57,19 @@ match and returns borrowed signing constraints. It performs no network or engine
 
 ## Remaining execution gates, in order
 
-1. Compose actual Controller mTLS ingress with current deployment metadata and the
-   operation context needed by the callback. The existing Ensure wire request does
-   not yet supply the operation/command correlation required by this composition.
-2. Consume [online configuration resolution](mcp-runtime-deployment.md), which now
-   compiles the RuntimeConfiguration from the verified published revision and
-   protected deployment catalog. Never use a caller manifest. Bind the remaining
-   RuntimeLaunchContext and material-role selections during effect-owner composition;
-   those are not supplied by the resolver, and a self-hash is not launch authority.
-3. Compose the implemented verifier and stager with a fixed-capacity blocking owner,
-   deployment metadata refresh, validated launch-context construction and current
-   operation checks. Select a genuinely approved gateway image, not the Cosign test
-   image. Bind material references and the caller-selected process instance before
-   serialization. Never put credentials in argv, Docker environment, logs or RPCs.
-4. Persist installation ownership and generation/fencing state, then perform bounded,
-   constrained OCI effects. Recheck operation/currentness at effect checkpoints;
-   inspect exact ownership and host restrictions rather than trusting requested flags.
-5. Replace the control plane's legacy direct Docker provider with authenticated agent
-   calls. Keep unavailable agents fail-closed. Prove duplicate/retry/restart behavior
-   and two-proxy isolation before claiming provisioning is operational.
+1. Bind the produced guard data to protected paired staging. Verify the selected
+   gateway and guard images under the approved signing policy. Retain exact
+   publication, launch, material, topology and durable ownership joins.
+2. Connect paired create/inspect/start/recovery. Recheck current authority at each
+   effect boundary. Preserve uncertain-effect quarantine and inspect actual network
+   isolation. Existing stopped-container and empty-network tests are not start proof.
+3. Compose the real HTTPS/session root, non-admitting readiness, route selection
+   and short-lived admission renewal. Keep failure paths non-serving.
+4. Prove pause/resume/retire, replacement, rotation/rollback and restart with actual
+   traffic, physical drain and ownership-scoped cleanup.
+5. Complete the fresh-install, two-proxy, durable activity and microsecond trace
+   journey, then the integrated release gate. Use approved Apex images, not the
+   public Cosign verifier fixture. Production release signing needs separate authority.
 
 Task 8 enforced egress/routing and Task 9 admission/lifecycle remain separate gates.
 Production readiness, G0–G3 acceptance and complete end-to-end microsecond tracing
@@ -91,8 +93,8 @@ Real verification includes signature, certificate and transparency evidence; par
 the bounded output is an additional digest check, not signature verification itself.
 
 One verifier instance admits one synchronous call via a non-waiting lock. It has no
-queue or implicit thread pool. The future service must supply the fixed blocking
-owner. Child stdin is closed; inherited environment is cleared except for the
+queue or implicit thread pool. The production effect owner supplies bounded
+blocking ownership. Child stdin is closed; inherited environment is cleared except for the
 explicit protected HOME. Private-registry authentication is not implemented.
 Output limits are 256 KiB stdout and 64 KiB stderr. Refusals do not expose either
 stream, parser or process errors. Owned buffers are zeroized on refusal/drop.
@@ -119,7 +121,7 @@ are bounded to 256 KiB; launch bytes to 16 KiB. This primitive treats those byte
 opaque: it does not prove publication or validate the launch hash. Its metadata
 parser also accepts bare secret identifiers; the gateway launch contract is stricter
 and requires `secret://` for every material, with health matching `health.credentialRef`.
-The future launch owner must enforce that stricter contract before calling stage.
+The launch owner enforces that stricter contract before calling stage.
 
 The caller selects a canonical UUIDv7 before constructing launch bytes. Staging
 creates only `apex-runtime-<instance_id>` with no-overwrite semantics. It writes
@@ -134,8 +136,10 @@ parent fsynced. The state pathname is checked against the held inode before sour
 reads and before returning. The deployment owner must keep that pathname stable
 through mount/use; a later trusted rename is not prevented by a returned Path.
 No automatic rollback or Drop cleanup removes files: failures may leave an owned
-quarantine, and success may be backing live read-only mounts. Durable ownership,
-mount verification and targeted recovery cleanup are still provisioning work.
+quarantine, and success may be backing live read-only mounts. The durable effect
+owner supplies mount verification and targeted recovery cleanup for the stopped
+gateway path. This primitive alone supplies none of those guarantees; paired
+gateway/guard staging and running-container lifecycle remain separate work.
 
 ## Acceptance split
 
