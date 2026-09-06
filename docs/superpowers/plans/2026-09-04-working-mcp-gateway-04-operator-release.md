@@ -9,6 +9,14 @@
 
 ## Global constraints
 
+Status on 2026-09-06: all six parent tasks (17–22) remain open. The accepted browser
+foundation and real MCP management UI client belong to Tasks 3–4; they do not close
+the complete wizard, live lifecycle/detail actions or activity/trace waterfall.
+The 15-case release registry still has no implemented live runners. Existing
+component and scoped native journeys do not close installation or G0–G3 release
+acceptance. See the [execution index](2026-09-04-working-mcp-gateway.md) and
+[integration checkpoint](../../operations/managed-runtime-checkpoint.md).
+
 - The browser holds no access tokens, refresh tokens, upstream secrets, or runtime credentials.
 - Production never falls back to preview data, local governance, or in-memory proxy storage.
 - Unsupported capabilities are rejected or disabled visibly, never shown as working controls.

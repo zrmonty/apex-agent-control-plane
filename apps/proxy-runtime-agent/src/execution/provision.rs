@@ -239,7 +239,23 @@ pub(super) fn run(
             &metadata,
             record.installed.as_ref().ok_or(ERROR)?,
         )?;
-        // Only an empty network is owned. No stage/container or activation follows.
+        let (_, now) = checkpoint(ctx, job, Some(&metadata))?;
+        let i = record.installed.as_ref().ok_or(ERROR)?;
+        let history = ctx.resources.journal.topology_history(&ctx.installation)?;
+        let observed = history.get(&i.instance).ok_or(DORMANT)?;
+        let _guard_data = super::guard_stage::produce(super::guard_stage::Inputs {
+            installation: &ctx.installation,
+            installed: i,
+            launch: &launch,
+            selected: &selected,
+            catalog,
+            images: &catalogs.images,
+            source_digest: metadata.digest(),
+            observed,
+            now: now.checked_at_unix_us,
+        })
+        .map_err(|_| DORMANT)?;
+        // Guard data and an empty network are not a stage or activation permit.
         return Err(DORMANT);
     }
     checkpoint(ctx, job, Some(&metadata))?;

@@ -2,6 +2,7 @@
 
 **Status:** Active
 **Effective:** 2026-09-04
+**Status reconciled:** 2026-09-06
 **Source decision record:** `apex_architecture_assessment_and_mcp_plan.md` (assessment snapshot: 2026-09-03)
 
 This is the execution source of truth until it is replaced by a new decision. It changes delivery priority. It does not rewrite historical progress or invalidate architecture and contract documents.
@@ -40,13 +41,36 @@ Only work that advances the objective below is active.
 
 ## Usability execution plan
 
-The 2026-09-04 assessment of revision `1a6df0908de0a604415fd5c1631f697656d679ee` distinguishes implemented components from a usable managed product. The current operator proxy UI uses preview state; production provisioning, runtime lifecycle effects, generic tool governance, persistent operator workflows and live activity still need integrated delivery. Historical narrow-slice and fixture verification below does not establish full operator readiness.
+The 2026-09-04 assessment of revision `1a6df0908de0a604415fd5c1631f697656d679ee` distinguishes implemented components from a usable managed product. That assessment found preview UI state. The MCP proxy routes now use the real browser edge, authenticated sessions and management API. Production serving, runtime lifecycle effects, generic tool governance, complete operator workflows and live activity still need integrated delivery. Historical narrow-slice and fixture verification below does not establish full operator readiness.
 
 The requested [working MCP gateway execution plan](superpowers/plans/2026-09-04-working-mcp-gateway.md) contains 22 tasks across control/browser integration, runtime deployment, governance/evidence/tracing, and operator/release verification. Its [delivery design](superpowers/specs/2026-09-04-working-mcp-gateway-design.md) supplements the accepted platform design. Execution is active: Tasks 1–5 are complete, Tasks 6–7 are partial, and the aggregate release gates remain open. The current continuation connects the runtime authority boundary; it does not resume any work listed in **Explicit hold**.
 
+### Remaining task count
+
+The parent plan has **5 complete tasks and 17 tasks not fully closed**. This is
+an acceptance-status count, not an estimate of remaining effort. Several open
+tasks already contain reviewed and tested components.
+
+| Parent task IDs | Remaining area | Not fully closed |
+| --- | --- | ---: |
+| 6–10 | Production runtime, routing, lifecycle and recovery | 5 |
+| 11–16 | Tools, authentication, governance, evidence and microsecond tracing | 6 |
+| 17–22 | Operator workflows, installation, integrated acceptance and release | 6 |
+
+The runtime continuation has its own numbering. Its Tasks 1–3 are complete within
+their stated boundaries; Tasks 4–5 remain open, with nine aggregate acceptance
+checkboxes. Those **two continuation tasks are not the whole remaining roadmap**.
+Do not add them to the 22 parent tasks or count completed sub-slices as completed
+parent tasks. The [execution index](superpowers/plans/2026-09-04-working-mcp-gateway.md)
+defines the parent task map and completion rules.
+
+### Current integration boundary
+
 The [runtime execution continuation](superpowers/plans/2026-09-05-runtime-execution-continuation.md) now connects publication-bound launch/material selection, authenticated production agent ingress, durable **stopped-container** provisioning and the control-plane reconciliation client. Managed deployment/call authority, durable evidence admission, protected stage readers, credential preflight, guarded upstream execution, guard relays and stage-bound control transports have component and scoped native acceptance coverage. The agent can reserve and inspect an owned empty internal network; this does not authorize container execution or route traffic. The [integration checkpoint](operations/managed-runtime-checkpoint.md) records the exact remaining boundaries.
 
-Next: produce the guard's protected stage from the current published revision and validated network history; connect verified gateway/guard creation, start and recovery; then wire the actual HTTPS/session root, readiness, route selection, admission renewal and lifecycle drain. The managed gateway entry still fails closed. Production usability and end-to-end trace projection/query/UI remain open; integer-microsecond fields and isolated transport tests do not close those gates.
+The reviewed [guard-stage data producer](operations/managed-guard-stage-producer.md) is committed in `71dc905`. It derives exact bounded configuration, manifest and environment from the current publication/catalog and original validated topology. Actual Rust output passes the unchanged TypeScript consumers, including integer expiry above 2^53. This produces data only, not a written stage or execution permission.
+
+Next: durably stage that data with verified gateway/guard creation, start and recovery; then wire the actual HTTPS/session root, readiness, route selection, admission renewal and lifecycle drain. The managed gateway entry still fails closed. Production usability and end-to-end trace projection/query/UI remain open; integer-microsecond fields and isolated transport tests do not close those gates.
 
 The added tracing requirement is microsecond-level elapsed measurement and precision-preserving evidence, queries and UI. Clock source, uncertainty and incomplete spans must be visible; millisecond timestamps padded with zeros do not pass.
 
@@ -61,7 +85,7 @@ Completion requires the real journey: fresh install and login, large-plus creati
 - The thin TypeScript stdio MCP gateway is implemented in `apps/mcp-gateway` and exposes one validated read-only MCP tool over stdio without recreating governance.
 - The deterministic local `portfolio.read` path is implemented with strict input validation, exact-scope local authorization, gateway-side filtering, and metadata-only execution events.
 - The live TypeScript MCP-to-Apex authorization/event path is now proven against real mTLS containers, durable admission, downstream fanout, and operator-visible event storage. CI run `33834884799` and live run `33834884797` passed the full gate.
-- The current pass is a controlled hardening/refactor of this active slice: every tracked source/test file is at or below 600 lines, the live boundary has stricter endpoint/secret/container checks, and the gateway serialization path has a measured throughput improvement. The hardening evidence is recorded in [`codebase-hardening-baseline.md`](architecture/codebase-hardening-baseline.md), [`codebase-hardening-review.md`](security/codebase-hardening-review.md), and [`gateway-throughput-baseline.md`](performance/gateway-throughput-baseline.md).
+- The earlier controlled hardening/refactor established the 600-line source/test baseline, stricter endpoint/secret/container checks, and a measured gateway serialization improvement. Its evidence is recorded in [`codebase-hardening-baseline.md`](architecture/codebase-hardening-baseline.md), [`codebase-hardening-review.md`](security/codebase-hardening-review.md), and [`gateway-throughput-baseline.md`](performance/gateway-throughput-baseline.md). These historical results do not close the current managed-product security or throughput release gates.
 
 The foundation boundary is complete: the dependency-direction check and the durable ACK-before-downstream regression checks are green in the full workspace verification.
 
@@ -156,7 +180,7 @@ The completed gate includes the real gateway image, mTLS, product SDK proof, gov
 
 ### 7. Build the managed MCP proxy platform
 
-**Status:** Active next milestone. The approved design is [`2026-09-04-mcp-proxy-platform-design.md`](superpowers/specs/2026-09-04-mcp-proxy-platform-design.md); the research source ledger is [`report-source.md`](mcp-proxies/report-source.md); the execution plan is [`2026-09-04-mcp-proxy-platform.md`](superpowers/plans/2026-09-04-mcp-proxy-platform.md).
+**Status:** Active milestone. The approved design is [`2026-09-04-mcp-proxy-platform-design.md`](superpowers/specs/2026-09-04-mcp-proxy-platform-design.md); the research source ledger is [`report-source.md`](mcp-proxies/report-source.md). Execute the [22-task working gateway plan](superpowers/plans/2026-09-04-working-mcp-gateway.md) and its [runtime continuation](superpowers/plans/2026-09-05-runtime-execution-continuation.md). The [original platform plan](superpowers/plans/2026-09-04-mcp-proxy-platform.md) remains design context, not a second active task queue.
 
 Build the deep MCP proxy capability as one focused product slice:
 

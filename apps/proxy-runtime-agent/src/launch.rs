@@ -75,6 +75,16 @@ impl PreparedLaunch {
 }
 
 impl LaunchCatalog {
+    #[cfg(test)]
+    pub(crate) fn fixture_prepare_data(
+        &self,
+        authority: &proto::RuntimeAuthoritySnapshot,
+        configuration: &proto::RuntimeConfiguration,
+        bindings: &str,
+        instance: &str,
+    ) -> Result<PreparedLaunch, LaunchError> {
+        self.prepare_data(authority, configuration, bindings, instance)
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn recover(
         &self,

@@ -20,6 +20,12 @@ All other spec constraints apply. New helper infrastructure is limited to the MC
 
 ## Task 6: Build a self-contained gateway image and truthful startup probes
 
+Status on 2026-09-06: open. Packaging, launch validation, protected stage readers,
+preflight and health components exist. Actual managed factory composition and
+configured-health acceptance remain open. The dated component notes below do not
+establish Serving. Use the [integration checkpoint](../../operations/managed-runtime-checkpoint.md)
+for the current resume order.
+
 Checkpoint: production packaging and its owned-container harness are committed
 (`cc30a1c`, `24e3290`). Explicit development-only standalone/default-managed
 selection and removal of unconditional Compose health success are committed
@@ -76,44 +82,23 @@ required; neither existing suite closes that gate.
 
 ## Task 7: Restricted runtime agent, image catalog and secret staging
 
-Checkpoint: `b5d0391` adds the workspace library, separately generated runtime
-wire types, pure target/configuration relation checks and bounded inspection
-comparison (43 tests). It does not yet start a service, authenticate an owner,
-verify images, stage secrets or operate containers. The full task remains open;
-engine Running is never treated as application readiness.
+Current checkpoint — 2026-09-06: the authenticated production agent ingress,
+publication-bound launch/material selection, Linux signature verification,
+confined secret staging and durable stopped-container effects are implemented.
+The control plane calls the agent through authenticated `ReconcileRuntime`;
+the production listener does not register legacy mutation RPCs.
+Continuation Tasks 1–3 include the scoped real control-plane/PostgreSQL/agent
+acceptance. See the [runtime continuation](2026-09-05-runtime-execution-continuation.md)
+and [provisioning guide](../../operations/mcp-runtime-provisioning.md).
 
-`d652276` adds a shared fallible manifest implementation with actual Rust-export
-parity, plus strict deployment-owned certificate policy and real mTLS role/grant
-tests. Policy checks retain integer microseconds and return borrowed point-in-time
-identity evidence, not enrollment or a current operation permit. The existing
-cached CI job now runs the shared packages and agent tests (`68d8d77`).
-`aff8ae3` adds a read-only current-operation snapshot: exact live database lease,
-row/blob consistency, active target, published revision and historical control
-hash are checked in one transaction, including a final expiry recheck. Eighteen
-real PostgreSQL cases and the existing journal/recovery regressions pass.
-The 2026-09-05 server-side continuation adds the authenticated check-only callback,
-explicit paired policy/enrollment files, one bounded PostgreSQL worker and optional
-registration on the existing mTLS control listener. Real Windows/Linux tests cover
-current operations, revocation and invalid metadata, blocked queries, cancellation,
-partial startup and cleanup. See the [operator guide](../../operations/mcp-runtime-authority.md).
-The runtime-agent callback client now checks actual Controller TLS, exact snapshot
-bindings and whole monotonic lease intervals. Its two-hop test-only ingress calls
-the real control-plane process and PostgreSQL. Provisioning has started with strict,
-deployment-owned image-catalog selection. The next checkpoint adds actual Linux
-Cosign verification, bounded child ownership and confined secret staging, with
-required real-signature/root-filesystem CI acceptance. The approved
-[deployment binding continuation](2026-09-05-runtime-deployment-binding.md) adds
-online published RuntimeConfiguration compilation and agent resolution over mTLS.
-Production ingress, launch-context/material binding, blocking-owner composition
-and engine effects remain required. These primitives are not wired to EnsureRuntime. See the
-[provisioning boundary](../../operations/mcp-runtime-provisioning.md).
-A snapshot is not authority
-to execute later, and callback deadlines do not physically preempt OS/database I/O.
-The check-only authority protobuf and shared Agent/observed-Controller pair
-check are now independently reviewed, with strict integer wire tests, actual
-mTLS controls and malformed-RPC decoder regressions. The Agent's observation
-is not an end-to-end Controller signature. Server-side registration is now explicit
-and tested; the agent-ingress and runtime-effect gates listed below stay open.
+The full parent task stays open. Protected paired gateway/guard staging,
+verified paired creation/start/recovery and final deployment acceptance remain.
+Task 4U produces guard data only and is committed in `71dc905`.
+Engine Running is never application readiness. A callback snapshot, signature or
+sealed stage is not permission to serve; current authority must be rechecked at
+effect boundaries. The checklist below retains the original task requirements;
+later continuation evidence, not unchecked historical steps alone, establishes
+which components are implemented.
 
 **Files**
 
