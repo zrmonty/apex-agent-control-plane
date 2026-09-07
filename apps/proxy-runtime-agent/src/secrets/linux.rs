@@ -29,6 +29,7 @@ fn mount_id(fd: &impl AsFd) -> Result<u64, StagingError> {
     Ok(s.stx_mnt_id)
 }
 mod cleanup;
+pub(crate) mod gateway;
 pub(crate) mod guard_staging;
 mod managed;
 pub(crate) mod proof;
@@ -128,8 +129,18 @@ fn read_source(
     )
     .map_err(|_| StagingError::InvalidSource)?;
     let before = fs::fstat(&fd).map_err(|_| StagingError::InvalidSource)?;
-    private_source(&before, uid)?;
-    let mut file = File::from(fd);
+    read_source_file(&mut File::from(fd), &before, material, uid)
+}
+
+// The caller retains the exact checked descriptor through the read and named
+// identity check. Never reopen a source pathname to obtain its bytes.
+fn read_source_file(
+    file: &mut File,
+    before: &Stat,
+    material: &ScopedMaterial,
+    uid: u32,
+) -> Result<Zeroizing<Vec<u8>>, StagingError> {
+    private_source(before, uid)?;
     // Allocate once at limit+1, never reallocating an owned secret buffer.
     let mut bytes = Zeroizing::new(vec![0; MAX_SOURCE + 1]);
     let mut used = 0;
@@ -146,7 +157,7 @@ fn read_source(
     if used == 0
         || used > MAX_SOURCE
         || usize::try_from(after.st_size).ok() != Some(used)
-        || !unchanged_source(&before, &after)
+        || !unchanged_source(before, &after)
     {
         return Err(StagingError::InvalidSource);
     }
@@ -183,7 +194,7 @@ fn unchanged_source(before: &Stat, after: &Stat) -> bool {
         && before.st_ctime_nsec == after.st_ctime_nsec
 }
 
-fn write_file(directory: &impl AsFd, filename: &str, bytes: &[u8]) -> Result<(), StagingError> {
+fn write_file(directory: &impl AsFd, filename: &str, bytes: &[u8]) -> Result<Stat, StagingError> {
     let fd = fs::openat(
         directory,
         filename,
@@ -194,7 +205,26 @@ fn write_file(directory: &impl AsFd, filename: &str, bytes: &[u8]) -> Result<(),
     let mut file = File::from(fd);
     file.write_all(bytes).map_err(|_| StagingError::Io)?;
     seal(&file, 0o400)?;
-    fs::fsync(&file).map_err(|_| StagingError::Io)
+    fs::fsync(&file).map_err(|_| StagingError::Io)?;
+    #[cfg(test)]
+    crate::execution::testing::at(crate::execution::testing::Point::StageWriteComplete, None)
+        .map_err(|_| StagingError::Io)?;
+    // Capture the writer's own inode, never a reopened pathname. A replacement
+    // with identical bytes must not become the journal's original identity.
+    let stat = fs::fstat(&file).map_err(|_| StagingError::Io)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+        || stat.st_nlink != 1
+        || stat.st_uid != 10001
+        || stat.st_gid != 10001
+        || stat.st_mode & 0o7777 != 0o400
+        || usize::try_from(stat.st_size).ok() != Some(bytes.len())
+    {
+        return Err(StagingError::InvalidSource);
+    }
+    let mount = mount_id(directory)?;
+    guard_staging::same_mount(&file, mount)?;
+    guard_staging::named(directory, filename, &stat, mount)?;
+    Ok(stat)
 }
 
 fn seal(fd: &impl AsFd, mode: u32) -> Result<(), StagingError> {

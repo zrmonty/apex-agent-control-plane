@@ -75,6 +75,7 @@ fn setup() -> (Root, Journal, Installed, Document) {
         instance_proof_version: Some(1),
         network: None,
         guard_stage: None,
+        gateway_stage: None,
     };
     i.network = Some(j.reserve_network(&c, c.installation_id(), &i).unwrap());
     r.installed = Some(i.clone());

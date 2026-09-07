@@ -211,6 +211,7 @@ pub(super) fn run(
             instance_proof_version: Some(1),
             network: None,
             guard_stage: None,
+            gateway_stage: None,
         });
         ctx.resources.journal.save(&record)?;
     }
@@ -222,6 +223,7 @@ pub(super) fn run(
         .network_reserved(&ctx.installation, record.installed.as_ref().ok_or(ERROR)?)?;
     if metadata.network.is_some() || reserved {
         super::guard_staging::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
+        super::gateway_staging::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
         return Err(DORMANT);
     }
     checkpoint(ctx, job, Some(&metadata))?;

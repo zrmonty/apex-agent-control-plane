@@ -2,6 +2,8 @@
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
+mod gateway_staging;
+#[cfg(target_os = "linux")]
 mod guard_stage;
 #[cfg(target_os = "linux")]
 mod guard_staging;

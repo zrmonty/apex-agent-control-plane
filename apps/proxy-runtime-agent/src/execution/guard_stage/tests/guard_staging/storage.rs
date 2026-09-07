@@ -18,6 +18,9 @@ struct Storage {
 }
 impl Storage {
     fn new() -> Self {
+        Self::with_instance(INSTANCE)
+    }
+    fn with_instance(instance: &str) -> Self {
         let root = PathBuf::from("/root").join(format!("task4w-{}", uuid::Uuid::now_v7()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -27,7 +30,7 @@ impl Storage {
         }
         let journal = Journal::open(&root.join("journal")).unwrap();
         let staging = StagingOwner::open(&root.join("staging"), &root.join("material")).unwrap();
-        let mut fixture = Fixture::new();
+        let mut fixture = Fixture::with_instance(instance);
         fixture.i.network = None;
         fixture.i.network = Some(
             journal
@@ -35,7 +38,7 @@ impl Storage {
                 .unwrap(),
         );
         let mut record = Record::select(INSTALL, &fixture.i.original, None).unwrap();
-        record.instance = INSTANCE.into();
+        record.instance = instance.into();
         record.installed = Some(fixture.i.clone());
         journal.save(&record).unwrap();
         Self {
@@ -191,4 +194,5 @@ fn task4w_current_data_interval_image_signer_and_environment_changes_refuse() {
 }
 
 mod faults;
+mod gateway;
 mod journal;

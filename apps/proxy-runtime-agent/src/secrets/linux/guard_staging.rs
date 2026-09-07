@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GuardRoot {
-    device: u64,
-    inode: u64,
-    mount: u64,
+    pub(super) device: u64,
+    pub(super) inode: u64,
+    pub(super) mount: u64,
 }
 impl GuardRoot {
     pub(crate) fn validate(&self) -> Result<(), StagingError> {
@@ -247,7 +247,7 @@ impl Owner {
         }
         Ok(identity)
     }
-    fn check_guard_root(&self, original: &Stat, mount: u64) -> Result<(), StagingError> {
+    pub(super) fn check_guard_root(&self, original: &Stat, mount: u64) -> Result<(), StagingError> {
         self.state.check(self.uid)?;
         self.state.check_path(self.uid)?;
         let current = roots::Root::open(&self.state.path, self.uid)?;
@@ -279,13 +279,18 @@ fn inventory(directory: &impl AsFd, complete: bool) -> Result<(), StagingError> 
     }
     Ok(())
 }
-fn same_mount(fd: &impl AsFd, mount: u64) -> Result<(), StagingError> {
+pub(super) fn same_mount(fd: &impl AsFd, mount: u64) -> Result<(), StagingError> {
     if mount_id(fd)? != mount {
         return Err(StagingError::InvalidSource);
     }
     Ok(())
 }
-fn named(parent: &impl AsFd, name: &str, before: &Stat, mount: u64) -> Result<(), StagingError> {
+pub(super) fn named(
+    parent: &impl AsFd,
+    name: &str,
+    before: &Stat,
+    mount: u64,
+) -> Result<(), StagingError> {
     let fd = fs::openat(
         parent,
         name,
@@ -299,7 +304,7 @@ fn named(parent: &impl AsFd, name: &str, before: &Stat, mount: u64) -> Result<()
     }
     Ok(())
 }
-fn fingerprint(stat: &Stat) -> Result<String, StagingError> {
+pub(super) fn fingerprint(stat: &Stat) -> Result<String, StagingError> {
     let bytes = serde_json::to_vec(&(
         stat.st_dev,
         stat.st_ino,
