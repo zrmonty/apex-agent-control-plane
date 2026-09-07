@@ -54,6 +54,7 @@ fn installed() -> Installed {
         instance_proof_version: Some(1),
         network: None,
         guard_stage: None,
+        gateway_stage: None,
     }
 }
 #[test]

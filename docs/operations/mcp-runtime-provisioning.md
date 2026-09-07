@@ -7,8 +7,10 @@ protected catalogs, Linux Cosign verification, confined staging and bounded dura
 container effects. The control plane uses authenticated `ReconcileRuntime` calls;
 the production agent does not register legacy mutation RPCs.
 
-This is not managed Serving. Protected paired gateway/guard staging and verified
-paired creation/start/recovery remain unfinished. The guard data producer itself
+This is not managed Serving. Task4X adds
+[protected paired gateway staging](managed-gateway-staging.md), committed in `4ca8cb1`
+with scoped and final integration review passed;
+verified paired creation/start/recovery remain unfinished. The guard data producer itself
 writes no stage. The [Task4W guard-staging composition](managed-guard-staging.md)
 adds real signature verification, durable intent and confined sealing/recovery;
 scoped verification and independent review passed, and implementation is committed

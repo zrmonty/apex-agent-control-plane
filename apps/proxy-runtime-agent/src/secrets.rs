@@ -26,6 +26,10 @@ mod roots;
 #[cfg(target_os = "linux")]
 mod validation;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::gateway::{
+    GatewayExpected, GatewayIdentity, GatewayMaterial, names as gateway_names,
+};
+#[cfg(target_os = "linux")]
 pub(crate) use linux::guard_staging::{GuardIdentity, GuardRoot};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::proof::InstanceProof;
@@ -94,6 +98,36 @@ impl fmt::Debug for StagingOwner {
 }
 
 impl StagingOwner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn gateway_recheck(
+        &self,
+        instance: &str,
+        root: &GuardRoot,
+        identity: &GatewayIdentity,
+        material: &GatewayMaterial,
+    ) -> Result<(), StagingError> {
+        self.inner
+            .gateway_recheck(instance, root, identity, material)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn gateway_material(
+        &self,
+        launch: &crate::launch::PreparedLaunch,
+        selected: &crate::execution::metadata::Selected,
+        check: &mut impl FnMut() -> Result<(), &'static str>,
+    ) -> Result<GatewayMaterial, StagingError> {
+        self.inner.gateway_material(launch, selected, check)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn gateway(
+        &self,
+        material: &GatewayMaterial,
+        expected: GatewayExpected<'_>,
+        check: &mut impl FnMut() -> Result<(), &'static str>,
+        before_seal: &mut impl FnMut(GatewayIdentity) -> Result<(), &'static str>,
+    ) -> Result<GatewayIdentity, StagingError> {
+        self.inner.gateway(material, expected, check, before_seal)
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn guard_root(&self) -> Result<GuardRoot, StagingError> {
         self.inner.guard_root()

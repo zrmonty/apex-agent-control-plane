@@ -1,6 +1,6 @@
 # Managed runtime integration checkpoint
 
-Date: 2026-09-06. This is an implementation checkpoint, not a production release.
+Date: 2026-09-07. This is an implementation checkpoint, not a production release.
 
 ## Status and publication boundary
 
@@ -12,11 +12,13 @@ tasks**. Component completion does not imply full task acceptance.
 The separate runtime continuation has completed Tasks 1–3 and two open tasks,
 4–5. Its nine unchecked acceptance items are not nine additional parent tasks.
 
-Previous published integration baseline: `e01f23e0a12cf409595b520c1a8cddabe2a48398`.
+Published integration baseline: `d8cd2c7bded61ea90f7a8c83a53567611464749e`.
 Task4U's guard producer was committed in `71dc905`; Task4W's reviewed protected
 guard-staging continuation and Node24 HTTP/2 regression fix are committed in `cdbcd1f`.
-GitHub CI status must be checked for the exact release SHA; no remote CI success
-or production release is asserted by this document.
+Both [CI](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/34059300884)
+and [Live mTLS + E2E](https://github.com/zrmonty/apex-agent-control-plane/actions/runs/34059300830)
+completed successfully for that exact merge SHA. This is not a production release
+or acceptance of the still-open Serving and tracing gates.
 
 Fresh pre-commit checks on 2026-09-06 passed 287 agent tests (34 explicit ignores),
 one actual Rust producer export, 118 unchanged TypeScript consumer tests and ten
@@ -66,7 +68,41 @@ same-inode bind-mount refusal1. Strict Clippy on both platforms and scoped forma
 passed. Exact Linux image matched all25 Rust sources; largest owned Rust file539
 lines. Original11-network inventory and94 unrelated dirty-file hashes were unchanged.
 
-1. Finish paired gateway staging and verified gateway/guard container provisioning,
+Task4X [paired gateway staging](managed-gateway-staging.md) is committed in `4ca8cb1`
+after this published baseline; scoped implementation and final integration review passed. Its durable intent
+binds the complete schema3 gateway inventory and original source/file identities
+to the guard seal, installed revision and current image-signing selection. Recovery
+never regenerates a proof or repairs an incomplete stage. Both stages remain
+NotServing; positive production signed-fixture composition remains unproven.
+
+Task4X corrected-source verification: Linux318 passed/39 explicit ignores and Windows170 passed/5
+explicit ignores; separately executed bind-mount tests3 and native
+network/signature-refusal regressions11 passed. All25 changed Rust files matched
+the tested image, largest541lines. Strict Clippy and scoped formatting passed.
+Native regression is not a positive signed paired-deployment proof. Original11
+Docker networks and94 unrelated dirty-file hashes were unchanged.
+Review identified two descriptor-identity races; both were reproduced and corrected
+test-first, along with independent metadata-mutation cases. Scoped re-review passed.
+An unchanged Windows ingress-capacity test failed twice under default parallelism
+during worker verification; the controller's fresh default-parallel full suite
+passed. That intermittent test concern is retained, not claimed fixed here.
+
+The repo-wide source-line gate still fails on four unrelated, pre-existing dirty
+test files: control-plane `proxy/tests.rs` (603 lines), ingest
+`adversarial_integrity.rs` (603), `adversarial_malformed_payloads.rs` (702) and
+`torn_write.rs` (676). Their hashes match the preserved pre-task baseline; this
+stage did not modify them. Every Task4X Rust file remains below 600 lines.
+
+Publication checks on 2026-09-07: fresh Windows agent tests passed170 with5 explicit
+ignores, strict Clippy and scoped formatting passed, and all31 reviewed-file hashes
+and94 preserved unrelated-file hashes matched their snapshots before committing.
+The clean integration baseline passes the repo-wide source-line gate; the four
+violations above belong only to excluded local edits. Docker Desktop failed startup
+on its `dockerInference` socket, so no fresh local Linux rerun is claimed for this
+publication pass. The exact-source Linux/native evidence above remains from
+2026-09-06. New remote workflow results must be checked against the integration SHA.
+
+1. Implement verified gateway/guard container provisioning,
    inspect actual networking, and implement start/recovery without weakening
    current-operation checks or uncertain-effect quarantine.
 2. Compose the actual gateway HTTPS/session root with live authority, upstream and

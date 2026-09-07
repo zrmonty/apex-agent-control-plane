@@ -125,6 +125,9 @@ impl Journal {
             return Err(ERROR);
         }
         for i in [&r.installed, &r.predecessor].into_iter().flatten() {
+            if let Some(stage) = &i.gateway_stage {
+                stage.validate(installation, i)?;
+            }
             if let Some(stage) = &i.guard_stage {
                 if stage.root_identity.is_none() {
                     return Err(ERROR);

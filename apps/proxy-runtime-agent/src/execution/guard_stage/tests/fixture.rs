@@ -24,6 +24,9 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        Self::with_instance(INSTANCE)
+    }
+    pub fn with_instance(instance: &str) -> Self {
         let path = std::env::var_os("APEX_RUNTIME_FIXTURE_PATH").unwrap();
         let config: proto::RuntimeConfiguration =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -57,7 +60,7 @@ impl Fixture {
             "reference":format!("secret://deployment/material-{n}"),"version":"v1","source_name":format!("m{n}")})).collect::<Vec<_>>());
         let launch = LaunchCatalog::parse(&serde_json::to_vec(&doc(p)).unwrap())
             .unwrap()
-            .fixture_prepare_data(&a, &config, "bindings-v1", INSTANCE)
+            .fixture_prepare_data(&a, &config, "bindings-v1", instance)
             .unwrap();
         let mut p = scope.clone();
         for k in ["revision_id", "deployment_bindings_version", "config_hash"] {
@@ -104,7 +107,7 @@ impl Fixture {
                 operation_id: INSTANCE.into(),
                 command_id: INSTANCE.into(),
             },
-            instance: INSTANCE.into(),
+            instance: instance.into(),
             launch_json: String::from_utf8(launch.launch_json().to_vec()).unwrap(),
             configuration_json: String::from_utf8(launch.configuration_json().to_vec()).unwrap(),
             authority_json: String::from_utf8(selected.authority_json.clone()).unwrap(),
@@ -119,6 +122,7 @@ impl Fixture {
             instance_proof_version: Some(1),
             network: None,
             guard_stage: None,
+            gateway_stage: None,
         };
         let mut network_json = crate::network_catalog::tests::fixture();
         network_json["valid_from_unix_us"] = json!(NOW);
@@ -154,7 +158,7 @@ impl Fixture {
         self.i.network = Some(
             network::Binding::new(
                 INSTALL,
-                INSTANCE,
+                &self.i.instance,
                 0,
                 layout,
                 network::owner_hash(&self.i).unwrap(),
