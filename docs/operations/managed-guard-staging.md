@@ -1,9 +1,10 @@
 # Managed guard staging
 
-The managed network branch stages only the guard configuration. It remains
-NotServing and returns `RUNTIME_NETWORK_ENFORCEMENT_UNAVAILABLE` after successful
-staging. This does not complete paired gateway staging, image pull, container
-creation/start, routing, readiness, or admission.
+Task4W seals the guard configuration on the managed network branch. Task4X then
+adds [protected paired gateway staging](managed-gateway-staging.md). The branch
+remains NotServing and returns `RUNTIME_NETWORK_ENFORCEMENT_UNAVAILABLE` after
+successful staging. Neither seal permits image pull, container creation/start,
+routing, readiness, or admission.
 
 Before guard intent, the runtime owner reconstructs the actual guard producer
 output from the original publication/configuration/tool bindings and the observed

@@ -10,7 +10,7 @@
 
 **Spec:** [Approved delivery design](../specs/2026-09-04-working-mcp-gateway-design.md), especially sections 4, 6, 8 and 9. This continuation decomposes the unfinished [runtime plan](2026-09-04-working-mcp-gateway-02-runtime.md); the user authorized the full sequence after CI passed on `179a770`.
 
-## Current status — 2026-09-06
+## Current status — 2026-09-07
 
 This continuation is a breakdown of work in the [22-task parent plan](2026-09-04-working-mcp-gateway.md),
 not a replacement for it. Continuation Tasks 1–3 are complete for launch binding,
@@ -22,8 +22,10 @@ The parent plan still has 17 tasks not fully closed.
 Task 4U's guard data producer is reviewed and committed in `71dc905`.
 It supplies data only. Task 4W connects signature-gated protected guard
 staging and exact recovery; scoped verification and independent review passed.
-Task4W is committed in `cdbcd1f`. This guard
-half remains NotServing. Next are paired gateway staging,
+Task4W is committed in `cdbcd1f`, integrated in `d8cd2c7` with both CI workflows green.
+Task4X adds protected paired gateway staging, committed in `4ca8cb1`; scoped and
+final integration review passed. Check new CI against the exact merge SHA.
+Both stages remain NotServing. Next are
 verified gateway/guard creation and start/recovery, then actual HTTPS
 composition, readiness, route selection, renewal and lifecycle drain. Trace
 projection, scoped queries, UI and full release acceptance remain open.
@@ -262,3 +264,18 @@ Recovery covers service-process restart with retained mounts, not remount/reboot
 or agent-container recreation. Paired gateway staging, verified paired container
 lifecycle, HTTPS readiness/routes/admission and Task5 tracing remain open. Parent
 task counts and Task4/Task5 aggregate checkboxes do not change.
+
+### Task 4X paired gateway staging — 2026-09-06
+
+Locally implemented after green integration `d8cd2c7`; scoped review passed. The
+[paired-stage owner](../../operations/managed-gateway-staging.md) adds explicit
+schema3 gateway files and scoped credential/proof staging after guard sealing.
+Durable proof/write/seal phases bind original revision, signer, guard/topology,
+protected roots, source identities and staged file identities. Recovery accepts
+only a complete exact original seal; partial or substituted state remains untouched.
+No image pull/create/start, registration, readiness, routes or admission is added.
+
+Positive storage tests do not establish positive production signature/native
+paired composition. Restart evidence retains the original mounts and source
+hierarchy; it does not establish host reboot/remount or agent-container recreation.
+Parent tasks and Task4/Task5 aggregate gates remain open.
