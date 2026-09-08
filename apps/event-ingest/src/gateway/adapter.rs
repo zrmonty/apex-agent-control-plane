@@ -17,6 +17,18 @@ impl<P: EventPublisher> AuthenticatedIngestAdapter<P> {
         &self.gateway
     }
 
+    /// Authenticated, non-admitting readiness over this adapter's actual stores.
+    pub fn check_admission_readiness(
+        &mut self,
+        caller: &Caller,
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: &str,
+    ) -> Result<(), GatewayError> {
+        self.gateway
+            .check_admission_readiness(caller, workspace_id, namespace_id, agent_id)
+    }
+
     pub(crate) fn replay_pending(&mut self) -> Result<(), GatewayError>
     where
         P: PendingEventReplayer,

@@ -54,6 +54,17 @@ impl<'a> DispatchGate<'a> {
         self.attempted = true;
     }
 }
+impl crate::command::Dispatch for DispatchGate<'_> {
+    fn deadline(&self) -> Result<Instant, &'static str> {
+        self.deadline()
+    }
+    fn check(&mut self) -> Result<(), &'static str> {
+        DispatchGate::check(self)
+    }
+    fn spawn_attempt(&mut self) {
+        DispatchGate::spawn_attempt(self);
+    }
+}
 pub(super) fn prepare_empty(
     ctx: &Context,
     job: &Job,
@@ -91,7 +102,13 @@ pub(super) fn prepare_empty(
         }
         None => Document::prepared(fresh)?,
     };
-    let before = engine.network_inventory(provision::deadline(job)?, &job.cancelled)?;
+    let (before, _) = engine.pair_inventory(
+        journal,
+        &d.topology.0,
+        &history,
+        provision::deadline(job)?,
+        &job.cancelled,
+    )?;
     let own = before.validate(&d.topology.0, &history)?;
     if d.phase == Phase::Observed {
         return if own == d.observation {
@@ -102,7 +119,13 @@ pub(super) fn prepare_empty(
     }
     if d.phase == Phase::CreateIntent {
         let id = own.ok_or(ERROR)?;
-        let after = engine.network_inventory(provision::deadline(job)?, &job.cancelled)?;
+        let (after, _) = engine.pair_inventory(
+            journal,
+            &d.topology.0,
+            &history,
+            provision::deadline(job)?,
+            &job.cancelled,
+        )?;
         if !before.unchanged(&after, None)
             || after.validate(&d.topology.0, &history)? != Some(id.clone())
         {
@@ -119,7 +142,13 @@ pub(super) fn prepare_empty(
         journal.prepare_topology(&d)?;
     }
     history.insert(i.instance.clone(), d.clone());
-    let before_intent = engine.network_inventory(provision::deadline(job)?, &job.cancelled)?;
+    let (before_intent, _) = engine.pair_inventory(
+        journal,
+        &d.topology.0,
+        &history,
+        provision::deadline(job)?,
+        &job.cancelled,
+    )?;
     if !before.unchanged(&before_intent, None)
         || before_intent.validate(&d.topology.0, &history)?.is_some()
     {
@@ -151,7 +180,13 @@ pub(super) fn prepare_empty(
     #[cfg(test)]
     super::testing::at(super::testing::Point::NetworkCreated, None)?;
     history.insert(i.instance.clone(), d.clone());
-    let after = engine.network_inventory(provision::deadline(job)?, &job.cancelled)?;
+    let (after, _) = engine.pair_inventory(
+        journal,
+        &d.topology.0,
+        &history,
+        provision::deadline(job)?,
+        &job.cancelled,
+    )?;
     if !before_intent.unchanged(&after, Some(&id))
         || after.validate(&d.topology.0, &history)? != Some(id.clone())
     {

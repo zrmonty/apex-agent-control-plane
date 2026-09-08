@@ -254,3 +254,15 @@ message ReadinessReport {
   repeated ProxyStageTiming stages = 9;
   string launch_context_hash = 10;
 }
+
+// Fixed health-process stdout envelope, not a transferable execution permit.
+// The immutable report retains its original wall timestamps. Before output, the
+// producer subtracts local elapsed time from the original health lease. A receiver
+// anchors valid_for_ns BEFORE dispatching that exact process, subtracts its own
+// elapsed time, and requires successful physical process termination. Never start
+// a fresh interval on receipt or infer admission from successful data decoding.
+message RuntimeHealthSample {
+  uint32 schema_version = 1;
+  ReadinessReport report = 2;
+  uint64 valid_for_ns = 3;
+}

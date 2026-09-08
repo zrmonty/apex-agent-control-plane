@@ -1,7 +1,10 @@
 // Source-only CI contract checks for the known indentation/section layout.
 // Not a general YAML/shell parser, Cargo execution, PKI generation or Actions proof.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
@@ -95,7 +98,7 @@ test('source-only: the gate uses the collected artifact and inherits existing PK
   ]);
   assert.equal(rust.split('generate_pki.py').length - 1, 2);
   assert.equal(rust.split('APEX_BROWSER_TEST_PKI_DIR').length - 1, 2, 'existing GITHUB_ENV export plus the narrow runner allowlist');
-  assert.equal(rust.split('APEX_RUNTIME_FIXTURE_PATH').length - 1, 2, 'one collected-artifact binding plus the narrow runner allowlist');
+  assert.equal(gate.split('APEX_RUNTIME_FIXTURE_PATH').length - 1, 2, 'one collected-artifact binding plus the narrow runner allowlist in the full package gate');
   assert.deepEqual(gate.split('\n').slice(1, -commands(gate).length), [
     '        env:',
     '          APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-revision.json',
@@ -166,6 +169,64 @@ test('source-only: daemon-mutating joint journeys require explicit native accept
   assert.match(fixture, /var_os\("APEX_TASK3B_ROOT"\)\.expect\("scoped owned Docker volume required"\)/);
   const acceptance = readFileSync(new URL('../../docs/operations/runtime-execution-control-plane.md', import.meta.url), 'utf8');
   assert.ok(acceptance.includes('--test proxy_runtime_execution -- --ignored --test-threads=1'));
+});
+
+test('source-only: health client gate explicitly runs ignored TLS tests using the actual launch export', () => {
+  const rust = job('rust-control-plane');
+  const health = namedStep(rust, 'Verify authenticated runtime health client');
+  assert.ok(rust.indexOf(namedStep(rust, 'Test runtime agent and shared boundaries')) < rust.indexOf(health));
+  assert.doesNotMatch(health, /^        (?:if|continue-on-error|working-directory|shell):/m);
+  assert.match(health, /^          APEX_RUNTIME_FIXTURE_PATH: \$\{\{ runner\.temp \}\}\/runtime-revision.json$/m);
+  assert.doesNotMatch(health, /APEX_BROWSER_TEST_PKI_DIR:|generate_pki|sudo|\|\||--skip/);
+  const run = commands(health);
+  assert.deepEqual(run.slice(0, 4), [
+    'set -euo pipefail',
+    'mkdir "${RUNNER_TEMP}/runtime-health-launch"',
+    'APEX_LAUNCH_EXPORT_DIR="${RUNNER_TEMP}/runtime-health-launch" cargo test --locked -p apex-proxy-runtime-agent --lib launch::tests::export::export_launch_parity_fixture -- --exact --ignored',
+    'APEX_RUNTIME_FIXTURE_PATH="${RUNNER_TEMP}/runtime-health-launch/runtime-revision.json" cargo test --locked -p apex-control-plane-api --features "test-support,postgres,valkey" --lib proxy::runtime_client::health::tests:: -- --ignored --nocapture | tee "${RUNNER_TEMP}/runtime-health-client.log"',
+  ]);
+  assert.equal(run.length, 5, 'a final result check must reject an empty or silently skipped suite');
+  assert.ok(run[4].includes('runtime-health-client.log'));
+  assert.ok(run[4].includes('0 failed; 0 ignored;'));
+  assert.ok(run[4].includes('passed < 11'));
+});
+
+test('health workflow shell rejects missing coverage, skipped tests and a failed Cargo pipeline', () => {
+  const run = commands(namedStep(job('rust-control-plane'), 'Verify authenticated runtime health client'));
+  const script = `
+cargo() {
+  case "$*" in
+    *export_launch_parity_fixture*) return 0 ;;
+    *proxy::runtime_client::health::tests::*) printf '%s\\n' "$HEALTH_OUTPUT"; return "$HEALTH_STATUS" ;;
+    *) return 97 ;;
+  esac
+}
+${run.join('\n')}
+`;
+  // This tests the checked-in shell/result check, not real Cargo or TLS.
+  for (const [output, status, accepted] of [
+    ['test result: ok. 11 passed; 0 failed; 0 ignored;', 0, true],
+    ['test result: ok. 12 passed; 0 failed; 0 ignored;', 0, true],
+    ['test result: ok. 0 passed; 0 failed; 0 ignored;', 0, false],
+    ['test result: ok. 11 passed; 0 failed; 1 ignored;', 0, false],
+    ['no test result', 0, false],
+    ['test result: ok. 11 passed; 0 failed; 0 ignored;', 1, false],
+  ]) {
+    const directory = mkdtempSync(path.join(tmpdir(), 'apex-health-ci-'));
+    try {
+      const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
+      const result = spawnSync(bash, ['-c', script], {
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll('\\', '/'),
+          HEALTH_OUTPUT: output, HEALTH_STATUS: String(status) },
+        windowsHide: true, timeout: 10_000, encoding: 'utf8',
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status === 0, accepted, result.stderr || output);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
 });
 
 test('source-only: live fixture listing drains its input under pipefail', () => {

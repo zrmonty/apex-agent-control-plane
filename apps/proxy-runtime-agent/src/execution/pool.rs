@@ -1,4 +1,5 @@
 //! Eight process-owned physical workers; request cancellation never drops ownership.
+use super::reservation::{Guard as ProxyGuard, Kind};
 use super::{engine::Engine, journal::Journal, provision};
 use crate::{
     authority::RuntimeAuthorityClient, config::ExecutionConfig, owner, proto,
@@ -17,6 +18,13 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tonic::{Request, Status};
 pub(crate) const JOB_BUDGET: Duration = Duration::from_secs(120);
+mod health;
+mod network_readiness;
+enum Work {
+    Reconcile(Job),
+    Inspect(network_readiness::Job),
+    Health(health::Job),
+}
 pub(crate) struct Resources {
     #[cfg(test)]
     pub(crate) hooks: Arc<super::testing::Hooks>,
@@ -60,17 +68,6 @@ pub(super) struct Job {
     _permit: OwnedSemaphorePermit,
     _proxy: ProxyGuard,
 }
-struct ProxyGuard {
-    active: Arc<Mutex<BTreeSet<String>>>,
-    key: String,
-}
-impl Drop for ProxyGuard {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.key);
-        }
-    }
-}
 struct Cancellation(Arc<AtomicBool>);
 impl Drop for Cancellation {
     fn drop(&mut self) {
@@ -78,7 +75,7 @@ impl Drop for Cancellation {
     }
 }
 pub(crate) struct Facility {
-    sender: Option<mpsc::SyncSender<Job>>,
+    sender: Option<mpsc::SyncSender<Work>>,
     threads: Vec<JoinHandle<()>>,
     slots: Arc<Semaphore>,
     active: Arc<Mutex<BTreeSet<String>>>,
@@ -100,7 +97,7 @@ impl Facility {
             installation: installation.clone(),
             shutdown,
         });
-        let (sender, receiver) = mpsc::sync_channel::<Job>(8);
+        let (sender, receiver) = mpsc::sync_channel::<Work>(8);
         let receiver = Arc::new(Mutex::new(receiver));
         let mut facility = Self {
             sender: Some(sender),
@@ -122,6 +119,17 @@ impl Facility {
                         };
                         let Ok(job) = job else {
                             break;
+                        };
+                        let job = match job {
+                            Work::Reconcile(job) => job,
+                            Work::Inspect(job) => {
+                                network_readiness::run(&context, job);
+                                continue;
+                            }
+                            Work::Health(job) => {
+                                health::run(&context, job);
+                                continue;
+                            }
                         };
                         let result = provision::run(&context, &job).map_err(Status::unavailable);
                         let Job {
@@ -157,18 +165,8 @@ impl Facility {
                 .as_ref()
                 .ok_or_else(|| Status::invalid_argument("RUNTIME_REQUEST_INVALID"))?,
         );
-        if !self
-            .active
-            .lock()
-            .map_err(|_| Status::unavailable("RUNTIME_WORKER_UNAVAILABLE"))?
-            .insert(key.clone())
-        {
-            return Err(Status::resource_exhausted("RUNTIME_PROXY_BUSY"));
-        }
-        let proxy = ProxyGuard {
-            active: Arc::clone(&self.active),
-            key,
-        };
+        let proxy = ProxyGuard::acquire(&self.active, key, Kind::Reconcile)
+            .map_err(Status::resource_exhausted)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         let _cancel = Cancellation(Arc::clone(&cancelled));
         let (reply, response) = oneshot::channel();
@@ -185,7 +183,7 @@ impl Facility {
         self.sender
             .as_ref()
             .ok_or_else(|| Status::unavailable("RUNTIME_SHUTTING_DOWN"))?
-            .try_send(job)
+            .try_send(Work::Reconcile(job))
             .map_err(|_| Status::resource_exhausted("RUNTIME_OVERLOADED"))?;
         tokio::time::timeout(JOB_BUDGET, response)
             .await
@@ -202,4 +200,4 @@ impl Drop for Facility {
     }
 }
 #[cfg(test)]
-mod tests;
+pub(in crate::execution) mod tests;

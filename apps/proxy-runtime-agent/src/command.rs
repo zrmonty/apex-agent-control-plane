@@ -48,15 +48,20 @@ pub(crate) fn run_until(
 }
 pub(crate) fn run_guarded(
     input: CommandInput<'_>,
-    gate: &mut crate::execution::network_owner::DispatchGate<'_>,
+    gate: &mut dyn Dispatch,
 ) -> Result<Vec<u8>, &'static str> {
     let deadline = gate.deadline()?;
     run_inner(input, deadline, Some(gate)).map_err(|_| "RUNTIME_NETWORK_COMMAND_REFUSED")
 }
+pub(crate) trait Dispatch {
+    fn deadline(&self) -> Result<Instant, &'static str>;
+    fn check(&mut self) -> Result<(), &'static str>;
+    fn spawn_attempt(&mut self);
+}
 fn run_inner(
     input: CommandInput<'_>,
     deadline: Instant,
-    mut gate: Option<&mut crate::execution::network_owner::DispatchGate<'_>>,
+    mut gate: Option<&mut dyn Dispatch>,
 ) -> Result<Vec<u8>, CommandError> {
     let deadline = std::cell::Cell::new(
         deadline.min(Instant::now() + input.budget.min(Duration::from_secs(30))),
@@ -75,7 +80,7 @@ fn run_inner(
         || !input.directory.is_absolute()
         || input.executable.as_os_str().len() > 4096
         || input.directory.as_os_str().len() > 4096
-        || input.arguments.len() > 64
+        || input.arguments.len() > 96
         || input.arguments.iter().any(|arg| arg.len() > 4096)
     {
         return Err(CommandError::Invalid);

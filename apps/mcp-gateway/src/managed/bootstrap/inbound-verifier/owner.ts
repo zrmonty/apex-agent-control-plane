@@ -30,7 +30,9 @@ export function createVerifier(bytes: Uint8Array, config: ReadonlyRuntimeConfigu
         last = mono; return { mono, wall };
       } catch { void close(); throw refused(); }
     };
-    return Object.freeze({ close, async verify(token: string) {
+    return Object.freeze({ close, isReady() {
+      try { sample(); return !stopped && keys.size > 0; } catch { return false; }
+    }, async verify(token: string) {
       if (stopped || pending >= 128) throw refused();
       pending++;
       try {

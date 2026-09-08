@@ -74,8 +74,12 @@ test("a grant expires at request start plus its duration, never receipt plus dur
   assert.equal(await renewal, true);
   assert.equal(f.owner.snapshot().admitting, true);
   assert.equal(f.owner.snapshot().epoch, 9_007_199_254_740_999n);
+  assert.equal(f.owner.snapshot().validUntilMonotonicNs, 10_000_000_000n);
+  f.time(9_999_999_999n);
+  assert.equal(f.owner.snapshot().validUntilMonotonicNs, 10_000_000_000n);
   f.time(10_000_000_000n);
   assert.equal(f.owner.snapshot().admitting, false);
+  assert.equal(f.owner.snapshot().validUntilMonotonicNs, undefined);
   await f.owner.close();
 });
 
@@ -88,7 +92,9 @@ test("PREPARE permits readiness but never business admission", async () => {
   assert.equal(await pending, true);
   assert.equal(f.owner.snapshot().mode, "prepare");
   assert.equal(f.owner.snapshot().admitting, false);
+  assert.equal(f.owner.snapshot().validUntilMonotonicNs, 10_000_000_000n);
   await f.owner.close();
+  assert.equal(f.owner.snapshot().validUntilMonotonicNs, undefined);
 });
 
 test("expired RPC reporting retains one physical slot until cleanup, ignoring a late reply", async () => {

@@ -8,18 +8,36 @@ impl Installed {
         installation: &str,
     ) -> Result<Option<proto::RuntimeLaunchAttestation>, &'static str> {
         const ERROR: &str = "RUNTIME_INSTANCE_ATTESTATION_REFUSED";
-        if self.instance_proof_version.is_none() {
+        let paired = self.network.is_some()
+            || self.guard_stage.is_some()
+            || self.gateway_stage.is_some()
+            || self.paired_containers.is_some();
+        if self.instance_proof_version.is_none() && !paired {
             return Ok(None); // Legacy adoption deliberately remains non-admittable.
         }
-        let proof_hash = self.files.get("instance-proof").ok_or(ERROR)?;
+        let (files, image_id) = if paired {
+            let pair = self.paired_containers.as_ref().ok_or(ERROR)?;
+            pair.validate(installation, self).map_err(|_| ERROR)?;
+            if pair.phase != crate::execution::paired::Phase::Verified {
+                return Err(ERROR);
+            }
+            // The old single-container slots are not the paired gateway's
+            // sealed material or image identity. Never fall back to them.
+            let gateway = self.gateway_stage.as_ref().ok_or(ERROR)?;
+            (&gateway.files, &pair.gateway_image_id)
+        } else {
+            if self.phase != Phase::Installed {
+                return Err(ERROR);
+            }
+            (&self.files, &self.image_id)
+        };
+        let proof_hash = files.get("instance-proof").ok_or(ERROR)?;
         let launch: proto::RuntimeLaunchContext =
             serde_json::from_str(&self.launch_json).map_err(|_| ERROR)?;
         if self.instance_proof_version != Some(1)
-            || self.phase != Phase::Installed
             || !crate::shapes::uuid_v7(installation)
             || !crate::shapes::hex_hash(proof_hash)
-            || !self
-                .image_id
+            || !image_id
                 .strip_prefix("sha256:")
                 .is_some_and(crate::shapes::hex_hash)
             || launch.schema_version != 1
@@ -38,9 +56,9 @@ impl Installed {
             instance_proof_sha256: proof_hash.clone(),
             staged_manifest_sha256: format!(
                 "{:x}",
-                Sha256::digest(serde_json::to_vec(&self.files).map_err(|_| ERROR)?)
+                Sha256::digest(serde_json::to_vec(files).map_err(|_| ERROR)?)
             ),
-            image_id: self.image_id.clone(),
+            image_id: image_id.clone(),
         }))
     }
 }

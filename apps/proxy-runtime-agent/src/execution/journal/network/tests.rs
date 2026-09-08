@@ -55,6 +55,7 @@ fn installed() -> Installed {
         network: None,
         guard_stage: None,
         gateway_stage: None,
+        paired_containers: None,
     }
 }
 #[test]

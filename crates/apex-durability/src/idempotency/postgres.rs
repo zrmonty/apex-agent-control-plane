@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use postgres::Client;
+use crate::{PostgresClientOps, PostgresConnection as Client};
 use uuid::Uuid;
 
 use super::types::{
@@ -30,13 +30,36 @@ pub struct PostgresIdempotencyStore {
 
 impl PostgresIdempotencyStore {
     pub fn connect(connection_string: &str, capacity: usize) -> Result<Self, GatewayError> {
+        Self::connect_using(connection_string, capacity, |url| {
+            crate::connect_postgres(url).map(Client::Standard)
+        })
+    }
+
+    /// Same authoritative store with deadline-bound operations on its owned
+    /// connection. Construct, use and drop outside an async runtime context.
+    pub fn connect_for_worker(
+        connection_string: &str,
+        capacity: usize,
+    ) -> Result<Self, GatewayError> {
+        Self::connect_using(
+            connection_string,
+            capacity,
+            crate::connect_postgres_for_worker,
+        )
+    }
+
+    fn connect_using(
+        connection_string: &str,
+        capacity: usize,
+        connect: fn(&str) -> Result<Client, ()>,
+    ) -> Result<Self, GatewayError> {
         if capacity == 0 || capacity > 1_000_000 {
             return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
         }
         if connection_string.is_empty() || connection_string.len() > 2048 {
             return Err(GatewayError::invalid_idempotency_configuration());
         }
-        let mut client = crate::postgres_transport::connect_postgres(connection_string)
+        let mut client = connect(connection_string)
             .map_err(|_| GatewayError::invalid_idempotency_configuration())?;
         crate::postgres_transport::apply_postgres_schema(
             &mut client,
@@ -54,6 +77,23 @@ impl PostgresIdempotencyStore {
 }
 
 impl IdempotencyStore for PostgresIdempotencyStore {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        crate::postgres_readiness::check(
+            &mut self.client,
+            crate::postgres_readiness::Store::Idempotency {
+                scope_capacity: scope_capacity(self.capacity),
+                next_token: self.next_token,
+            },
+            self.capacity,
+            workspace_id,
+            namespace_id,
+        )
+    }
+
     fn reserve(
         &mut self,
         key: IdempotencyKey,
@@ -239,5 +279,43 @@ impl PostgresIdempotencyStore {
             )
             .map_err(|_| GatewayError::internal())?;
         Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod readiness_token_tests {
+    use super::*;
+
+    #[test]
+    fn postgres_readiness_rejects_invalid_tokens_without_consuming_handles() {
+        if std::env::var("APEX_PG_READINESS_FIXTURE").ok().as_deref() != Some("1") {
+            eprintln!("SKIP: requires explicit isolated APEX_PG_READINESS_FIXTURE");
+            return;
+        }
+        let url =
+            std::env::var("APEX_PG_READINESS_FIXTURE_URL").expect("explicit fixture requires URL");
+        let client =
+            crate::connect_postgres_for_worker(&url).expect("explicit fixture must be reachable");
+        // No schema or test-only production seam: invalid local state must be
+        // rejected before SQL, even on a freshly connected empty database.
+        let reservation_id = Uuid::new_v4();
+        let mut store = PostgresIdempotencyStore {
+            client,
+            capacity: 64,
+            tokens: HashMap::from([(1, reservation_id)]),
+            next_token: 0,
+        };
+        for token in [0, u64::MAX] {
+            store.next_token = token;
+            assert_eq!(
+                store
+                    .check_admission_readiness("ws", "ns")
+                    .unwrap_err()
+                    .code,
+                GatewayErrorCode::IdempotencyCapacity
+            );
+            assert_eq!(store.next_token, token);
+            assert_eq!(store.tokens, HashMap::from([(1, reservation_id)]));
+        }
     }
 }

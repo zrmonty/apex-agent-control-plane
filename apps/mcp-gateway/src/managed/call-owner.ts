@@ -75,17 +75,20 @@ export class OwnedCallCoordinator {
         if (cleanupStarted) return; cleanupStarted = true;
         observation.begin("cleanup"); observation.startTime("cleanup", this.observeTime());
       };
-      let cancelled = false, settled = false, ticket: OwnedManagedCall | undefined;
+      let cancelled = false, settled = false, businessClosed = false, ticket: OwnedManagedCall | undefined;
       let auth: BusinessExchange<BusinessDecision> | undefined, upstream: WireExchange | undefined;
       let known: Extract<BusinessDecision, { outcome: "allowed" }> | undefined, uncertain = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const rejectResult = () => { if (!settled) { settled = true; reject(refused()); } };
       const cancel = () => {
+        // Business cancellation cannot abort the reservation receipt after all
+        // business I/O ended. Its transport still owns deadline/revocation and
+        // exact closure; output/HTTP/root cleanup must join that same attempt.
+        if (businessClosed) return;
         cancelled = true; rejectResult(); clearTimeout(timer);
         beginCleanup(); observation.cancel();
         try { auth?.cancel(); } catch { /* Physical ownership is unchanged. */ }
         try { upstream?.cancel(); } catch { /* Physical ownership is unchanged. */ }
-        this.completions.get(request.callId)?.cancel();
       };
       const job: Job = { callId: request.callId, closed, cancel }; this.jobs.set(request.callId, job);
       const check = () => {
@@ -157,6 +160,7 @@ export class OwnedCallCoordinator {
           // for their actual closure receipts or release the local ticket early.
           if (auth) { await auth.closed; observation.physicalClose("authorization", this.observeTime()); }
           if (upstream) { await upstream.closed; observation.physicalClose("upstream", this.observeTime()); }
+          businessClosed = true;
           ticket?.release();
           if (known) {
             const pending: PendingCompletion = Object.freeze({ callId: request.callId, admissionId: known.admissionId, state: "completion_pending" });

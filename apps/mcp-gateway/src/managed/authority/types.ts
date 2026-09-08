@@ -61,4 +61,6 @@ export type GrantSnapshot = Readonly<{
   activeCalls: number;
   epoch?: bigint;
   decisionId?: string;
+  /** Original request-start expiry, absent when closed; reading never renews it. */
+  validUntilMonotonicNs?: bigint;
 }>;

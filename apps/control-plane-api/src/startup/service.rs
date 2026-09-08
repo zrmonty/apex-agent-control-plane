@@ -109,6 +109,10 @@ pub(crate) fn run_until(
     let governance_service = build_governance_service(&trusted_base, governance_config.clone())?;
     #[cfg(feature = "postgres")]
     let mut managed = managed::prepare(&trusted_base, governance_config)?;
+    #[cfg(feature = "postgres")]
+    if let Some((managed, execution)) = managed.as_mut().zip(execution.as_ref()) {
+        managed.configure_network_inspection(execution)?;
+    }
     let auth = OperatorTokenAuthenticator::new(resolver.clone());
     let proxy_events = Arc::new(apex_control_plane_api::DurableProxyEventSink::new(
         Arc::clone(&outbox),
@@ -281,6 +285,7 @@ pub(crate) fn run_until(
             apex_control_plane_api::bounded_runtime_authority_service_server));
         #[cfg(feature = "postgres")]
         let server = server.add_optional_service(managed_service.clone().map(apex_control_plane_api::bounded_managed_runtime_authority_server))
+            .add_optional_service(managed_service.clone().map(apex_control_plane_api::bounded_managed_network_readiness_server))
             .add_optional_service(managed_service.map(apex_control_plane_api::bounded_managed_proxy_governance_server));
         #[cfg(feature = "postgres")]
         let browser_listener = match browser.as_ref() {

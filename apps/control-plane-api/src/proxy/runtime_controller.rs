@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
+mod health;
 
 const CAPACITY: usize = 8;
 const JOB_LIMIT: Duration = Duration::from_secs(150);
@@ -316,7 +317,7 @@ fn run_job(
     let rpc_deadline = (job.admitted + Duration::from_secs(125))
         .min(deadline)
         .min(lease_bound);
-    let response = runtime.block_on(async {
+    let mut execution = runtime.block_on(async {
         let mut client = RuntimeExecutionClient::connect(config, rpc_deadline).await?;
         let mut attempt = 0;
         loop {
@@ -334,9 +335,32 @@ fn run_job(
                 config.recheck()?;
                 continue;
             }
-            break result;
+            break result.map(|response| (client, response));
         }
     });
+    // Retain the same channel and physical worker through health and every SQL
+    // boundary. Selection precedes evidence mutation of lease.operation.
+    let consumption = if let Ok((client, response)) = &mut execution {
+        health::consume(
+            config,
+            store,
+            runtime,
+            client,
+            &health::Attempt {
+                lease: &lease,
+                request: &request,
+                response,
+                deadline: rpc_deadline,
+            },
+            &checkpoint,
+        )
+        .inspect_err(|error| {
+            eprintln!("runtime_execution_health_refused code={}", error.code());
+        })
+    } else {
+        Ok(())
+    };
+    let response = execution.map(|(_, response)| response);
     if let Ok(value) = &response {
         eprintln!(
             "runtime_execution_received state={} code={}",
@@ -367,6 +391,7 @@ fn run_job(
         *shared.last_response.lock().map_err(|_| unavailable())? = Some(Instant::now());
         store.finish_runtime_attempt(&lease)?;
     }
+    consumption?;
     response.map(|_| ())
 }
 fn check(shared: &Shared, deadline: Instant) -> Result<(), ProxyError> {
@@ -388,3 +413,7 @@ fn retry_allowed(error: &ProxyError, attempt: usize, deadline: Instant) -> bool 
 #[cfg(test)]
 #[path = "runtime_controller_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_controller/health_tests.rs"]
+mod health_tests;

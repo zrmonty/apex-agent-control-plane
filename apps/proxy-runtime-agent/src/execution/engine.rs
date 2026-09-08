@@ -19,9 +19,12 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 pub(super) mod acceptance;
 mod handoff;
+pub(super) mod health;
 pub(super) mod inspect;
 mod mount;
 mod network;
+mod network_inspection_batch;
+pub(super) mod paired;
 const ERROR: &str = "RUNTIME_ENGINE_REFUSED";
 pub(super) const ENV: [&str; 6] = [
     "NODE_ENV=production",

@@ -5,14 +5,14 @@ import assert from 'node:assert/strict';
 export const imageId = `sha256:${'a'.repeat(64)}`;
 export const runLabel = 'io.apex.packaging-run';
 export const ownershipProjection = '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"run":{{json (index .Config.Labels "io.apex.packaging-run")}}}';
-// Independent literal expectations from the amended eight-case brief. Every
-// case needs valid identity so unrelated identity rejection cannot satisfy it.
+// Independent literal expectations: explicit development gets valid identity;
+// managed cases must not fail on injected legacy caller metadata instead.
 export const expectedIdentity = ['APEX_MCP_PRINCIPAL=spiffe://apex/agent/research',
   'APEX_MCP_AGENT_ID=research-agent', 'APEX_MCP_WORKSPACE_ID=acme',
   'APEX_MCP_NAMESPACE_ID=prod', 'APEX_MCP_TRACE_ID=trace-001'];
 export const expectedCases = [
   { id: 'production-default', expectedExitCode: 1, env: [] },
-  { id: 'managed-live-missing-file', expectedExitCode: 1,
+  { id: 'managed-live-missing-stage', expectedExitCode: 1,
     env: ['APEX_MCP_PROFILE=managed', 'APEX_MCP_GOVERNANCE_MODE=live'] },
   { id: 'development-without-profile', expectedExitCode: 1,
     env: ['NODE_ENV=development', 'APEX_MCP_GOVERNANCE_MODE=local'] },
@@ -65,7 +65,8 @@ export function startupBoundary(options = {}) {
         '--memory', '256m', '--cpus', '1', '--log-driver', 'none', '--no-healthcheck',
         '--env', 'NODE_OPTIONS=', '--env', 'NODE_PATH=',
         ...expectedCases[index].env.flatMap((value) => ['--env', value]),
-        ...expectedIdentity.flatMap((value) => ['--env', value]), imageId]);
+        ...(expectedCases[index].env.includes('APEX_MCP_PROFILE=development-standalone') ? expectedIdentity : [])
+          .flatMap((value) => ['--env', value]), imageId]);
       if (selected() && options.createAbsent) current.exists = false;
       if (selected() && options.createThrows) throw Error('RAW_CREATE_CANARY');
       if (selected() && (options.createLost || options.createAbsent)) return failure();

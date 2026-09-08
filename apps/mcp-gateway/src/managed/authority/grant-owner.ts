@@ -86,7 +86,8 @@ export class DeploymentGrantOwner {
     const reply = this.accepted?.reply;
     const mode = !this.stopped && now !== undefined && this.accepted && now < this.accepted.expires ? reply!.mode : "closed";
     return Object.freeze({ mode, admitting: mode === "serve", activeCalls: this.activeCalls,
-      epoch: reply?.epoch, decisionId: reply?.decisionId });
+      epoch: reply?.epoch, decisionId: reply?.decisionId,
+      validUntilMonotonicNs: mode === "closed" ? undefined : this.accepted!.expires });
   }
 
   /** Local physical ceiling only; a separate durable policy reservation is mandatory. */
@@ -129,6 +130,8 @@ export class DeploymentGrantOwner {
     const now = this.sample();
     const previous = this.accepted?.reply;
     if (this.stopped || now === undefined || !validReply(reply, this.binding, job.nonce, job.sequence) ||
+      // A replacement cannot bridge a gap in the previously applied authority.
+      (this.accepted && now >= this.accepted.expires) ||
       now >= job.started + reply.validForUs * 1_000n ||
       (previous && (reply.epoch < previous.epoch || reply.decisionId === previous.decisionId ||
         (reply.epoch === previous.epoch && reply.mode !== previous.mode)))) {

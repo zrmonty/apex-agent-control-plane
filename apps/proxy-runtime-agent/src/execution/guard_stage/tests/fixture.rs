@@ -123,6 +123,7 @@ impl Fixture {
             network: None,
             guard_stage: None,
             gateway_stage: None,
+            paired_containers: None,
         };
         let mut network_json = crate::network_catalog::tests::fixture();
         network_json["valid_from_unix_us"] = json!(NOW);

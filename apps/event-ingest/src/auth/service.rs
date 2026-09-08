@@ -2,6 +2,8 @@
 mod admission;
 #[path = "grpc.rs"]
 mod grpc;
+#[path = "admission_readiness.rs"]
+mod admission_readiness;
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;

@@ -107,7 +107,7 @@ for (const source of ["predicate", "clock"] as const) {
     const h = reentrant(source), { f } = h;
     const monitor = new ReadinessMonitor(h.options); h.bind(monitor);
     const running = monitor.checkStartup();
-    for (let id = 1; id <= 8; id++) { f.release(id); await flush(); }
+    for (const id of [1, 2, 3, 4, 8, 5, 6, 7]) { f.release(id); await flush(); }
     assert.equal(f.stats.starts, 9); assert.equal(f.active, 1);
     const before = monitor.snapshot();
     // Final completion samples once, guards once, then guards publication.

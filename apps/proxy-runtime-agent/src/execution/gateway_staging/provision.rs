@@ -94,7 +94,7 @@ pub(in crate::execution) fn run(
         provision::deadline(job)?;
         Ok(())
     };
-    super::stage(
+    match super::stage(
         &ctx.resources.journal,
         &ctx.resources.staging,
         record,
@@ -102,5 +102,8 @@ pub(in crate::execution) fn run(
         launch,
         selected,
         &mut check,
-    )
+    ) {
+        Err(provision::DORMANT) => Ok(()),
+        result => result,
+    }
 }

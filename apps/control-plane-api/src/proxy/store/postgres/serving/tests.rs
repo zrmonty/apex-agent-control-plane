@@ -10,6 +10,7 @@ mod ordering;
 mod policy;
 mod readiness_progress;
 mod schema;
+mod health_consumption;
 
 fn renewal(
     f: &Fixture,
@@ -37,6 +38,7 @@ fn ack(
 }
 fn ready(f: &Fixture) -> CandidateReadiness {
     CandidateReadiness {
+        expires: std::time::Instant::now() + std::time::Duration::from_secs(5),
         admitting: false,
         active_calls: 0,
         report: proto::ReadinessReport {

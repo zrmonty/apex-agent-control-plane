@@ -4,7 +4,21 @@ import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { ManagedCallAuthorizationDecisionSchema, ManagedCallAuthorizationRequestSchema,
   ManagedCallCompletionSchema, ManagedPolicyRequestSchema } from "@apex/contracts";
 import { AuthenticatedBusinessTransport } from "./business-transport.js";
+import { dependencyUnavailable, isDependencyUnavailable } from "./dependency-failure.js";
 import { admissionId, allowed, binding, callId, context, harness, metadata, nonce, paths, peerReply, request } from "./business-testing.js";
+
+for (const ordinary of [true, false]) {
+  test(`policy preserves only classified ordinary wire refusal (${ordinary})`, async () => {
+    const h = harness(), client = new AuthenticatedBusinessTransport({ ...metadata, channel: h.channel, monotonicNowNs: () => 1001n });
+    const job = client.startPolicy(nonce);
+    h.result.reject(ordinary ? dependencyUnavailable("private policy canary") : Error("private unknown canary"));
+    await assert.rejects(job.result, error => {
+      assert.equal((error as Error).message, "managed business refused safely");
+      assert.equal(isDependencyUnavailable(error), ordinary); return true;
+    });
+    assert.equal(job.closed, h.closure.promise); h.closure.resolve(); await job.closed;
+  });
+}
 
 for (const kind of ["policy", "authorize", "complete"] as const) {
   test(`semantic ${kind} uses generated payloads and keeps exact unresolved physical closure`, async () => {

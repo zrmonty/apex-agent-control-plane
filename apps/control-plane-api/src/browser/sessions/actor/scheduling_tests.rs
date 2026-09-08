@@ -35,9 +35,14 @@ fn component_admission_allows_eight_queued_jobs_and_refuses_the_ninth_promptly()
                 .await
                 .expect("full admission must not wait for capacity");
         assert_eq!(result, Err(BrowserError::RateLimited));
+        // Keep the final admitted request as a FIFO completion barrier. The
+        // busy reply alone does not prove cancelled queued jobs were dequeued;
+        // admitting a new probe immediately can correctly return RateLimited.
+        let last_admitted = queued.pop().unwrap();
         drop(queued);
         release.release();
         let _ = busy.await.unwrap();
+        assert_eq!(last_admitted.await.unwrap(), 1);
         worker.request(Probe::mutations).await.unwrap();
     });
     witness.wait_for_drop();

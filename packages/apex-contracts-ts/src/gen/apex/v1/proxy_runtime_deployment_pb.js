@@ -12,49 +12,77 @@ import { file_apex_v1_governance } from "./governance_pb.js";
  * Describes the file apex/v1/proxy_runtime_deployment.proto.
  */
 export const file_apex_v1_proxy_runtime_deployment = /*@__PURE__*/
-  fileDesc("CiZhcGV4L3YxL3Byb3h5X3J1bnRpbWVfZGVwbG95bWVudC5wcm90bxIHYXBleC52MSKUAQogUmVnaXN0ZXJSdW50aW1lRGVwbG95bWVudFJlcXVlc3QSOAoJYXV0aG9yaXR5GAEgASgLMiUuYXBleC52MS5DaGVja1J1bnRpbWVBdXRob3JpdHlSZXF1ZXN0EjYKC2F0dGVzdGF0aW9uGAIgASgLMiEuYXBleC52MS5SdW50aW1lTGF1bmNoQXR0ZXN0YXRpb24irAEKJFJ1bnRpbWVEZXBsb3ltZW50UmVnaXN0cmF0aW9uUmVjZWlwdBIyCgdiaW5kaW5nGAEgASgLMiEuYXBleC52MS5NYW5hZ2VkRGVwbG95bWVudEJpbmRpbmcSGgoSYXR0ZXN0YXRpb25fc2hhMjU2GAIgASgJEjQKCWF1dGhvcml0eRgDIAEoCzIhLmFwZXgudjEuUnVudGltZUF1dGhvcml0eVNuYXBzaG90IsQBChlSdW50aW1lRGVwbG95bWVudFNuYXBzaG90EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEjQKCWF1dGhvcml0eRgCIAEoCzIhLmFwZXgudjEuUnVudGltZUF1dGhvcml0eVNuYXBzaG90EjQKDWNvbmZpZ3VyYXRpb24YAyABKAsyHS5hcGV4LnYxLlJ1bnRpbWVDb25maWd1cmF0aW9uEiMKG2RlcGxveW1lbnRfYmluZGluZ3NfdmVyc2lvbhgEIAEoCSK5AQohUnVudGltZURlcGxveW1lbnRCaW5kaW5nc0RvY3VtZW50EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEg8KB3ZlcnNpb24YAiABKAkSGgoSdmFsaWRfZnJvbV91bml4X3VzGAMgASgEEhoKEmV4cGlyZXNfYXRfdW5peF91cxgEIAEoBBIzCghwcm9maWxlcxgFIAMoCzIhLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRQcm9maWxlIjsKFlJ1bnRpbWVEZXBsb3ltZW50SW1hZ2USDgoGZGlnZXN0GAEgASgJEhEKCWltYWdlX3JlZhgCIAEoCSL8AwoYUnVudGltZURlcGxveW1lbnRQcm9maWxlEhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoCRIUCgx3b3Jrc3BhY2VfaWQYAiABKAkSFAoMbmFtZXNwYWNlX2lkGAMgASgJEhAKCHByb3h5X2lkGAQgASgJEhMKC3JldmlzaW9uX2lkGAUgASgJEhsKE2hvc3RfcG9saWN5X3ZlcnNpb24YBiABKAkSFAoMcmVzb3VyY2VfdXJsGAcgASgJEi8KBmltYWdlcxgIIAMoCzIfLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRJbWFnZRITCgtzZWNyZXRfcmVmcxgJIAMoCRIwCgx0b29sX3NjaGVtYXMYCiADKAsyGi5hcGV4LnYxLlJ1bnRpbWVUb29sU2NoZW1hEiAKGGFwcHJvdmVkX291dHB1dF9wcm9maWxlcxgLIAMoCRI0Cg5uZXR3b3JrX2dyYW50cxgMIAMoCzIcLmFwZXgudjEuUnVudGltZU5ldHdvcmtHcmFudBIsCgRhdXRoGA0gASgLMh4uYXBleC52MS5SdW50aW1lQXV0aGVudGljYXRpb24SMAoJdGVsZW1ldHJ5GA4gASgLMh0uYXBleC52MS5Qcm94eVRlbGVtZXRyeVBvbGljeRIRCglwaWRfbGltaXQYDyABKA0ygQEKGFJ1bnRpbWVEZXBsb3ltZW50U2VydmljZRJlChhSZXNvbHZlUnVudGltZURlcGxveW1lbnQSJS5hcGV4LnYxLkNoZWNrUnVudGltZUF1dGhvcml0eVJlcXVlc3QaIi5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50U25hcHNob3QyiwEKGVJ1bnRpbWVEZXBsb3ltZW50UmVnaXN0cnkSbgoSUmVnaXN0ZXJEZXBsb3ltZW50EikuYXBleC52MS5SZWdpc3RlclJ1bnRpbWVEZXBsb3ltZW50UmVxdWVzdBotLmFwZXgudjEuUnVudGltZURlcGxveW1lbnRSZWdpc3RyYXRpb25SZWNlaXB0YgZwcm90bzM", [file_apex_v1_proxy_runtime, file_apex_v1_proxy_runtime_authority, file_apex_v1_proxy_trace, file_apex_v1_governance]);
+  fileDesc("CiZhcGV4L3YxL3Byb3h5X3J1bnRpbWVfZGVwbG95bWVudC5wcm90bxIHYXBleC52MSJ8Ch9SdW50aW1lSGVhbHRoT2JzZXJ2YXRpb25SZXF1ZXN0EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEjIKB2JpbmRpbmcYAiABKAsyIS5hcGV4LnYxLk1hbmFnZWREZXBsb3ltZW50QmluZGluZxINCgVub25jZRgDIAEoDCKrAQogUnVudGltZUhlYWx0aE9ic2VydmF0aW9uUmVzcG9uc2USFgoOc2NoZW1hX3ZlcnNpb24YASABKA0SMgoHYmluZGluZxgCIAEoCzIhLmFwZXgudjEuTWFuYWdlZERlcGxveW1lbnRCaW5kaW5nEg0KBW5vbmNlGAMgASgMEiwKBnNhbXBsZRgEIAEoCzIcLmFwZXgudjEuUnVudGltZUhlYWx0aFNhbXBsZSJ8Ch9SdW50aW1lTmV0d29ya0luc3BlY3Rpb25SZXF1ZXN0EhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEjIKB2JpbmRpbmcYAiABKAsyIS5hcGV4LnYxLk1hbmFnZWREZXBsb3ltZW50QmluZGluZxINCgVub25jZRgDIAEoDCKDAgogUnVudGltZU5ldHdvcmtJbnNwZWN0aW9uUmVzcG9uc2USFgoOc2NoZW1hX3ZlcnNpb24YASABKA0SMgoHYmluZGluZxgCIAEoCzIhLmFwZXgudjEuTWFuYWdlZERlcGxveW1lbnRCaW5kaW5nEg0KBW5vbmNlGAMgASgMEh4KFm5ldHdvcmtfYmluZGluZ19zaGEyNTYYBCABKAkSHgoWZ2F0ZXdheV9wcm9jZXNzX3NoYTI1NhgFIAEoCRIcChRndWFyZF9wcm9jZXNzX3NoYTI1NhgGIAEoCRIUCgx2YWxpZF9mb3JfdXMYByABKAQSEAoIY29uZmluZWQYCCABKAgilAEKIFJlZ2lzdGVyUnVudGltZURlcGxveW1lbnRSZXF1ZXN0EjgKCWF1dGhvcml0eRgBIAEoCzIlLmFwZXgudjEuQ2hlY2tSdW50aW1lQXV0aG9yaXR5UmVxdWVzdBI2CgthdHRlc3RhdGlvbhgCIAEoCzIhLmFwZXgudjEuUnVudGltZUxhdW5jaEF0dGVzdGF0aW9uIqwBCiRSdW50aW1lRGVwbG95bWVudFJlZ2lzdHJhdGlvblJlY2VpcHQSMgoHYmluZGluZxgBIAEoCzIhLmFwZXgudjEuTWFuYWdlZERlcGxveW1lbnRCaW5kaW5nEhoKEmF0dGVzdGF0aW9uX3NoYTI1NhgCIAEoCRI0CglhdXRob3JpdHkYAyABKAsyIS5hcGV4LnYxLlJ1bnRpbWVBdXRob3JpdHlTbmFwc2hvdCLEAQoZUnVudGltZURlcGxveW1lbnRTbmFwc2hvdBIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRI0CglhdXRob3JpdHkYAiABKAsyIS5hcGV4LnYxLlJ1bnRpbWVBdXRob3JpdHlTbmFwc2hvdBI0Cg1jb25maWd1cmF0aW9uGAMgASgLMh0uYXBleC52MS5SdW50aW1lQ29uZmlndXJhdGlvbhIjChtkZXBsb3ltZW50X2JpbmRpbmdzX3ZlcnNpb24YBCABKAkiuQEKIVJ1bnRpbWVEZXBsb3ltZW50QmluZGluZ3NEb2N1bWVudBIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIPCgd2ZXJzaW9uGAIgASgJEhoKEnZhbGlkX2Zyb21fdW5peF91cxgDIAEoBBIaChJleHBpcmVzX2F0X3VuaXhfdXMYBCABKAQSMwoIcHJvZmlsZXMYBSADKAsyIS5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50UHJvZmlsZSI7ChZSdW50aW1lRGVwbG95bWVudEltYWdlEg4KBmRpZ2VzdBgBIAEoCRIRCglpbWFnZV9yZWYYAiABKAki/AMKGFJ1bnRpbWVEZXBsb3ltZW50UHJvZmlsZRIXCg9pbnN0YWxsYXRpb25faWQYASABKAkSFAoMd29ya3NwYWNlX2lkGAIgASgJEhQKDG5hbWVzcGFjZV9pZBgDIAEoCRIQCghwcm94eV9pZBgEIAEoCRITCgtyZXZpc2lvbl9pZBgFIAEoCRIbChNob3N0X3BvbGljeV92ZXJzaW9uGAYgASgJEhQKDHJlc291cmNlX3VybBgHIAEoCRIvCgZpbWFnZXMYCCADKAsyHy5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50SW1hZ2USEwoLc2VjcmV0X3JlZnMYCSADKAkSMAoMdG9vbF9zY2hlbWFzGAogAygLMhouYXBleC52MS5SdW50aW1lVG9vbFNjaGVtYRIgChhhcHByb3ZlZF9vdXRwdXRfcHJvZmlsZXMYCyADKAkSNAoObmV0d29ya19ncmFudHMYDCADKAsyHC5hcGV4LnYxLlJ1bnRpbWVOZXR3b3JrR3JhbnQSLAoEYXV0aBgNIAEoCzIeLmFwZXgudjEuUnVudGltZUF1dGhlbnRpY2F0aW9uEjAKCXRlbGVtZXRyeRgOIAEoCzIdLmFwZXgudjEuUHJveHlUZWxlbWV0cnlQb2xpY3kSEQoJcGlkX2xpbWl0GA8gASgNMoEBChhSdW50aW1lRGVwbG95bWVudFNlcnZpY2USZQoYUmVzb2x2ZVJ1bnRpbWVEZXBsb3ltZW50EiUuYXBleC52MS5DaGVja1J1bnRpbWVBdXRob3JpdHlSZXF1ZXN0GiIuYXBleC52MS5SdW50aW1lRGVwbG95bWVudFNuYXBzaG90MosBChlSdW50aW1lRGVwbG95bWVudFJlZ2lzdHJ5Em4KElJlZ2lzdGVyRGVwbG95bWVudBIpLmFwZXgudjEuUmVnaXN0ZXJSdW50aW1lRGVwbG95bWVudFJlcXVlc3QaLS5hcGV4LnYxLlJ1bnRpbWVEZXBsb3ltZW50UmVnaXN0cmF0aW9uUmVjZWlwdDJ4ChhSdW50aW1lTmV0d29ya0luc3BlY3Rpb24SXAoFQ2hlY2sSKC5hcGV4LnYxLlJ1bnRpbWVOZXR3b3JrSW5zcGVjdGlvblJlcXVlc3QaKS5hcGV4LnYxLlJ1bnRpbWVOZXR3b3JrSW5zcGVjdGlvblJlc3BvbnNlMnoKGFJ1bnRpbWVIZWFsdGhPYnNlcnZhdGlvbhJeCgdPYnNlcnZlEiguYXBleC52MS5SdW50aW1lSGVhbHRoT2JzZXJ2YXRpb25SZXF1ZXN0GikuYXBleC52MS5SdW50aW1lSGVhbHRoT2JzZXJ2YXRpb25SZXNwb25zZTJ3ChdNYW5hZ2VkTmV0d29ya1JlYWRpbmVzcxJcCgVDaGVjaxIoLmFwZXgudjEuUnVudGltZU5ldHdvcmtJbnNwZWN0aW9uUmVxdWVzdBopLmFwZXgudjEuUnVudGltZU5ldHdvcmtJbnNwZWN0aW9uUmVzcG9uc2ViBnByb3RvMw", [file_apex_v1_proxy_runtime, file_apex_v1_proxy_runtime_authority, file_apex_v1_proxy_trace, file_apex_v1_governance]);
+
+/**
+ * Describes the message apex.v1.RuntimeHealthObservationRequest.
+ * Use `create(RuntimeHealthObservationRequestSchema)` to create a new message.
+ */
+export const RuntimeHealthObservationRequestSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 0);
+
+/**
+ * Describes the message apex.v1.RuntimeHealthObservationResponse.
+ * Use `create(RuntimeHealthObservationResponseSchema)` to create a new message.
+ */
+export const RuntimeHealthObservationResponseSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 1);
+
+/**
+ * Describes the message apex.v1.RuntimeNetworkInspectionRequest.
+ * Use `create(RuntimeNetworkInspectionRequestSchema)` to create a new message.
+ */
+export const RuntimeNetworkInspectionRequestSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 2);
+
+/**
+ * Describes the message apex.v1.RuntimeNetworkInspectionResponse.
+ * Use `create(RuntimeNetworkInspectionResponseSchema)` to create a new message.
+ */
+export const RuntimeNetworkInspectionResponseSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 3);
 
 /**
  * Describes the message apex.v1.RegisterRuntimeDeploymentRequest.
  * Use `create(RegisterRuntimeDeploymentRequestSchema)` to create a new message.
  */
 export const RegisterRuntimeDeploymentRequestSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 0);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 4);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentRegistrationReceipt.
  * Use `create(RuntimeDeploymentRegistrationReceiptSchema)` to create a new message.
  */
 export const RuntimeDeploymentRegistrationReceiptSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 1);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 5);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentSnapshot.
  * Use `create(RuntimeDeploymentSnapshotSchema)` to create a new message.
  */
 export const RuntimeDeploymentSnapshotSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 2);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 6);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentBindingsDocument.
  * Use `create(RuntimeDeploymentBindingsDocumentSchema)` to create a new message.
  */
 export const RuntimeDeploymentBindingsDocumentSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 3);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 7);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentImage.
  * Use `create(RuntimeDeploymentImageSchema)` to create a new message.
  */
 export const RuntimeDeploymentImageSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 4);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 8);
 
 /**
  * Describes the message apex.v1.RuntimeDeploymentProfile.
  * Use `create(RuntimeDeploymentProfileSchema)` to create a new message.
  */
 export const RuntimeDeploymentProfileSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_proxy_runtime_deployment, 5);
+  messageDesc(file_apex_v1_proxy_runtime_deployment, 9);
 
 /**
  * mTLS-only online resolution. Caller configuration is never accepted.
@@ -72,3 +100,36 @@ export const RuntimeDeploymentService = /*@__PURE__*/
  */
 export const RuntimeDeploymentRegistry = /*@__PURE__*/
   serviceDesc(file_apex_v1_proxy_runtime_deployment, 1);
+
+/**
+ * Controller-only mTLS read of independently inspected installed confinement.
+ * The agent uses its owned journal and actual engine, never caller topology,
+ * a successful socket connection, or a requested hash as proof. This has no
+ * create/start/repair/exec/registration/admission effects and no bearer fallback.
+ *
+ * @generated from service apex.v1.RuntimeNetworkInspection
+ */
+export const RuntimeNetworkInspection = /*@__PURE__*/
+  serviceDesc(file_apex_v1_proxy_runtime_deployment, 2);
+
+/**
+ * Controller-only fresh health collection of the exact installed gateway. The
+ * agent runs only its fixed health executable and owns durable daemon exec IDs.
+ * No caller command, path, environment or container selector is accepted. This
+ * observation neither changes reconciliation state nor selects a serving route.
+ *
+ * @generated from service apex.v1.RuntimeHealthObservation
+ */
+export const RuntimeHealthObservation = /*@__PURE__*/
+  serviceDesc(file_apex_v1_proxy_runtime_deployment, 3);
+
+/**
+ * Managed workload-only mTLS/token/instance-proof boundary on the control plane.
+ * Authorizes the exact registered deployment and current PREPARE/SERVE selection,
+ * then obtains a fresh nonce-bound Controller->Agent inspection. It never grants
+ * host Agent/Controller authority to the workload. Not a browser API.
+ *
+ * @generated from service apex.v1.ManagedNetworkReadiness
+ */
+export const ManagedNetworkReadiness = /*@__PURE__*/
+  serviceDesc(file_apex_v1_proxy_runtime_deployment, 4);

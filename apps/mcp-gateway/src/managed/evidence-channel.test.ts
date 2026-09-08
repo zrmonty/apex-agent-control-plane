@@ -7,15 +7,46 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { certificate, key } from "./authority/testing-tls.js";
 import { OwnedEvidenceChannel } from "./evidence-channel.js";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { EvidenceAdmissionProbeRequestSchema, EvidenceAdmissionProbeResponseSchema } from "@apex/contracts/event";
+import { EvidenceReadinessClient } from "./evidence/readiness-client.js";
+import { isDependencyUnavailable } from "./authority/dependency-failure.js";
+
+for (const placement of ["headers", "trailers"] as const) {
+  for (const status of ["8", "14", "7", "16", "13", "014"]) {
+    test(`actual evidence ${placement} gRPC ${status} classifies only ordinary readiness refusal`, async t => {
+      const { channel } = await fixture(t, stream => {
+        stream.respond({ ":status": 200, "content-type": "application/grpc",
+          ...(placement === "headers" ? { "grpc-status": status } : {}) }, { waitForTrailers: placement === "trailers" });
+        if (placement === "trailers") stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": status }));
+        stream.end();
+      }, undefined, undefined, true);
+      const at = process.hrtime.bigint(), job = channel.startReadiness(Buffer.alloc(0), at, at + 2_000_000_000n);
+      await assert.rejects(job.result, error => {
+        assert.equal(String(error), "Error: managed evidence refused safely");
+        assert.equal(isDependencyUnavailable(error), status === "8" || status === "14"); return true;
+      });
+      await job.closed;
+    });
+  }
+}
+
+test("ordinary evidence error status with a message body is terminal malformed framing", async t => {
+  const { channel } = await fixture(t, stream => reply(stream, Buffer.alloc(0), "14"), undefined, undefined, true);
+  const at = process.hrtime.bigint(), job = channel.startReadiness(Buffer.alloc(0), at, at + 2_000_000_000n);
+  await assert.rejects(job.result, error => { assert.equal(isDependencyUnavailable(error), false); return true; });
+  await job.closed;
+});
 
 async function fixture(t: TestContext, handle: (stream: ServerHttp2Stream, body: Buffer) => void, now?: () => bigint,
-  beforeChannel?: (session: ClientHttp2Session) => void) {
+  beforeChannel?: (session: ClientHttp2Session) => void, readiness = false) {
   const sessions = new Set<ServerHttp2Session>();
   const server = createSecureServer({ key, cert: certificate, ca: certificate, requestCert: true, rejectUnauthorized: true });
   server.on("session", session => { sessions.add(session); session.on("error", () => {}); session.once("close", () => sessions.delete(session)); });
   server.on("stream", (stream, headers) => {
     stream.on("error", () => {});
-    assert.equal(headers[":path"], "/apex.v1.EventIngest/Ingest"); assert.equal(headers[":method"], "POST");
+    assert.equal(headers[":path"], readiness ? "/apex.v1.EvidenceAdmissionReadiness/Check" : "/apex.v1.EventIngest/Ingest");
+    assert.equal(headers[":method"], "POST");
     assert.equal(headers.authorization, "Bearer public-test-evidence-token");
     assert.equal(headers["apex-instance-proof-bin"], undefined);
     const chunks: Buffer[] = []; stream.on("data", chunk => chunks.push(Buffer.from(chunk)));
@@ -38,6 +69,45 @@ function reply(stream: ServerHttp2Stream, payload = Buffer.alloc(0), status = "0
   stream.on("wantTrailers", () => { if (!stream.destroyed) stream.sendTrailers({ "grpc-status": status }); }); stream.end(frame);
 }
 function start(channel: OwnedEvidenceChannel) { const now = process.hrtime.bigint(); return channel.start(Buffer.from([8, 1]), now, now + 5_000_000_000n); }
+
+test("readiness uses only its fixed non-admitting mTLS RPC and smaller payload bound", async t => {
+  let received = 0;
+  const f = await fixture(t, (stream, bytes) => { received++; assert.equal(bytes.length, 7); reply(stream); },
+    undefined, undefined, true);
+  const now = process.hrtime.bigint();
+  assert.throws(() => f.channel.startReadiness(Buffer.alloc(1025), now, now + 10_000_000_000n), /managed evidence refused safely/);
+  const job = f.channel.startReadiness(Buffer.from([8, 1]), now, now + 10_000_000_000n);
+  assert.deepEqual(await job.result, Buffer.alloc(0)); await job.closed; assert.equal(received, 1);
+});
+
+test("readiness reply cannot extend its original two-second budget", async t => {
+  let now = process.hrtime.bigint(); const started = now;
+  const f = await fixture(t, stream => { now = started + 2_000_000_000n; reply(stream); }, () => now, undefined, true);
+  const job = f.channel.startReadiness(Buffer.alloc(0), started, started + 10_000_000_000n);
+  await assert.rejects(job.result, /managed evidence refused safely/); await job.closed;
+});
+
+test("readiness rejects a response above its 1024-byte contract bound", async t => {
+  const f = await fixture(t, stream => reply(stream, Buffer.alloc(1025)), undefined, undefined, true);
+  const now = process.hrtime.bigint(), job = f.channel.startReadiness(Buffer.alloc(0), now, now + 2_000_000_000n);
+  await assert.rejects(job.result, /managed evidence refused safely/); await job.closed;
+});
+
+test("typed readiness client validates a real separate mTLS/H2 probe response", async t => {
+  let probes = 0;
+  const f = await fixture(t, (stream, body) => {
+    probes++; assert.equal(body[0], 0); assert.equal(body.readUInt32BE(1), body.length - 5);
+    const request = fromBinary(EvidenceAdmissionProbeRequestSchema, body.subarray(5));
+    reply(stream, Buffer.from(toBinary(EvidenceAdmissionProbeResponseSchema, create(EvidenceAdmissionProbeResponseSchema, {
+      schemaVersion: request.schemaVersion, requestNonce: request.requestNonce, workspaceId: request.workspaceId,
+      namespaceId: request.namespaceId, agentId: request.agentId, ready: true, validForUs: 10_000_000n,
+    }))));
+  }, undefined, undefined, true);
+  const client = new EvidenceReadinessClient({ workspaceId: "workspace-one", namespaceId: "namespace-one", agentId: "evidence-one" }, f.channel);
+  const started = process.hrtime.bigint(), job = client.start(started, started + 2_000_000_000n);
+  assert.deepEqual(await job.result, { validUntilMonotonicNs: started + 10_000_000_000n });
+  await job.closed; await client.close(); assert.equal(probes, 1);
+});
 
 test("separate actual mTLS evidence channel frames one fixed ingest RPC and owns closure", async t => {
   let received = 0;

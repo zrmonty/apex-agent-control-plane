@@ -21,6 +21,7 @@ mod inspect_decode;
 pub mod launch;
 mod manifest;
 pub mod network_catalog;
+pub mod readiness_report;
 #[cfg(any(target_os = "linux", test))]
 mod owner;
 pub mod secrets;

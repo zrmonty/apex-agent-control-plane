@@ -10,7 +10,7 @@
 
 **Spec:** [Approved delivery design](../specs/2026-09-04-working-mcp-gateway-design.md), especially sections 4, 6, 8 and 9. This continuation decomposes the unfinished [runtime plan](2026-09-04-working-mcp-gateway-02-runtime.md); the user authorized the full sequence after CI passed on `179a770`.
 
-## Current status — 2026-09-07
+## Current status — 2026-09-08
 
 This continuation is a breakdown of work in the [22-task parent plan](2026-09-04-working-mcp-gateway.md),
 not a replacement for it. Continuation Tasks 1–3 are complete for launch binding,
@@ -24,16 +24,48 @@ It supplies data only. Task 4W connects signature-gated protected guard
 staging and exact recovery; scoped verification and independent review passed.
 Task4W is committed in `cdbcd1f`, integrated in `d8cd2c7` with both CI workflows green.
 Task4X adds protected paired gateway staging, committed in `4ca8cb1`; scoped and
-final integration review passed. Check new CI against the exact merge SHA.
-Both stages remain NotServing. Next are
-verified gateway/guard creation and start/recovery, then actual HTTPS
-composition, readiness, route selection, renewal and lifecycle drain. Trace
+final integration review passed. It is integrated in `003fd45`, whose CI34122122484
+and Live mTLS + E2E34122122459 both completed successfully. Docker recovered on
+2026-09-07; Task4Y paired stopped-container creation/inspection/recovery is
+implemented and scoped-reviewed locally, not committed. A final-authority-RPC
+shutdown race and a journal lock-lifetime defect were reproduced and fixed
+test-first; both fix rounds passed re-review. Final independent verification passed
+331 Linux tests/45 explicit ignores,170 Windows tests/5 explicit ignores, six
+native paired tests and11 existing native network tests. This is never-started component evidence, not signed production
+deployment or Serving acceptance.
+Task4Z paired guard-first process start and running recovery is implemented and
+scoped-reviewed locally, not committed. Independent native start7, stopped-pair6 and legacy
+network11 checks passed, as did the full Linux suite, Windows170/5 explicit ignores,
+strict Clippy and scoped formatting. Three subsequent module-header corrections
+leave source bodies unchanged. Its unsigned native process fixtures do not
+establish signed production startup. Combined integration and documentation-only
+reviews passed with no open findings; changes remain uncommitted. The integrated branch can perform guarded paired start
+before returning NotServing; refusal does not prove no process started. Next are
+actual HTTPS/session composition, readiness, route selection, admission renewal
+and safe lifecycle drain/cleanup, not reimplementation of paired creation/start/recovery. Trace
 projection, scoped queries, UI and full release acceptance remain open.
 
 Use the [integration checkpoint](../../operations/managed-runtime-checkpoint.md)
 for the current resume order. Dated execution entries below retain historical
 failures and intermediate next steps. Later checkpoints supersede those next
 steps; they do not retroactively establish Serving or close parent tasks.
+
+Subsequent local execution connects the actual managed executable to the fixed
+sealed-stage application root, guarded live clients, HTTPS/session ownership and
+nine-check PREPARE readiness. Scoped review and unsigned Linux public-root and
+actual-index fixtures passed, including completion retention and first-stop-cause
+shutdown handling. Packaged-image negative/development startup checks also pass;
+they are not positive managed-image or signed deployment acceptance. Continue
+Task4 at authenticated readiness observation and controller route/lifecycle
+integration, then Task5. Aggregate acceptance checkboxes and parent counts remain
+unchanged; details and evidence limits are in the integration checkpoint.
+
+The separate fixed health observation executable is now packaged and scoped-
+reviewed. Fresh source and compiled-image Linux health checks passed four cases
+each, alongside gateway tests/typecheck/build. This is bound readiness metadata
+from an unsigned component fixture, not agent-authenticated observation or route
+permission. Continue agent collection and controller lifecycle integration; do not
+repeat completed gateway composition or infer downstream acceptance from it.
 
 ## Global Constraints
 

@@ -11,6 +11,8 @@ use std::{
 use tokio::sync::{Semaphore, watch};
 use tonic::{Request, Response, Status};
 
+pub(crate) mod health_observation;
+pub(crate) mod network_readiness;
 #[cfg(target_os = "linux")]
 mod startup;
 pub(crate) mod validation;
@@ -31,7 +33,7 @@ struct Ingress {
 }
 
 #[tonic::async_trait]
-impl RuntimeExecutionService for Ingress {
+impl RuntimeExecutionService for Arc<Ingress> {
     async fn reconcile_runtime(
         &self,
         request: Request<proto::RuntimeReconcileRequest>,
@@ -160,13 +162,25 @@ fn router(
     ingress: Ingress,
     tls: tonic::transport::ServerTlsConfig,
 ) -> Result<tonic::transport::server::Router, &'static str> {
-    let service = bounded_service(ingress);
+    let ingress = Arc::new(ingress);
+    let service = bounded_service(Arc::clone(&ingress));
+    let inspection = proto::runtime_network_inspection_server::RuntimeNetworkInspectionServer::new(
+        Arc::clone(&ingress),
+    )
+    .max_decoding_message_size(4096)
+    .max_encoding_message_size(4096);
+    let health =
+        proto::runtime_health_observation_server::RuntimeHealthObservationServer::new(ingress)
+            .max_decoding_message_size(4096)
+            .max_encoding_message_size(32_768);
     Ok(tonic::transport::Server::builder()
         .tls_config(tls)
         .map_err(|_| "RUNTIME_TLS_INVALID")?
         .max_concurrent_streams(8)
         .timeout(Duration::from_secs(120))
-        .add_service(service))
+        .add_service(service)
+        .add_service(inspection)
+        .add_service(health))
 }
 fn bounded_service<S: RuntimeExecutionService>(
     service: S,
@@ -177,4 +191,4 @@ fn bounded_service<S: RuntimeExecutionService>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

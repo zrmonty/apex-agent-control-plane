@@ -21,6 +21,7 @@ fn fixture() -> Installed {
         phase: super::super::super::record::Phase::CreateIntent, files: BTreeMap::new(), instance_proof_version: Some(1), network: None,
             guard_stage: None,
             gateway_stage: None,
+            paired_containers: None,
     };
     for name in [
         "instance-proof",

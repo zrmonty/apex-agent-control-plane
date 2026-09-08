@@ -278,6 +278,15 @@ where
     P: EventPublisher,
     O: EventOutbox,
 {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        self.outbox
+            .check_admission_readiness(workspace_id, namespace_id)
+    }
+
     fn can_reconcile_commit_failure(&self) -> bool {
         true
     }

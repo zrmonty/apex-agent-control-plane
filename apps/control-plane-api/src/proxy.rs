@@ -11,8 +11,8 @@ mod lifecycle;
 mod managed_authority;
 #[cfg(feature = "postgres")]
 pub use managed_authority::{
-    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_proxy_governance_server,
-    bounded_managed_runtime_authority_server,
+    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_network_readiness_server,
+    bounded_managed_proxy_governance_server, bounded_managed_runtime_authority_server,
 };
 #[cfg(feature = "postgres")]
 mod operation_worker;

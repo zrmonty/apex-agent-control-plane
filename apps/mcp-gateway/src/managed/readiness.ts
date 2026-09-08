@@ -1,5 +1,5 @@
 import { create } from "@bufbuild/protobuf";
-import { ReadinessReportSchema, ReadinessCheckSchema, ReadinessCheckStatus as Status, ReadinessReason as Reason,
+import { ReadinessReportSchema, ReadinessCheckSchema, ReadinessCheckId as Check, ReadinessCheckStatus as Status, ReadinessReason as Reason,
   RuntimeConfigurationSchema, encodeJson, type RuntimeConfiguration, type ReadinessCheck, type ProxyStageTiming,
   type ReadinessReport, type RuntimeTarget } from "@apex/contracts";
 import { GatewayError } from "../contracts.js";
@@ -25,6 +25,10 @@ type Sweep = {
 const scheduler: ReadinessScheduler = { after: (ms, callback) => {
   const timer = setTimeout(callback, ms); return () => clearTimeout(timer);
 } };
+// Local owner checks may overlap inspection. No network-dependent owner may
+// start until the actual NETWORK operation has physically completed with PASS.
+const PROBE_ORDER = Object.freeze([Check.CONFIG, Check.LAUNCH, Check.MATERIAL, Check.INBOUND_AUTH,
+  Check.NETWORK, Check.UPSTREAM_CATALOG, Check.GOVERNANCE, Check.EVIDENCE_ADMISSION, Check.ADMISSION] as const);
 
 /** Non-admitting component, never composed into startup in this slice. All
  * synchronous owner/clock/scheduler callbacks are trusted and must not block.
@@ -47,6 +51,11 @@ export class ReadinessMonitor {
   private lost = false;
   private closed = false;
   private fatal = false;
+  private readyOnce = false;
+  private invalidated?: Reason;
+
+  /** Historical publication only; does not sample clocks or start observations. */
+  get hasBeenReady(): boolean { return this.readyOnce; }
 
   constructor(options: ReadinessOptions) {
     try {
@@ -54,7 +63,7 @@ export class ReadinessMonitor {
         typeof options.onFatal !== "function" || !Array.isArray(options.owners) || options.owners.length !== 9 ||
         new Set(options.owners.map(owner => owner.id)).size !== 9 ||
         options.owners.some(owner => !CHECK_IDS.includes(owner.id) || typeof owner.start !== "function")) throw new Error();
-      this.options = { ...options, owners: CHECK_IDS.map(id => {
+      this.options = { ...options, owners: PROBE_ORDER.map(id => {
         const owner = options.owners.find(owner => owner.id === id)!;
         return Object.freeze({ id, start: owner.start.bind(owner) });
       }) };
@@ -76,7 +85,10 @@ export class ReadinessMonitor {
   }
 
   checkStartup(): Promise<ReadonlyReadinessReport> {
-    if (this.closed || this.fatal || this.clockFailed || !this.current()) return Promise.resolve(this.snapshot());
+    // Sample cached expiry too: an unread serving loss cannot be erased by a
+    // later healthy sweep. Cold generations have no successful lease to lose.
+    if (this.readyOnce) this.snapshot();
+    if (this.closed || this.fatal || this.clockFailed || this.invalidated !== undefined || !this.current()) return Promise.resolve(this.snapshot());
     if (this.active) return this.active.result;
     const now = this.sample();
     if (!now) return Promise.resolve(this.snapshot());
@@ -92,8 +104,13 @@ export class ReadinessMonitor {
       result: new Promise(done => { resolve = done; }), resolve: value => resolve(value),
       cleanup: new Promise(done => { cleaned = done; }), cleaned: () => cleaned(), stages: new Map(), expiries: new Map() };
     this.active = sweep;
-    this.validUntil = undefined;
-    this.report = this.build(sweep.checks, this.report.observedAtUnixUs);
+    // Starting observation is not evidence of dependency loss. Keep the last
+    // completed report at its ORIGINAL expiry while this sweep owns new I/O.
+    // snapshot still enforces expiry, binding loss, shutdown and clock failure.
+    if (!this.report.ready) {
+      this.validUntil = undefined;
+      this.report = this.build(sweep.checks, this.report.observedAtUnixUs);
+    }
     sweep.stopTimer = this.arm(sweep, this.deadlineMs, () => this.deadline(sweep));
     this.pump(sweep);
     return sweep.result;
@@ -106,9 +123,24 @@ export class ReadinessMonitor {
     const current = this.closed || this.fatal ? false : this.current();
     const now = this.closed || this.fatal ? undefined : this.sample();
     const reason = this.closed ? Reason.SHUTTING_DOWN : this.fatal ? Reason.UNAVAILABLE : this.clockFailed ? Reason.INVALID :
-      !current ? Reason.MISMATCH : this.report.ready && now && this.validUntil !== undefined && now.monotonicNs >= this.validUntil
+      !current ? Reason.MISMATCH : this.invalidated !== undefined ? this.invalidated : this.active?.invalid !== undefined ? this.active.invalid :
+      this.active && now && now.monotonicNs >= this.active.deadline ? Reason.TIMEOUT :
+      this.report.ready && now && this.validUntil !== undefined && now.monotonicNs >= this.validUntil
         ? Reason.STALE : undefined;
+    if (this.readyOnce && reason !== undefined) this.invalidated ??= reason;
     return reason === undefined ? this.report : this.invalidReport(reason);
+  }
+
+  /** Cached report with its original remaining lease. No remote wall-age math,
+   * new probes or timestamp restamping. Consumers anchor before calling and
+   * subtract their own elapsed monotonic time before forwarding this duration. */
+  observation(): Readonly<{ report: ReadonlyReadinessReport; validForNs: bigint }> {
+    const report = this.snapshot(), expiry = this.validUntil;
+    const now = this.sample();
+    const same = this.snapshot() === report && this.validUntil === expiry;
+    const validForNs = same && report.ready && now && expiry !== undefined && expiry > now.monotonicNs
+      ? expiry - now.monotonicNs : 0n;
+    return Object.freeze({ report, validForNs });
   }
 
   /** Settles after actual termination OR the fatal hook requests process failure.
@@ -143,7 +175,15 @@ export class ReadinessMonitor {
     while (sweep.pending.size < 4 && sweep.next < this.options.owners.length) {
       const start = this.guard(sweep);
       if (!start) return;
-      const owner = this.options.owners[sweep.next++];
+      const owner = this.options.owners[sweep.next];
+      if (sweep.next >= 5) {
+        if (sweep.pending.has(Check.NETWORK)) return;
+        const network = sweep.checks[Check.NETWORK - 1], expiry = sweep.expiries.get(Check.NETWORK);
+        if (network.status !== Status.PASS || expiry === undefined || expiry <= start.monotonicNs) {
+          this.abort(sweep, network.status === Status.FAIL ? network.reason : Reason.STALE); return;
+        }
+      }
+      sweep.next++;
       // Reserve before entering a user start callback: it may reenter close().
       const operation: Operation = { cancelled: false, start };
       sweep.pending.set(owner.id, operation);
@@ -154,10 +194,12 @@ export class ReadinessMonitor {
         sweep.pending.delete(owner.id);
         if (sweep.invalid !== undefined) { if (!sweep.pending.size) this.release(sweep); return; }
         sweep.checks[owner.id - 1] = failed(owner.id, Reason.UNAVAILABLE);
+        this.invalidateCached(Reason.UNAVAILABLE);
         const end = this.guard(sweep);
         if (!end) return;
         sweep.observed = end;
         sweep.stages.set(owner.id, timing(owner.id, start, end, this.binding.launch.processInstanceId));
+        if (owner.id === Check.NETWORK) { this.abort(sweep, Reason.UNAVAILABLE); return; }
         continue;
       }
       try {
@@ -183,6 +225,8 @@ export class ReadinessMonitor {
       this.validUntil = [...sweep.expiries.values()].reduce((earliest, expiry) => expiry < earliest ? expiry : earliest,
         observed.monotonicNs + 10000000000n);
       this.report = this.build(sweep.checks, observed.unixUs, CHECK_IDS.flatMap(id => sweep.stages.get(id) ?? []));
+      if (this.report.ready) this.readyOnce = true;
+      else if (this.readyOnce) this.invalidateCached(Reason.UNAVAILABLE);
       sweep.resolve(this.report);
       this.release(sweep);
     }
@@ -205,19 +249,21 @@ export class ReadinessMonitor {
     if (!now) return;
     const result = value === undefined ? { check: failed(id, Reason.UNAVAILABLE), expiry: undefined } : evidence(value, id, now.monotonicNs);
     sweep.checks[id - 1] = result.check;
+    if (result.check.status !== Status.PASS) this.invalidateCached(result.check.reason);
     if (result.expiry !== undefined) {
       const maximumAge = now.monotonicNs + 10000000000n;
       sweep.expiries.set(id, result.expiry < maximumAge ? result.expiry : maximumAge);
     }
     sweep.observed = now;
     sweep.stages.set(id, timing(id, operation.start, now, this.binding.launch.processInstanceId));
+    if (id === Check.NETWORK && result.check.status !== Status.PASS) { this.abort(sweep, result.check.reason); return; }
     this.pump(sweep);
   }
 
   private guardState(sweep: Sweep): boolean {
     if (sweep.invalid !== undefined) return false;
     const reason = this.closed ? Reason.SHUTTING_DOWN : this.fatal ? Reason.UNAVAILABLE : this.clockFailed ? Reason.INVALID :
-      this.lost ? Reason.MISMATCH : this.active !== sweep ? Reason.CANCELLED : undefined;
+      this.lost ? Reason.MISMATCH : this.invalidated !== undefined ? this.invalidated : this.active !== sweep ? Reason.CANCELLED : undefined;
     if (reason !== undefined) { this.abort(sweep, reason); return false; }
     return true;
   }
@@ -231,6 +277,9 @@ export class ReadinessMonitor {
     const now = this.sample();
     if (!this.guardState(sweep) || !now) return undefined;
     if (now.monotonicNs >= sweep.deadline) { this.abort(sweep, Reason.TIMEOUT); return undefined; }
+    if (this.report.ready && this.validUntil !== undefined && now.monotonicNs >= this.validUntil) {
+      this.abort(sweep, Reason.STALE); return undefined;
+    }
     return now;
   }
 
@@ -246,8 +295,10 @@ export class ReadinessMonitor {
   private abort(sweep: Sweep, reason: Reason): void {
     if (sweep.invalid !== undefined) return;
     sweep.invalid = reason;
-    sweep.stopTimer?.();
+    if (this.readyOnce) this.invalidated ??= reason;
+    this.validUntil = undefined;
     this.report = this.invalidReport(reason);
+    sweep.stopTimer?.();
     sweep.resolve(this.report); // Logical outcome is separate from actual cleanup.
     if (sweep.pending.size === 0) { this.release(sweep); return; }
     const sample = this.sample();
@@ -276,8 +327,9 @@ export class ReadinessMonitor {
   private terminal(sweep: Sweep): void {
     if (this.fatal) return;
     this.fatal = true;
-    for (const operation of sweep.pending.values()) this.cancel(operation);
+    this.validUntil = undefined;
     this.report = this.invalidReport(Reason.UNAVAILABLE);
+    for (const operation of sweep.pending.values()) this.cancel(operation);
     sweep.resolve(this.report);
     sweep.stopTimer?.(); sweep.stopCleanup?.(); sweep.cleaned();
     try { this.options.onFatal(); } catch { /* The terminal latch and bounded settlement remain. */ }
@@ -301,6 +353,13 @@ export class ReadinessMonitor {
     const report = create(ReadinessReportSchema, { ...this.report as ReadinessReport, live: !this.closed && !this.fatal && !this.clockFailed, ready: false,
       checks: CHECK_IDS.map(id => failed(id, reason)) });
     return this.codec.decode(this.codec.encode(report));
+  }
+
+  private invalidateCached(reason: Reason): void {
+    if (!this.readyOnce) return;
+    this.invalidated ??= reason;
+    this.validUntil = undefined;
+    this.report = this.invalidReport(reason);
   }
 
   private build(checks: ReadinessCheck[], observedAtUnixUs = 0n, stages: ProxyStageTiming[] = []): ReadonlyReadinessReport {

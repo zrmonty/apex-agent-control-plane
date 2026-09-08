@@ -17,6 +17,65 @@ service RuntimeDeploymentRegistry {
   rpc RegisterDeployment(RegisterRuntimeDeploymentRequest) returns (RuntimeDeploymentRegistrationReceipt);
 }
 
+// Controller-only mTLS read of independently inspected installed confinement.
+// The agent uses its owned journal and actual engine, never caller topology,
+// a successful socket connection, or a requested hash as proof. This has no
+// create/start/repair/exec/registration/admission effects and no bearer fallback.
+service RuntimeNetworkInspection {
+  rpc Check(RuntimeNetworkInspectionRequest) returns (RuntimeNetworkInspectionResponse);
+}
+
+// Controller-only fresh health collection of the exact installed gateway. The
+// agent runs only its fixed health executable and owns durable daemon exec IDs.
+// No caller command, path, environment or container selector is accepted. This
+// observation neither changes reconciliation state nor selects a serving route.
+service RuntimeHealthObservation {
+  rpc Observe(RuntimeHealthObservationRequest) returns (RuntimeHealthObservationResponse);
+}
+message RuntimeHealthObservationRequest {
+  uint32 schema_version = 1;
+  ManagedDeploymentBinding binding = 2;
+  bytes nonce = 3; // unpredictable32bytes, fresh per call
+}
+message RuntimeHealthObservationResponse {
+  uint32 schema_version = 1;
+  ManagedDeploymentBinding binding = 2;
+  bytes nonce = 3;
+  // Only after successful physical daemon-exec completion and full original
+  // binding validation. Each receiver anchors BEFORE its request and subtracts
+  // all elapsed time. Cached reconciliation replies cannot supply this sample.
+  RuntimeHealthSample sample = 4;
+}
+
+// Managed workload-only mTLS/token/instance-proof boundary on the control plane.
+// Authorizes the exact registered deployment and current PREPARE/SERVE selection,
+// then obtains a fresh nonce-bound Controller->Agent inspection. It never grants
+// host Agent/Controller authority to the workload. Not a browser API.
+service ManagedNetworkReadiness {
+  rpc Check(RuntimeNetworkInspectionRequest) returns (RuntimeNetworkInspectionResponse);
+}
+
+message RuntimeNetworkInspectionRequest {
+  uint32 schema_version = 1; // exactly 1
+  ManagedDeploymentBinding binding = 2; // original immutable installed binding
+  bytes nonce = 3; // unpredictable 32 bytes; one request, never cached or reused
+}
+
+// Authenticated point-in-time observation, not a reservation or serving grant.
+// Each receiving hop validates the exact binding and nonce and its own original
+// monotonic request-start deadline. Relaying/decoding/caching cannot restamp it.
+// Missing, malformed, stale, incomplete or refused observations never pass NETWORK.
+message RuntimeNetworkInspectionResponse {
+  uint32 schema_version = 1; // exactly 1
+  ManagedDeploymentBinding binding = 2;
+  bytes nonce = 3;
+  string network_binding_sha256 = 4; // validated owned isolated network binding
+  string gateway_process_sha256 = 5; // actual process continuity observation
+  string guard_process_sha256 = 6; // actual process continuity observation
+  uint64 valid_for_us = 7; // >0, <=10000000 from receiver's ORIGINAL request start
+  bool confined = 8; // true only after complete independent inspection
+}
+
 message RegisterRuntimeDeploymentRequest {
   CheckRuntimeAuthorityRequest authority = 1;
   // Original immutable launch, even when the current controller fence is newer.

@@ -11,7 +11,7 @@ export async function rejectsBeforeState(t: TestContext): Promise<void> {
   let snapshots = 0, encodes = 0;
   const encode = f.codec.encode.bind(f.codec);
   f.codec.encode = report => { encodes++; return encode(report); };
-  const server = await startHealthServer({ codec: f.codec, state: { snapshot() { snapshots++; return f.monitor.snapshot(); } },
+  const server = await startHealthServer({ codec: f.codec, state: { observation() { snapshots++; return f.monitor.observation(); } },
     tokenBytes: token(), clock: createClock(), onFatal: () => assert.fail("fatal") });
   t.after(() => server.close());
   const host = "Host: 127.0.0.1:8081", auth = `Authorization: Bearer ${token().toString("base64url")}`;

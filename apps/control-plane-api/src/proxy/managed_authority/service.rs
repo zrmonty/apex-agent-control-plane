@@ -10,6 +10,7 @@ use std::{
 use tonic::{Request, Response, Status};
 use zeroize::Zeroizing;
 mod business;
+mod network;
 mod registration;
 
 pub(super) struct Backend {
@@ -20,10 +21,13 @@ pub(super) struct Backend {
 pub struct Service {
     client: pool::Client<Backend>,
     profiles: Arc<refresh::Shared>,
+    network: Option<pool::Client<crate::proxy::runtime_client::network::Transport>>,
 }
 pub(super) struct Owner {
     refresh: refresh::RefreshOwner,
     database: pool::Owner<Backend>,
+    network: pool::Owner<crate::proxy::runtime_client::network::Transport>,
+    network_config: Option<crate::RuntimeExecutionConfig>,
 }
 impl Owner {
     pub(super) fn request_shutdown(&self) {
@@ -33,7 +37,19 @@ impl Owner {
         Ok(Self {
             refresh: refresh::RefreshOwner::new()?,
             database: pool::Owner::new()?,
+            network: pool::Owner::new()?,
+            network_config: None,
         })
+    }
+    pub(super) fn configure_network(
+        &mut self,
+        config: crate::RuntimeExecutionConfig,
+    ) -> Result<(), Refused> {
+        if self.network_config.is_some() {
+            return Err(Refused);
+        }
+        self.network_config = Some(config);
+        Ok(())
     }
     pub(super) fn start(
         &mut self,
@@ -43,6 +59,16 @@ impl Owner {
         policy: GovernanceConfig,
     ) -> Result<Service, Refused> {
         self.refresh.start(path, base)?;
+        let network = self
+            .network_config
+            .take()
+            .map(|config| {
+                self.network.start(move || {
+                    crate::proxy::runtime_client::network::Transport::new(config)
+                        .map_err(|_| Refused)
+                })
+            })
+            .transpose()?;
         let database = Zeroizing::new(database.to_owned());
         let client = self.database.start(move || {
             Ok(Backend {
@@ -53,13 +79,15 @@ impl Owner {
         Ok(Service {
             client,
             profiles: Arc::clone(&self.refresh.shared),
+            network,
         })
     }
     pub(super) fn shutdown(&mut self) -> Result<(), Refused> {
         self.refresh.shared.stop();
+        let network = self.network.shutdown();
         let database = self.database.shutdown();
         let refresh = self.refresh.shutdown();
-        database.and(refresh)
+        network.and(database).and(refresh)
     }
 }
 

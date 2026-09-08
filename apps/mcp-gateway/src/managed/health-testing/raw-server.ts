@@ -29,7 +29,8 @@ export async function rawServer(t: TestContext, reply: (socket: Socket, original
   return { close, sockets, stats };
 }
 
-export function response(body: string | Buffer, extra: readonly string[] = [], status = "200 OK"): Buffer {
+export function response(body: string | Buffer, extra: readonly string[] = [], status = "200 OK", validForNs: string | null = "10000000000"): Buffer {
   const bytes = Buffer.from(body);
-  return Buffer.concat([Buffer.from(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${bytes.length}\r\nCache-Control: no-store\r\nConnection: close\r\n${extra.length ? `${extra.join("\r\n")}\r\n` : ""}\r\n`), bytes]);
+  const fields = [...(validForNs === null ? [] : [`X-Apex-Readiness-Valid-For-Ns: ${validForNs}`]), ...extra];
+  return Buffer.concat([Buffer.from(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${bytes.length}\r\nCache-Control: no-store\r\nConnection: close\r\n${fields.length ? `${fields.join("\r\n")}\r\n` : ""}\r\n`), bytes]);
 }

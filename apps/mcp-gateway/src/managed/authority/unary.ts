@@ -1,6 +1,7 @@
 import { constants, sensitiveHeaders, type ClientHttp2Session, type ClientHttp2Stream,
   type IncomingHttpHeaders, type IncomingHttpStatusHeader } from "node:http2";
 import type { TLSSocket } from "node:tls";
+import { dependencyUnavailable, ordinaryGrpcStatus } from "./dependency-failure.js";
 
 export type UnaryExchange = Readonly<{
   result: Promise<Uint8Array>; closed: Promise<void>; cancel(): void;
@@ -12,6 +13,7 @@ const METHODS = new Set([
   "/apex.v1.ManagedRuntimeAuthority/GetManagedPolicy",
   "/apex.v1.ManagedRuntimeAuthority/CompleteManagedCall",
   "/apex.v1.ManagedProxyGovernance/AuthorizeManagedCall",
+  "/apex.v1.ManagedNetworkReadiness/Check",
 ]);
 const MAX_MESSAGE_BYTES = 65_536;
 const MAX_STREAMS = 128;
@@ -68,12 +70,14 @@ export class OwnedAuthorityChannel {
     const result = new Promise<Uint8Array>((yes, no) => { resolve = yes; reject = no; });
     const closed = new Promise<void>(done => { drain = done; });
     let finished = false, response = false, trailers = false, bytes = 0;
+    let ordinaryFailure = false;
+    const readiness = method === "/apex.v1.ManagedNetworkReadiness/Check" || method === "/apex.v1.ManagedRuntimeAuthority/GetManagedPolicy";
     const chunks: Buffer[] = [];
-    const settle = (value?: Uint8Array) => {
+    const settle = (value?: Uint8Array, ordinary = false) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      if (value) resolve(value); else reject(refused());
+      if (value) resolve(value); else reject(ordinary ? dependencyUnavailable("managed authority refused safely") : refused());
     };
     const cancel = () => {
       settle();
@@ -91,12 +95,21 @@ export class OwnedAuthorityChannel {
     stream.on("response", (headers: IncomingHttpHeaders & IncomingHttpStatusHeader, _flags: number, raw: string[]) => {
       if (response || !unique(raw) || headers[":status"] !== 200 ||
         !["application/grpc", "application/grpc+proto"].includes(String(headers["content-type"])) ||
-        (headers["grpc-encoding"] !== undefined && headers["grpc-encoding"] !== "identity") ||
-        headers["grpc-status"] !== undefined) { cancel(); return; }
+        (headers["grpc-encoding"] !== undefined && headers["grpc-encoding"] !== "identity")) { cancel(); return; }
       response = true;
+      // Tonic may return an error as trailers-only initial HEADERS. Require
+      // canonical status and an entirely empty body before marking it ordinary.
+      if (headers["grpc-status"] !== undefined) {
+        if (!readiness || !ordinaryGrpcStatus(headers["grpc-status"])) { cancel(); return; }
+        ordinaryFailure = true; trailers = true;
+      }
     });
     stream.on("trailers", (headers: IncomingHttpHeaders, _flags: number, raw: string[]) => {
-      if (!response || trailers || !unique(raw) || headers["grpc-status"] !== "0") { cancel(); return; }
+      if (!response || trailers || !unique(raw)) { cancel(); return; }
+      if (headers["grpc-status"] !== "0") {
+        if (!readiness || bytes !== 0 || !ordinaryGrpcStatus(headers["grpc-status"])) { cancel(); return; }
+        ordinaryFailure = true;
+      }
       trailers = true;
     });
     stream.on("data", (chunk: Buffer) => {
@@ -111,6 +124,7 @@ export class OwnedAuthorityChannel {
       // monotonic deadline decides whether success may still be reported.
       try { if (this.sample() - started >= 10_000_000_000n) { cancel(); return; } }
       catch { cancel(); void this.close(); return; }
+      if (ordinaryFailure && response && trailers && bytes === 0) { settle(undefined, true); cancel(); return; }
       const body = Buffer.concat(chunks, bytes);
       if (!response || !trailers || body.length < 5 || body[0] !== 0 || body.readUInt32BE(1) !== body.length - 5) {
         cancel(); return;

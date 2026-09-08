@@ -833,6 +833,39 @@ export declare type ReadinessReport = Message<"apex.v1.ReadinessReport"> & {
 export declare const ReadinessReportSchema: GenMessage<ReadinessReport>;
 
 /**
+ * Fixed health-process stdout envelope, not a transferable execution permit.
+ * The immutable report retains its original wall timestamps. Before output, the
+ * producer subtracts local elapsed time from the original health lease. A receiver
+ * anchors valid_for_ns BEFORE dispatching that exact process, subtracts its own
+ * elapsed time, and requires successful physical process termination. Never start
+ * a fresh interval on receipt or infer admission from successful data decoding.
+ *
+ * @generated from message apex.v1.RuntimeHealthSample
+ */
+export declare type RuntimeHealthSample = Message<"apex.v1.RuntimeHealthSample"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.ReadinessReport report = 2;
+   */
+  report?: ReadinessReport | undefined;
+
+  /**
+   * @generated from field: uint64 valid_for_ns = 3;
+   */
+  validForNs: bigint;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeHealthSample.
+ * Use `create(RuntimeHealthSampleSchema)` to create a new message.
+ */
+export declare const RuntimeHealthSampleSchema: GenMessage<RuntimeHealthSample>;
+
+/**
  * Deployment material role identifiers, not grants or required-role policy.
  *
  * @generated from enum apex.v1.RuntimeMaterialRole

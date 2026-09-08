@@ -6,9 +6,14 @@ import type { Clock } from "../telemetry/clock.js";
 import type { ReadinessMonitor } from "./readiness.js";
 import type { ReadinessReportCodec } from "./readiness/report-codec.js";
 
-export type HealthServer = Readonly<{ close(): Promise<void> }>;
+export type HealthServer = Readonly<{
+  /** Listener loss/closing intent, never proof that physical teardown finished. */
+  lost: Promise<void>;
+  /** Resolves only on successful physical teardown; failed cleanup rejects. */
+  close(): Promise<void>;
+}>;
 export type HealthServerInput = Readonly<{
-  codec: ReadinessReportCodec; state: Pick<ReadinessMonitor, "snapshot">;
+  codec: ReadinessReportCodec; state: Pick<ReadinessMonitor, "observation">;
   tokenBytes: Uint8Array; clock: Clock; onFatal(): void;
 }>;
 
@@ -23,12 +28,14 @@ type Connection = {
  * a timer nor this library can preempt a blocked event loop or kernel operation. */
 export async function startHealthServer(input: HealthServerInput): Promise<HealthServer> {
   const token = copyToken(input.tokenBytes);
-  let snapshot: HealthServerInput["state"]["snapshot"], encode: ReadinessReportCodec["encode"], now: Clock["now"], fatal: () => void;
+  let observation: HealthServerInput["state"]["observation"], encode: ReadinessReportCodec["encode"], now: Clock["now"], fatal: () => void;
   try {
-    snapshot = input.state.snapshot.bind(input.state); encode = input.codec.encode.bind(input.codec);
+    observation = input.state.observation.bind(input.state); encode = input.codec.encode.bind(input.codec);
     now = input.clock.now.bind(input.clock); fatal = input.onFatal.bind(input);
   } catch { token.fill(0); throw healthError(); }
   const sockets = new Map<Socket, Connection>();
+  let signalLoss!: () => void;
+  const lost = new Promise<void>(resolve => { signalLoss = resolve; });
   let closed = false, listenerClosed = false, settled = false, fatalCalled = false;
   let closing: Promise<void> | undefined, closedOk: () => void, closedBad: (error: Error) => void;
   let cleanupTimer: NodeJS.Timeout | undefined, cleanupStart: bigint | undefined;
@@ -75,12 +82,13 @@ export async function startHealthServer(input: HealthServerInput): Promise<Healt
   function close(): Promise<void> {
     if (closing) return closing;
     closed = true;
+    signalLoss();
     closing = new Promise<void>((resolve, reject) => { closedOk = resolve; closedBad = reject; });
     // Preserve the rejection for the caller, including automatic error cleanup.
     void closing.catch(() => {});
     cleanupTimer = setTimeout(() => completeClose(true), 5000);
     try { cleanupStart = sample(); } catch { /* Native timer still bounds cleanup. */ }
-    server.close(() => { listenerClosed = true; completeClose(); });
+    if (!listenerClosed) server.close(() => { listenerClosed = true; completeClose(); });
     for (const socket of sockets.keys()) retire(socket);
     completeClose();
     return closing;
@@ -109,16 +117,23 @@ export async function startHealthServer(input: HealthServerInput): Promise<Healt
     if (request.url !== "/livez" && request.url !== "/readyz") { empty(response, 404); return; }
     try {
       if (!usable(request.socket, entry)) return;
-      const report = snapshot();
+      const started = sample();
+      const { report, validForNs } = observation();
       if (!usable(request.socket, entry)) return;
       const body = encode(report);
       if (!usable(request.socket, entry)) return;
       if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > 8192) throw healthError();
-      const status = (request.url === "/livez" ? report.live : report.ready) ? 200 : 503;
+      if (typeof validForNs !== "bigint" || validForNs < 0n || validForNs > 10_000_000_000n) throw healthError();
       if (!usable(request.socket, entry)) return;
+      // Charge observation and serialization against the original cached lease.
+      const elapsed = entry.last! - started;
+      if (elapsed < 0n) throw healthError();
+      const remaining = validForNs > elapsed ? validForNs - elapsed : 0n;
+      const status = (request.url === "/livez" ? report.live : report.ready && remaining > 0n) ? 200 : 503;
       response.sendDate = false;
       response.writeHead(status,
-        { "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(body), Connection: "close" });
+        { "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(body),
+          "X-Apex-Readiness-Valid-For-Ns": remaining.toString(), Connection: "close" });
       response.end(body);
     } catch { empty(response, 503); }
   });
@@ -160,7 +175,7 @@ export async function startHealthServer(input: HealthServerInput): Promise<Healt
   server.on("clientError", (_error, socket) => retire(socket as Socket));
   server.on("dropRequest", (_request, socket) => retire(socket as Socket));
   server.on("timeout", socket => retire(socket));
-  server.once("close", () => { listenerClosed = true; completeClose(); });
+  server.once("close", () => { listenerClosed = true; void close(); completeClose(); });
   await new Promise<void>((resolve, reject) => {
     let started = false;
     server.on("error", () => {
@@ -168,5 +183,5 @@ export async function startHealthServer(input: HealthServerInput): Promise<Healt
     });
     server.listen(8081, "127.0.0.1", () => { started = true; resolve(); });
   });
-  return Object.freeze({ close });
+  return Object.freeze({ lost, close });
 }

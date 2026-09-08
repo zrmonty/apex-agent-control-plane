@@ -4,5 +4,5 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["src/index.ts"]
+  "include": ["src/index.ts", "src/managed/health-process.ts"]
 }

@@ -2,6 +2,7 @@ import { constants, sensitiveHeaders, type ClientHttp2Session, type ClientHttp2S
   type IncomingHttpHeaders, type IncomingHttpStatusHeader } from "node:http2";
 import type { TLSSocket } from "node:tls";
 import type { UnaryExchange } from "./authority/unary.js";
+import { dependencyUnavailable, ordinaryGrpcStatus } from "./authority/dependency-failure.js";
 type Job = { cancel(): void; closed: Promise<void> };
 const refused = () => new Error("managed evidence refused safely");
 
@@ -38,15 +39,24 @@ export class OwnedEvidenceChannel {
     catch { void this.close(); }
   }
   start(payload: Uint8Array, started: bigint, overallDeadline: bigint): UnaryExchange {
+    return this.startFixed(payload, started, overallDeadline, false);
+  }
+  /** Same authenticated evidence owner, distinct fixed RPC; never submits an event. */
+  startReadiness(payload: Uint8Array, started: bigint, overallDeadline: bigint): UnaryExchange {
+    return this.startFixed(payload, started, overallDeadline, true);
+  }
+  private startFixed(payload: Uint8Array, started: bigint, overallDeadline: bigint, readiness: boolean): UnaryExchange {
+    const budget = readiness ? 2_000_000_000n : 5_000_000_000n;
     if (this.stopped || this.jobs.size >= 32 || this.session.closed || this.session.destroyed ||
-      !(payload instanceof Uint8Array) || payload.length > 65_536 || typeof started !== "bigint" || started < 0n ||
+      !(payload instanceof Uint8Array) || payload.length > (readiness ? 1024 : 65_536) || typeof started !== "bigint" || started < 0n ||
       typeof overallDeadline !== "bigint") throw refused();
-    const current = this.sample(), deadline = overallDeadline < started + 5_000_000_000n ? overallDeadline : started + 5_000_000_000n;
+    const current = this.sample(), deadline = overallDeadline < started + budget ? overallDeadline : started + budget;
     if (this.stopped || current < started || current >= deadline) throw refused();
     const frame = Buffer.alloc(5 + payload.length); frame.writeUInt32BE(payload.length, 1); frame.set(payload, 5);
     let stream: ClientHttp2Stream;
     try {
-      stream = this.session.request({ ":method": "POST", ":path": "/apex.v1.EventIngest/Ingest",
+      stream = this.session.request({ ":method": "POST", ":path": readiness ?
+        "/apex.v1.EvidenceAdmissionReadiness/Check" : "/apex.v1.EventIngest/Ingest",
         "content-type": "application/grpc", te: "trailers", "grpc-accept-encoding": "identity",
         "grpc-timeout": `${(deadline - current + 999n) / 1000n}u`, authorization: `Bearer ${this.token}`,
         [sensitiveHeaders]: ["authorization"],
@@ -57,10 +67,11 @@ export class OwnedEvidenceChannel {
     const closed = new Promise<void>(done => { drain = done; });
     const chunks: Buffer[] = [];
     let finished = false, response = false, trailers = false, bytes = 0;
+    let ordinaryFailure = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const settle = (value?: Uint8Array) => {
+    const settle = (value?: Uint8Array, ordinary = false) => {
       if (finished) return; finished = true; clearTimeout(timer);
-      if (value !== undefined) resolve(value); else reject(refused());
+      if (value !== undefined) resolve(value); else reject(ordinary ? dependencyUnavailable("managed evidence refused safely") : refused());
     };
     const cancel = () => { settle(); try { stream.close(constants.NGHTTP2_CANCEL); } catch { void this.close(); } };
     const check = () => { if (this.stopped || finished || this.sample() >= deadline) throw refused(); };
@@ -73,22 +84,33 @@ export class OwnedEvidenceChannel {
     stream.on("response", (headers: IncomingHttpHeaders & IncomingHttpStatusHeader, _flags: number, raw: string[]) => {
       if (response || !unique(raw) || headers[":status"] !== 200 ||
         !["application/grpc", "application/grpc+proto"].includes(String(headers["content-type"])) ||
-        (headers["grpc-encoding"] !== undefined && headers["grpc-encoding"] !== "identity") || headers["grpc-status"] !== undefined) { cancel(); return; }
+        (headers["grpc-encoding"] !== undefined && headers["grpc-encoding"] !== "identity")) { cancel(); return; }
       response = true;
+      if (headers["grpc-status"] !== undefined) {
+        if (!readiness || !ordinaryGrpcStatus(headers["grpc-status"])) { cancel(); return; }
+        ordinaryFailure = true; trailers = true;
+      }
     });
     stream.on("trailers", (headers: IncomingHttpHeaders, _flags: number, raw: string[]) => {
-      if (!response || trailers || !unique(raw) || headers["grpc-status"] !== "0") { cancel(); return; } trailers = true;
+      if (!response || trailers || !unique(raw)) { cancel(); return; }
+      if (headers["grpc-status"] !== "0") {
+        if (!readiness || bytes !== 0 || !ordinaryGrpcStatus(headers["grpc-status"])) { cancel(); return; }
+        ordinaryFailure = true;
+      }
+      trailers = true;
     });
     stream.on("data", (chunk: Buffer) => {
       if (finished) return;
       bytes += chunk.length;
-      if (!response || trailers || bytes > 8197) { cancel(); return; }
+      if (!response || trailers || bytes > (readiness ? 1029 : 8197)) { cancel(); return; }
       chunks.push(Buffer.from(chunk));
     });
     stream.on("end", () => {
       if (finished) return;
       try {
-        check(); const body = Buffer.concat(chunks, bytes);
+        check();
+        if (ordinaryFailure && response && trailers && bytes === 0) { settle(undefined, true); cancel(); return; }
+        const body = Buffer.concat(chunks, bytes);
         try {
           if (!response || !trailers || body.length < 5 || body[0] !== 0 || body.readUInt32BE(1) !== body.length - 5) throw refused();
           check(); settle(Buffer.from(body.subarray(5)));

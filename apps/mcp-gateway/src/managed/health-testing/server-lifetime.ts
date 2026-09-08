@@ -53,8 +53,8 @@ export async function emptyFailures(t: TestContext): Promise<void> {
     const f = await completed(); t.after(() => f.monitor.close());
     if (mode === "overflow") f.codec.encode = () => "x".repeat(8193);
     if (mode === "codec") f.codec.encode = () => { throw new Error("HEALTH_CANARY"); };
-    const server = await startHealthServer({ codec: f.codec, state: { snapshot() {
-      if (mode === "snapshot") throw new Error("HEALTH_CANARY"); return f.monitor.snapshot();
+    const server = await startHealthServer({ codec: f.codec, state: { observation() {
+      if (mode === "snapshot") throw new Error("HEALTH_CANARY"); return f.monitor.observation();
     } }, tokenBytes: token(), clock: createClock(), onFatal: () => assert.fail("fatal") });
     t.after(() => server.close());
     const response = await requestText(wire());
@@ -83,11 +83,11 @@ export async function callbackFences(t: TestContext): Promise<void> {
       if (mode === "codec-deadline") ns += 2000000000n;
       return encode(report);
     };
-    server = await startHealthServer({ codec: f.codec, state: { snapshot() {
+    server = await startHealthServer({ codec: f.codec, state: { observation() {
       snapshots++;
       if (mode === "snapshot-close") closing = server!.close();
       if (mode === "snapshot-deadline") ns += 2000000000n;
-      return f.monitor.snapshot();
+      return f.monitor.observation();
     } }, tokenBytes: token(), clock, onFatal: () => assert.fail("fatal") });
     t.after(() => server!.close());
     const response = await requestText(wire());
@@ -103,7 +103,7 @@ export async function callbackFences(t: TestContext): Promise<void> {
 export async function connectionCap(t: TestContext): Promise<void> {
   const f = await completed(); t.after(() => f.monitor.close());
   let snapshots = 0;
-  const server = await startHealthServer({ codec: f.codec, state: { snapshot() { snapshots++; return f.monitor.snapshot(); } },
+  const server = await startHealthServer({ codec: f.codec, state: { observation() { snapshots++; return f.monitor.observation(); } },
     tokenBytes: token(), clock: createClock(), onFatal: () => assert.fail("fatal") }); t.after(() => server.close());
   const peers = [];
   for (let i = 0; i < 9; i++) peers.push(await peer(t));
@@ -117,7 +117,7 @@ export async function connectionCap(t: TestContext): Promise<void> {
 export async function absoluteIdle(t: TestContext): Promise<void> {
   const f = await completed(); t.after(() => f.monitor.close());
   let snapshots = 0;
-  const server = await startHealthServer({ codec: f.codec, state: { snapshot() { snapshots++; return f.monitor.snapshot(); } },
+  const server = await startHealthServer({ codec: f.codec, state: { observation() { snapshots++; return f.monitor.observation(); } },
     tokenBytes: token(), clock: createClock(), onFatal: () => assert.fail("fatal") }); t.after(() => server.close());
   const idle = await peer(t), trickle = await peer(t), started = performance.now();
   trickle.socket.write("GET /readyz HTTP/1.1\r\nX-Trickle: ");

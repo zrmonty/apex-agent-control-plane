@@ -11,7 +11,27 @@ use inspect::Inspected;
 pub(in crate::execution) struct Inventory {
     networks: Vec<Inspected>,
 }
+mod paired;
 impl Inventory {
+    pub(in crate::execution) fn outer_name(&self, t: &Topology) -> Result<String, &'static str> {
+        let c = t.catalog()?;
+        let n = self
+            .networks
+            .iter()
+            .find(|n| n.id == c.outer().network_id())
+            .ok_or(ERROR)?;
+        n.outer(t)?;
+        if self
+            .networks
+            .iter()
+            .filter(|other| other.name == n.name)
+            .count()
+            != 1
+        {
+            return Err(ERROR);
+        }
+        Ok(n.name.clone())
+    }
     pub fn validate(
         &self,
         t: &Topology,
@@ -104,17 +124,12 @@ impl Engine {
             return Err(ERROR);
         }
         let mut networks = vec![];
-        let mut total = 0;
-        for id in ids {
-            let bytes = self.run(
-                vec!["network".into(), "inspect".into(), id.clone()],
-                deadline,
-                cancel,
-            )?;
-            total += bytes.len();
-            if total > 4_194_304 {
-                return Err(ERROR);
-            }
+        for (id, bytes) in self.inspect_many(
+            network_inspection_batch::Kind::Network,
+            ids,
+            deadline,
+            cancel,
+        )? {
             let n = Inspected::parse(&bytes)?;
             if n.id != id {
                 return Err(ERROR);

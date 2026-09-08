@@ -45,6 +45,18 @@ pub(super) fn scope_capacity(capacity: usize) -> usize {
 /// retry can observe the outbox's completed event and finish idempotency
 /// bookkeeping without publishing a second time.
 pub trait IdempotencyStore {
+    /// Observes durable admission capability without reserving or committing a key.
+    /// A success is a current storage/capacity observation, not a promise that a
+    /// future write succeeds. Unsupported or in-memory stores fail closed.
+    /// The caller must authenticate scope first and retain blocking I/O ownership.
+    fn check_admission_readiness(
+        &mut self,
+        _workspace_id: &str,
+        _namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::internal())
+    }
+
     fn reserve(
         &mut self,
         key: IdempotencyKey,

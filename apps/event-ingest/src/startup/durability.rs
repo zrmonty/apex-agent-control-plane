@@ -144,10 +144,13 @@ pub(super) fn open_durability_stores(
             let pool_size = effective_admission_pool_size(admission_pool_size, true);
             let mut admission_stores = Vec::with_capacity(pool_size);
             for _ in 0..pool_size {
-                let admission_outbox = apex_event_ingest::PostgresOutbox::connect(&url, capacity)
-                    .map_err(startup_gateway_error)?;
+                // Readiness observes these actual admission owners; both need
+                // whole-operation deadlines, including an unresponsive socket.
+                let admission_outbox =
+                    apex_event_ingest::PostgresOutbox::connect_for_worker(&url, capacity)
+                        .map_err(startup_gateway_error)?;
                 let admission_idempotency =
-                    apex_event_ingest::PostgresIdempotencyStore::connect(&url, capacity)
+                    apex_event_ingest::PostgresIdempotencyStore::connect_for_worker(&url, capacity)
                         .map_err(startup_gateway_error)?;
                 admission_stores.push((
                     Box::new(admission_outbox) as Box<dyn EventOutbox>,
