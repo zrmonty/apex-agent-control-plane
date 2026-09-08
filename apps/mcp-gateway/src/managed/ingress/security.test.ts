@@ -17,16 +17,37 @@ test("exact path, Host and Origin validation also protects metadata", async t =>
 
 test("header-count truncation cannot hide a second sensitive header", async t => {
   const f = await ingressFixture(t);
-  const status = await new Promise<string>((resolve, reject) => {
-    const socket = connect({ host: "127.0.0.1", port: f.address.port, servername: "gateway.test", ca: pki.ca,
+  const status = await rawHeaderStatus(f.address.port, 2100, true);
+  // Older Node releases truncate at maxHeadersCount, so our guard returns 400.
+  // Newer releases reject excess headers in the parser with 431 before dispatch.
+  assert.match(status, /^HTTP\/1.1 (?:400|431) /);
+  assert.deepEqual(f.execution.effects, []);
+  assert.deepEqual(f.execution.events, []);
+});
+
+for (const [filler, duplicateOrigin, status] of [[60, false, 200], [61, false, 400], [59, true, 400]] as const) {
+  test(`header boundary: ${filler} filler headers, duplicate Origin ${duplicateOrigin}, status ${status}`, async t => {
+    const f = await ingressFixture(t);
+    // Host + Origin + Connection add three headers. Exactly 64 must be refused
+    // by our guard even when Node accepts them; a duplicate below it also fails.
+    assert.match(await rawHeaderStatus(f.address.port, filler, duplicateOrigin), new RegExp(`^HTTP/1.1 ${status} `));
+    assert.deepEqual(f.execution.effects, []);
+    assert.deepEqual(f.execution.events, []);
+  });
+}
+
+function rawHeaderStatus(port: number, filler: number, duplicateOrigin: boolean): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const socket = connect({ host: "127.0.0.1", port, servername: "gateway.test", ca: pki.ca,
       ...pki.governance }, () => socket.write("GET /.well-known/oauth-protected-resource HTTP/1.1\r\n" +
-        "Host: proxy.apex.test\r\nOrigin: https://console.apex.test\r\n" + "x:y\r\n".repeat(2100) +
-        "Origin: https://attacker.test\r\nConnection: close\r\n\r\n"));
+        "Host: proxy.apex.test\r\nOrigin: https://console.apex.test\r\n" + "x:y\r\n".repeat(filler) +
+        (duplicateOrigin ? "Origin: https://attacker.test\r\n" : "") + "Connection: close\r\n\r\n"));
+    socket.setTimeout(3000, () => socket.destroy(new Error("test header request timed out")));
     socket.once("data", data => { resolve(String(data).split("\r\n")[0]); socket.destroy(); });
     socket.once("error", reject);
+    socket.once("end", () => reject(new Error("test connection ended before a status")));
   });
-  assert.match(status, /^HTTP\/1.1 400 /);
-});
+}
 
 test("duplicate and malformed sensitive headers cannot be collapsed into an authenticated request", async t => {
   const f = await ingressFixture(t);
