@@ -40,6 +40,20 @@ impl SharedOutbox {
 }
 
 impl EventOutbox for SharedOutbox {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        let mut owner = self.0.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => {
+                GatewayError::new(crate::GatewayErrorCode::AdmissionBusy)
+            }
+            std::sync::TryLockError::Poisoned(_) => GatewayError::internal(),
+        })?;
+        owner.check_admission_readiness(workspace_id, namespace_id)
+    }
+
     fn enqueue(&mut self, event: &IngestRequest) -> Result<EnqueueResult, GatewayError> {
         self.lock()?.enqueue(event)
     }

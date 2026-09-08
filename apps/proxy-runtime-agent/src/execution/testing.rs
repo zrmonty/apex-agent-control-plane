@@ -13,6 +13,10 @@ pub(crate) enum Point {
     NetworkCommandReturned,
     NetworkIntent,
     NetworkCreated,
+    PairIntent,
+    PairEffectReturned,
+    StartIntent,
+    StartEffectReturned,
     GuardIntent,
     GuardDirectory,
     GuardFile,
@@ -92,6 +96,9 @@ impl Hooks {
 }
 thread_local! { static CURRENT: RefCell<Option<Arc<Hooks>>> = const { RefCell::new(None) }; }
 pub(super) struct Scope(Option<Arc<Hooks>>);
+pub(super) fn current() -> Option<Arc<Hooks>> {
+    CURRENT.with_borrow(Clone::clone)
+}
 pub(super) fn enter(hooks: &Arc<Hooks>) -> Scope {
     Scope(CURRENT.replace(Some(Arc::clone(hooks))))
 }

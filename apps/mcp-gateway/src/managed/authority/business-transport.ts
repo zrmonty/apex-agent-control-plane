@@ -1,5 +1,6 @@
 import type { ManagedCallAuthorizationRequest, ManagedCallCompletionReceipt, ManagedPolicySnapshot } from "@apex/contracts";
 import type { AuthorizationContext, BusinessDecision, BusinessExchange, BusinessTransportOptions } from "./business-types.js";
+import { redactDependencyFailure } from "./dependency-failure.js";
 import { authorizationContext, authorizationRequest, businessBinding, businessClassification, businessIdentifier,
   businessRefused, completionRequest, decodeAuthorization, decodeCompletion, decodePolicy, policyRequest } from "./business-codec.js";
 
@@ -24,7 +25,7 @@ export class AuthenticatedBusinessTransport {
       const start = this.sample(), input = policyRequest(nonce, this.options.binding);
       return this.start("/apex.v1.ManagedRuntimeAuthority/GetManagedPolicy", input.payload, start,
         bytes => decodePolicy(bytes, this.options, input.expectedNonce));
-    } catch { throw businessRefused(); }
+    } catch (error) { throw redactDependencyFailure(error, "managed business refused safely"); }
   }
   startAuthorization(request: ManagedCallAuthorizationRequest, context: AuthorizationContext): BusinessExchange<BusinessDecision> {
     try {
@@ -52,8 +53,8 @@ export class AuthenticatedBusinessTransport {
     let resolve!: (value: T) => void, reject!: (error: Error) => void;
     const result = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
     let finished = false, cancelled = false, timer: ReturnType<typeof setTimeout> | undefined;
-    const cancel = () => {
-      if (!finished) { finished = true; clearTimeout(timer); reject(businessRefused()); }
+    const cancel = (cause?: unknown) => {
+      if (!finished) { finished = true; clearTimeout(timer); reject(redactDependencyFailure(cause, "managed business refused safely")); }
       if (!cancelled) {
         cancelled = true;
         try { exchange.cancel(); } catch { /* Never leak a dependency diagnostic. Root retains channel ownership. */ }

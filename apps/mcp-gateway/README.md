@@ -6,9 +6,12 @@ over stdio or a managed Streamable HTTP revision.
 The deterministic local `portfolio.read` development path is implemented.
 Managed HTTP components use the official MCP transports, separate inbound and
 outbound credentials, Apex governance and certificate-bound event admission.
-The production managed factory deliberately refuses construction until real
-network and admission enforcement are connected; it does not supply permissive
-defaults. Component availability is not a working deployed gateway.
+The managed executable now owns the sealed-stage runtime, guarded outbound
+clients, admission/readiness checks, authenticated health and HTTPS ingress.
+It starts only from the agent's protected isolated-network handoff and does not
+admit business calls until current SERVE authority and readiness are both valid.
+Signed deployment, controller lifecycle and complete trace/UI acceptance remain
+open; a verified component runtime is not yet a production-ready deployed app.
 See [`docs/operations/mcp-proxy-live-integrations.md`](../../docs/operations/mcp-proxy-live-integrations.md)
 for the deployment contract and recovery guidance.
 
@@ -34,7 +37,8 @@ for the deployment contract and recovery guidance.
 Standalone requires both exact selectors `NODE_ENV=development` and
 `APEX_MCP_PROFILE=development-standalone`, with both
 `APEX_MCP_PROXY_REVISION_CONFIG` and `APEX_MCP_PROXY_REVISION_CONFIG_FILE`
-absent (even an empty supplied value is rejected). The default profile is
+absent (even an empty supplied value is rejected). Managed stage, installation,
+network and listen-override metadata are also forbidden in standalone. The default profile is
 `managed`; setting only `NODE_ENV=development` does not enable standalone.
 
 Local mode uses `StaticLocalApex` and `LocalPortfolioAdapter`. Live mode
@@ -43,19 +47,26 @@ and policy metadata from `control-plane-api` and admits metadata-only TOOL
 evidence through `event-ingest`. Live mode fails closed when any required
 client credential is missing.
 
-Managed startup accepts only a bounded file containing the complete generated
-`RuntimeConfiguration`, not the old handwritten revision model or inline JSON.
-It checks the generated metadata, executable capabilities and caller scope,
-then refuses before secrets, clients, discovery or listeners while enforcement
-is unavailable. Managed startup requires exact `APEX_MCP_GOVERNANCE_MODE=live`;
-inline configuration, missing files and unsupported selectors fail closed.
+Managed startup requires the exact agent-owned `sealed-stage-v2` environment,
+including `APEX_MCP_GOVERNANCE_MODE=live`, the `isolated-bridge-v1` network binding,
+and fixed `/apex/runtime` paths. The OS reader verifies the complete bounded,
+read-only stage, its ownership and manifest before runtime construction. Caller
+identity env, legacy configuration-file/inline selectors, arbitrary listen paths
+and ambient transport overrides are rejected. The legacy metadata-only factory
+remains a refusal-only component; the executable no longer calls it.
+Health listens only at `127.0.0.1:8081`; HTTPS binds the sealed gateway address
+at port 8080. PREPARE performs nine checks without accepting business sessions.
+SIGINT/SIGTERM await actual resource closure and completion handoff. Unresolved
+completion returns a failure requiring reconciliation; fatal unproved cleanup
+terminates the process rather than pretending a timer proved physical closure.
 Managed stdio/CLI remain disabled. Do not use the development path as a
 production fallback.
 
 The legacy Compose overlay explicitly selects managed/live and has its old
 always-success healthcheck disabled. It is a bootstrap/startup-refusal fixture,
-not a ready deployment. Authenticated health and actual enforcement are still
-being implemented; a disabled healthcheck does not establish readiness.
+not a ready deployment. Authenticated health and guarded runtime composition
+have passed an unsigned isolated component fixture; the legacy overlay does not
+provide the new protected stage. A disabled healthcheck does not establish readiness.
 
 ## Generated configuration and image checks
 
@@ -88,8 +99,9 @@ The suite explicitly reports `readinessVerified: false`: it does not certify
 startup readiness, host egress enforcement or a working deployed proxy.
 
 The startup suite runs the original image entrypoint through eight fixed
-profile/configuration cases. Every case supplies valid fixture identity so
-an unrelated missing-identity error cannot satisfy an expected refusal.
+profile/configuration cases. Explicit development cases supply valid fixture
+identity; managed cases omit legacy caller identity so its rejection cannot
+mask a missing-stage/profile refusal.
 It verifies process exit, confinement and owned cleanup, including explicit
 development startup with closed stdin. It does not perform an image-level MCP
 handshake or configured managed-health check; both corresponding report flags

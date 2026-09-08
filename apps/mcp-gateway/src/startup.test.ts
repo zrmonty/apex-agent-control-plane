@@ -10,13 +10,15 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { artifactPath, artifactText } from "./managed/testing/runtime-fixture.js";
 import { parseProxyRevisionConfig } from "./managed/config.js";
 import { runNode } from "./testing/node-runner.js";
+import { parseSealedStageEnvironment } from "./managed/bootstrap/environment.js";
+import { loadRuntimeConfiguration } from "./managed/startup-loader.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const initialize = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
   protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "startup-fixture", version: "1" } } }) + "\n";
 
 function startupEnvironment(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("APEX_MCP_") && key !== "NODE_ENV"));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("APEX_") && key !== "NODE_ENV"));
   Object.assign(env, { APEX_MCP_PRINCIPAL: "spiffe://apex/agent/research", APEX_MCP_AGENT_ID: "research-agent",
     APEX_MCP_WORKSPACE_ID: "acme", APEX_MCP_NAMESPACE_ID: "prod", APEX_MCP_TRACE_ID: "trace-001",
     APEX_MCP_GOVERNANCE_MODE: "live", ...overrides });
@@ -123,11 +125,11 @@ test("development requires exact NODE_ENV and rejects every supplied managed sou
     APEX_MCP_PROXY_REVISION_CONFIG_FILE: artifactPath }));
 });
 
-test("actual entrypoint accepts the Rust file metadata but refuses unmet runtime enforcement without fallback", async () => {
+test("actual entrypoint refuses legacy file metadata before runtime construction without fallback", async () => {
   for (const profile of [undefined, "managed"]) {
     const result = await runStartup({ APEX_MCP_PROFILE: profile, APEX_MCP_PROXY_REVISION_CONFIG_FILE: artifactPath });
-    assertRefused(result, "GOVERNANCE_UNAVAILABLE");
-    assert.match(result.stderr, /managed runtime enforcement is unavailable safely/);
+    assertRefused(result);
+    assert.equal(result.stderr.trim(), "INVALID_INPUT: gateway process profile rejected safely");
   }
 });
 
@@ -141,10 +143,10 @@ test("empty, inline, ambiguous and unreadable managed sources cannot select stan
   ]) assertRefused(await runStartup(env));
 });
 
-test("startup file boundary rejects non-files, oversized, empty and strict-wire-invalid original text", async () => {
+test("legacy component loader still rejects non-files, oversized, empty and strict-wire-invalid original text", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "apex-startup-fixture-"));
   try {
-    assertRefused(await runStartup({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: root }));
+    await assert.rejects(loadRuntimeConfiguration({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: root }), /managed runtime configuration rejected safely/);
     const file = path.join(root, "runtime.json");
     for (const text of ["", " ", "SENSITIVE-not-json", Buffer.from([0xff, 0xfe, 0x80]),
       '{"schemaVersion":1,' + artifactText.trimStart().slice(1),
@@ -154,11 +156,23 @@ test("startup file boundary rejects non-files, oversized, empty and strict-wire-
       artifactText.replace("MCP_PROXY_TRANSPORT_STREAMABLE_HTTP", "UNKNOWN_TRANSPORT"),
     ]) {
       await writeFile(file, text);
-      assertRefused(await runStartup({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: file }));
+      await assert.rejects(loadRuntimeConfiguration({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: file }), /managed runtime configuration rejected safely/);
     }
     await truncate(file, 262145);
-    assertRefused(await runStartup({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: file }));
+    await assert.rejects(loadRuntimeConfiguration({ APEX_MCP_PROXY_REVISION_CONFIG_FILE: file }), /managed runtime configuration rejected safely/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("actual sealed-profile executable reaches the OS stage boundary and refuses an absent or unowned stage statically", async () => {
+  const env = { NODE_ENV: "production", HOME: "/tmp/apex", APEX_MCP_PROFILE: "managed", APEX_MCP_GOVERNANCE_MODE: "live",
+    APEX_RUNTIME_CONFIG_FILE: "/apex/runtime/runtime-revision.json", APEX_RUNTIME_LAUNCH_FILE: "/apex/runtime/launch-context.json",
+    APEX_MCP_MANAGED_BOOTSTRAP: "sealed-stage-v2", APEX_INSTALLATION_ID: "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e01",
+    APEX_STAGE_MANIFEST_SHA256: "a".repeat(64), APEX_TOOL_SECRET_REFERENCES: "[]", APEX_MCP_NETWORK_PROFILE: "isolated-bridge-v1",
+    APEX_MCP_GUARD_ADDRESS: "10.96.0.3", APEX_MCP_NETWORK_BINDING_SHA256: "b".repeat(64) };
+  assert.ok(parseSealedStageEnvironment(env).network);
+  const result = await runNode({ cwd: packageRoot, entrypoint: "src/index.ts", env, input: initialize });
+  assertRefused({ ...result, stdout: result.stdout.toString(), stderr: result.stderr.toString() }, "GOVERNANCE_UNAVAILABLE");
+  assert.equal(result.stderr.toString().trim(), "GOVERNANCE_UNAVAILABLE: managed application stopped safely");
 });
 
 test("an otherwise valid legacy revision file is rejected without old/new parser fallback", async () => {

@@ -306,6 +306,32 @@ impl<P: EventPublisher> IngestGateway<P> {
         &self.publisher
     }
 
+    /// Checks only the authenticated workload's local durable admission stores.
+    /// Never admits an event, reserves a key, or asks downstream sinks to publish.
+    pub fn check_admission_readiness(
+        &mut self,
+        caller: &Caller,
+        workspace_id: &str,
+        namespace_id: &str,
+        agent_id: &str,
+    ) -> Result<(), GatewayError> {
+        if !caller.is_valid() || caller.bound_agent_id().is_none() {
+            return Err(GatewayError::new(GatewayErrorCode::Unauthenticated));
+        }
+        if !is_scope_identifier(workspace_id)
+            || !is_scope_identifier(namespace_id)
+            || !is_scope_identifier(agent_id)
+            || caller.bound_agent_id() != Some(agent_id)
+            || !caller.allows_scope(&format!("{workspace_id}/{namespace_id}"))
+        {
+            return Err(GatewayError::new(GatewayErrorCode::ScopeDenied));
+        }
+        self.idempotency
+            .check_admission_readiness(workspace_id, namespace_id)?;
+        self.publisher
+            .check_admission_readiness(workspace_id, namespace_id)
+    }
+
     pub fn replay_pending(&mut self) -> Result<(), GatewayError>
     where
         P: PendingEventReplayer,

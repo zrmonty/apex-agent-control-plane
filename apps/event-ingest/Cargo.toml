@@ -10,6 +10,9 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
+
 [dependencies]
 apex-contract = { version = "0.1.0", path = "../../crates/apex-contract" }
 apex-auth = { version = "0.1.0", path = "../../crates/apex-auth" }

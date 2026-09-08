@@ -1,12 +1,13 @@
 //! Private deterministic physical-work hold; no fake engine success is claimed.
 use super::*;
+pub(in crate::execution) mod shutdown;
 use std::{
     future::Future,
     task::{Context as TaskContext, Waker},
 };
 #[tokio::test]
 async fn cancelled_requests_retain_all_slots_and_root_handles_until_physical_exit() {
-    let (sender, receiver) = mpsc::sync_channel::<Job>(8);
+    let (sender, receiver) = mpsc::sync_channel::<Work>(8);
     let receiver = Arc::new(Mutex::new(receiver));
     let (entered, observed) = mpsc::channel();
     let (release, held) = mpsc::channel();
@@ -24,6 +25,9 @@ async fn cancelled_requests_retain_all_slots_and_root_handles_until_physical_exi
         let entered = entered.clone();
         facility.threads.push(std::thread::spawn(move || {
             let job = receiver.lock().unwrap().recv().unwrap();
+            let Work::Reconcile(job) = job else {
+                panic!("expected reconciliation")
+            };
             entered.send(Arc::clone(&job.cancelled)).unwrap();
             held.lock().unwrap().recv().unwrap();
             drop(job);

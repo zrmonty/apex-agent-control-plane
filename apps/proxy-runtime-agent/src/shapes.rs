@@ -9,6 +9,23 @@ pub(super) fn scope(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+/// Bounded deployment metadata identifier; spelling grants no authority.
+pub(super) fn version(value: &str) -> bool {
+    value.len() <= 128 && scope(value)
+}
+
+/// Intersection of the stager's 256-byte bound and gateway reference grammar.
+/// References are metadata, never resolved paths or authority by spelling.
+pub(super) fn secret_reference(value: &str) -> bool {
+    value.len() <= 256
+        && value.strip_prefix("secret://").is_some_and(|tail| {
+            tail.as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+                && tail.split('/').all(|part| part != "." && scope(part))
+        })
+}
+
 pub(super) fn uuid_v7(value: &str) -> bool {
     if value.len() != 36 {
         return false;

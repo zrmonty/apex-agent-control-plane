@@ -4,14 +4,14 @@ import { cleanup, confined, containerFormat, containerPattern, docker, imageForm
 
 const standalone = ['APEX_MCP_PROFILE=development-standalone', 'NODE_ENV=development',
   'APEX_MCP_GOVERNANCE_MODE=local'];
-// Valid non-secret identity in every case prevents unrelated identity refusal
-// from satisfying a negative profile/config expectation.
+// Explicit development alone consumes caller identity from env. Supplying this
+// legacy metadata in managed cases would mask missing sealed-stage selection.
 const identity = ['APEX_MCP_PRINCIPAL=spiffe://apex/agent/research',
   'APEX_MCP_AGENT_ID=research-agent', 'APEX_MCP_WORKSPACE_ID=acme',
   'APEX_MCP_NAMESPACE_ID=prod', 'APEX_MCP_TRACE_ID=trace-001'];
 const cases = [
   { id: 'production-default', expectedExitCode: 1, env: [] },
-  { id: 'managed-live-missing-file', expectedExitCode: 1,
+  { id: 'managed-live-missing-stage', expectedExitCode: 1,
     env: ['APEX_MCP_PROFILE=managed', 'APEX_MCP_GOVERNANCE_MODE=live'] },
   { id: 'development-without-profile', expectedExitCode: 1,
     env: ['NODE_ENV=development', 'APEX_MCP_GOVERNANCE_MODE=local'] },
@@ -65,7 +65,8 @@ async function runCase(definition, imageId, command, result) {
       '--pids-limit', '64', '--memory', '256m', '--cpus', '1',
       '--log-driver', 'none', '--no-healthcheck', '--env', 'NODE_OPTIONS=', '--env', 'NODE_PATH=',
       ...definition.env.flatMap((value) => ['--env', value]),
-      ...identity.flatMap((value) => ['--env', value]), state.imageId], 30_000);
+      ...(definition.env.includes('APEX_MCP_PROFILE=development-standalone') ? identity : [])
+        .flatMap((value) => ['--env', value]), state.imageId], 30_000);
     // Nothing follows the immutable image ID: original ENTRYPOINT/CMD/cwd are
     // preserved. No -i/-t means closed stdin; host env values are never passed.
     check(created.ok && typeof created.stdout === 'string' && containerPattern.test(created.stdout.trim()));

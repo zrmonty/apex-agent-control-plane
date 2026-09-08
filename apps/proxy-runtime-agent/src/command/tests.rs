@@ -153,7 +153,7 @@ fn normal_parent_exit_does_not_leave_a_pipe_holding_descendant() {
 #[test]
 fn invalid_inputs_are_rejected() {
     let cancelled = AtomicBool::new(false);
-    let args = vec![OsString::from("x"); 65];
+    let args = vec![OsString::from("x"); 97];
     for (executable, directory, arguments) in [
         (Path::new("sh"), Path::new("/"), &[][..]),
         (Path::new("/bin/sh"), Path::new("relative"), &[][..]),

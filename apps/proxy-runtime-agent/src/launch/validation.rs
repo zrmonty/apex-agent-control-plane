@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 pub(super) fn document(document: &Document) -> Result<(), LaunchError> {
     let invalid = LaunchError::InvalidCatalog;
     if document.schema_version != 1
-        || !version(&document.version)
+        || !shapes::version(&document.version)
         || !sql_positive(document.valid_from_unix_us)
         || !sql_positive(document.expires_at_unix_us)
         || document.valid_from_unix_us >= document.expires_at_unix_us
@@ -45,10 +45,10 @@ fn profile(p: &Profile) -> Result<(), LaunchError> {
         || !shapes::uuid_v7(&p.revision_id)
         || !shapes::scope(&p.workspace_id)
         || !shapes::scope(&p.namespace_id)
-        || !version(&p.host_policy_version)
-        || !version(&p.deployment_bindings_version)
-        || !version(&p.authority_profile_ref)
-        || !version(&p.authority_profile_version)
+        || !shapes::version(&p.host_policy_version)
+        || !shapes::version(&p.deployment_bindings_version)
+        || !shapes::version(&p.authority_profile_ref)
+        || !shapes::version(&p.authority_profile_version)
         || !shapes::hex_hash(&p.config_hash)
         || !image_id(&p.image_catalog_id)
         || p.materials.len() != 13
@@ -61,8 +61,8 @@ fn profile(p: &Profile) -> Result<(), LaunchError> {
     for entry in &p.materials {
         let m = &entry.0;
         if !(1..=13).contains(&i32::from(m.role.0))
-            || !reference(&m.reference)
-            || !version(&m.version)
+            || !shapes::secret_reference(&m.reference)
+            || !shapes::version(&m.version)
             || !source_name(&m.source_name)
             || !roles.insert(i32::from(m.role.0))
             || !references.insert(&m.reference)
@@ -72,10 +72,6 @@ fn profile(p: &Profile) -> Result<(), LaunchError> {
         }
     }
     Ok(())
-}
-
-fn version(value: &str) -> bool {
-    value.len() <= 128 && shapes::scope(value)
 }
 
 fn image_id(value: &str) -> bool {
@@ -94,20 +90,6 @@ fn source_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-// Intersection of the stager's 256-byte reference bound and gateway grammar.
-// References are metadata, never a source path or an authority by spelling.
-fn reference(value: &str) -> bool {
-    value.len() <= 256
-        && value.strip_prefix("secret://").is_some_and(|tail| {
-            tail.as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphanumeric)
-                && tail
-                    .split('/')
-                    .all(|part| part != "." && shapes::scope(part))
-        })
 }
 
 pub(super) fn sql_positive(value: u64) -> bool {

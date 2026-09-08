@@ -24,6 +24,16 @@ pub(super) struct Journal {
     _lock: OwnedFd,
     network_lock: std::sync::Mutex<network::State>,
     topology_lock: std::sync::Mutex<topology::State>,
+    health_lock: std::sync::Mutex<health::State>,
+}
+impl Drop for Journal {
+    fn drop(&mut self) {
+        // A concurrent pre-exec child can retain this OFD despite CLOEXEC.
+        // End ownership explicitly; closing only our descriptor can leave the
+        // lock live until that child execs. Workers retain Journal until exit.
+        // If unlock fails, ordinary close still runs; never manufacture access.
+        let _ = fs::flock(&self._lock, FlockOperation::Unlock);
+    }
 }
 impl Journal {
     pub(super) fn open(path: &Path) -> Result<Self, &'static str> {
@@ -53,6 +63,7 @@ impl Journal {
             _lock: lock,
             network_lock: std::sync::Mutex::default(),
             topology_lock: std::sync::Mutex::default(),
+            health_lock: std::sync::Mutex::default(),
         })
     }
     pub(super) fn key(installation: &str, t: &proto::RuntimeTarget) -> String {
@@ -125,6 +136,9 @@ impl Journal {
             return Err(ERROR);
         }
         for i in [&r.installed, &r.predecessor].into_iter().flatten() {
+            if let Some(pair) = &i.paired_containers {
+                pair.validate(installation, i)?;
+            }
             if let Some(stage) = &i.gateway_stage {
                 stage.validate(installation, i)?;
             }
@@ -219,6 +233,8 @@ fn digest(r: &Record) -> Result<String, &'static str> {
         Sha256::digest(serde_json::to_vec(r).map_err(|_| ERROR)?)
     ))
 }
+mod document;
+pub(super) mod health;
 mod network;
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,6 @@
 use super::*;
 use std::{fs, os::unix::fs::PermissionsExt};
+mod lifetime;
 #[test]
 fn protected_journal_exclusivity_restart_and_corrupt_replacements() {
     let root =

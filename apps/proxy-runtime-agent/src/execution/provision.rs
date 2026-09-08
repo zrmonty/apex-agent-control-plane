@@ -33,7 +33,7 @@ pub(super) fn deadline(job: &Job) -> Result<Instant, &'static str> {
     }
     Ok(deadline)
 }
-fn operation(job: &Job) -> Result<AuthorityOperation<'_>, &'static str> {
+pub(super) fn operation(job: &Job) -> Result<AuthorityOperation<'_>, &'static str> {
     let b = job.request.get_ref();
     Ok(AuthorityOperation {
         target: b.target.as_ref().ok_or(ERROR)?,
@@ -97,6 +97,11 @@ pub(super) fn checkpoint(
         return Err(owner::UNAVAILABLE);
     }
     budget(job)?;
+    // Shutdown may arrive during the blocking authority RPC while its request
+    // waiter is still alive, so cancellation alone cannot close this boundary.
+    if *ctx.shutdown.borrow() {
+        return Err("RUNTIME_SHUTTING_DOWN");
+    }
     Ok((metadata, a))
 }
 fn resolve(
@@ -127,6 +132,11 @@ pub(super) fn run(
     let claims = job.request.get_ref();
     let t = claims.target.as_ref().ok_or(ERROR)?;
     let old = ctx.resources.journal.load(&ctx.installation, t)?;
+    // Restart cannot bypass unresolved physical health ownership. Only exact
+    // daemon completion recovered by the observation owner closes this history.
+    if let Some(installed) = old.as_ref().and_then(|r| r.installed.as_ref()) {
+        super::health::mutation_allowed(&ctx.resources.journal, &ctx.installation, installed)?;
+    }
     // Empty cleanup history cannot manufacture terminal removal proof.
     if !serving && old.is_none() {
         return Err("RUNTIME_CLEANUP_HISTORY_UNAVAILABLE");
@@ -212,6 +222,7 @@ pub(super) fn run(
             network: None,
             guard_stage: None,
             gateway_stage: None,
+            paired_containers: None,
         });
         ctx.resources.journal.save(&record)?;
     }
@@ -224,6 +235,7 @@ pub(super) fn run(
     if metadata.network.is_some() || reserved {
         super::guard_staging::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
         super::gateway_staging::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
+        super::paired::run(ctx, job, &metadata, &mut record, &launch, &selected)?;
         return Err(DORMANT);
     }
     checkpoint(ctx, job, Some(&metadata))?;
@@ -422,6 +434,9 @@ fn cleanup(
     // remains quarantined for the Task4 admission/drain owner.
     let retired = a.desired_state == i32::from(proto::ProxyDesiredState::Retired);
     for i in [&r.installed, &r.predecessor].into_iter().flatten() {
+        if i.paired_containers.is_some() {
+            return Err("RUNTIME_NETWORK_CLEANUP_PENDING");
+        }
         if ctx
             .resources
             .journal

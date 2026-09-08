@@ -5,9 +5,103 @@ import { connect as tlsConnect } from "node:tls";
 import { test, type TestContext } from "node:test";
 import { certificate, key } from "./testing-tls.js";
 import { OwnedAuthorityChannel } from "./unary.js";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { RuntimeNetworkInspectionRequestSchema as NetworkRequest, RuntimeNetworkInspectionResponseSchema as NetworkResponse } from "@apex/contracts";
+import { NetworkReadinessClient } from "./network-readiness.js";
+import { binding } from "./business-testing.js";
+import { readBinding } from "./grant-transport.js";
+import { isDependencyUnavailable } from "./dependency-failure.js";
 
 const path = "/apex.v1.ManagedRuntimeAuthority/RenewDeployment";
 const credential = { token: "public-test-workload-token-not-a-secret", instanceProof: Buffer.alloc(32, 7) };
+
+for (const placement of ["headers", "trailers"] as const) {
+  for (const status of ["8", "14", "7", "16", "13", "014"]) {
+    test(`actual authority ${placement} gRPC ${status} classifies only ordinary readiness refusal`, async t => {
+      const { channel } = await fixture(t, stream => {
+        stream.resume(); stream.on("end", () => {
+          stream.respond({ ":status": 200, "content-type": "application/grpc",
+            ...(placement === "headers" ? { "grpc-status": status } : {}) }, { waitForTrailers: placement === "trailers" });
+          if (placement === "trailers") stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": status }));
+          stream.end();
+        });
+      });
+      const job = channel.start("/apex.v1.ManagedNetworkReadiness/Check", Buffer.alloc(0));
+      await assert.rejects(job.result, error => {
+        assert.equal(String(error), "Error: managed authority refused safely");
+        assert.equal(isDependencyUnavailable(error), status === "8" || status === "14"); return true;
+      });
+      await job.closed;
+    });
+  }
+}
+
+test("ordinary authority error status with a message body is terminal malformed framing", async t => {
+  const { channel } = await fixture(t, stream => {
+    stream.resume(); stream.on("end", () => {
+      stream.respond({ ":status": 200, "content-type": "application/grpc" }, { waitForTrailers: true });
+      stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": "14" })); stream.end(frame(Buffer.from([8, 1])));
+    });
+  });
+  const job = channel.start("/apex.v1.ManagedNetworkReadiness/Check", Buffer.alloc(0));
+  await assert.rejects(job.result, error => { assert.equal(isDependencyUnavailable(error), false); return true; });
+  await job.closed;
+});
+
+test("typed NETWORK nonce and original binding traverse the actual workload TLS channel", async t => {
+  const hash = "c".repeat(64);
+  let requests = 0;
+  const { channel } = await fixture(t, (stream, headers) => {
+    assert.equal(headers[":path"], "/apex.v1.ManagedNetworkReadiness/Check");
+    const chunks: Buffer[] = [];
+    stream.on("data", b => chunks.push(Buffer.from(b)));
+    stream.on("end", () => {
+      if (++requests === 1) {
+        stream.respond({ ":status": 200, "content-type": "application/grpc", "grpc-status": "8" });
+        stream.end(); return;
+      }
+      const body = Buffer.concat(chunks);
+      assert.equal(body[0], 0); assert.equal(body.readUInt32BE(1), body.length - 5);
+      const request = fromBinary(NetworkRequest, body.subarray(5));
+      assert.deepEqual(readBinding(request.binding), binding); assert.equal(request.nonce.length, 32);
+      const response = create(NetworkResponse, { schemaVersion: 1, binding: request.binding, nonce: request.nonce,
+        networkBindingSha256: hash, gatewayProcessSha256: "d".repeat(64), guardProcessSha256: "e".repeat(64),
+        confined: true, validForUs: 10_000_000n });
+      stream.respond({ ":status": 200, "content-type": "application/grpc" }, { waitForTrailers: true });
+      stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0" }));
+      stream.end(frame(toBinary(NetworkResponse, response)));
+    });
+  });
+  const client = new NetworkReadinessClient(binding, hash, channel);
+  const coldStart = process.hrtime.bigint(), busy = client.start(coldStart, coldStart + 2_000_000_000n);
+  await assert.rejects(busy.result, error => {
+    assert.equal(String(error), "Error: managed network readiness refused safely");
+    assert.equal(isDependencyUnavailable(error), true); return true;
+  });
+  await busy.closed;
+  const start = process.hrtime.bigint(), job = client.start(start, start + 2_000_000_000n);
+  assert.deepEqual(await job.result, { validUntilMonotonicNs: start + 10_000_000_000n });
+  await job.closed; await client.close();
+  assert.equal(requests, 2);
+});
+
+test("network readiness uses workload credentials but cannot call the Controller-only agent service", async t => {
+  const method = "/apex.v1.ManagedNetworkReadiness/Check";
+  const { channel } = await fixture(t, (stream, headers) => {
+    assert.equal(headers[":path"], method);
+    assert.equal(headers.authorization, `Bearer ${credential.token}`);
+    assert.equal(headers["apex-instance-proof-bin"], credential.instanceProof.toString("base64"));
+    stream.resume();
+    stream.on("end", () => {
+      stream.respond({ ":status": 200, "content-type": "application/grpc" }, { waitForTrailers: true });
+      stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0" }));
+      stream.end(frame(Buffer.from([8, 1])));
+    });
+  });
+  assert.throws(() => channel.start("/apex.v1.RuntimeNetworkInspection/Check", Buffer.from([8, 1])));
+  const exchange = channel.start(method, Buffer.from([8, 1]));
+  assert.deepEqual(await exchange.result, Buffer.from([8, 1])); await exchange.closed;
+});
 function frame(payload: Uint8Array) {
   const output = Buffer.alloc(5 + payload.length);
   output.writeUInt32BE(payload.length, 1); output.set(payload, 5); return output;

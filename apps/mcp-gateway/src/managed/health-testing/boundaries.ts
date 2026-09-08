@@ -12,7 +12,7 @@ import { peer, requestText, token, wire } from "./http.js";
 
 export async function byteEdgesAndPipeline(t: TestContext): Promise<void> {
   const f = await completed(); t.after(() => f.monitor.close()); let snapshots = 0;
-  const server = await startHealthServer({ codec: f.codec, state: { snapshot() { snapshots++; return f.monitor.snapshot(); } },
+  const server = await startHealthServer({ codec: f.codec, state: { observation() { snapshots++; return f.monitor.observation(); } },
     tokenBytes: token(), clock: createClock(), onFatal: () => assert.fail("fatal") }); t.after(() => server.close());
   const base = wire().replace("\r\n\r\n", "\r\nX-Pad: \r\n\r\n");
   assert.equal((await requestText(base.replace("X-Pad: ", `X-Pad: ${"a".repeat(4096 - Buffer.byteLength(base))}`))).status, 200);
@@ -36,12 +36,14 @@ export async function bindingCollision(t: TestContext): Promise<void> {
 }
 
 export async function preciseStages(t: TestContext): Promise<void> {
-  const f = controlled(), monitor = new ReadinessMonitor(f.options); t.after(() => monitor.close());
+  const f = controlled(), monitor = new ReadinessMonitor(f.options);
+  t.after(async () => { const closing = monitor.close(); for (const id of [...f.pending.keys()]) f.release(id); await closing; });
   const checking = monitor.checkStartup();
   for (const [id, ns] of [[1, 999n], [5, 1000n], [6, 7000n], [7, 999000n]] as const) {
     f.time.advance(ns); f.release(id); await flush();
+    if (id === 1) { f.release(8); await flush(); }
   }
-  for (const id of [2, 3, 4, 8, 9]) { f.release(id); await flush(); }
+  for (const id of [2, 3, 4, 9]) { f.release(id); await flush(); }
   assert.equal((await checking).ready, true);
   const codec = new ReadinessReportCodec({ config: f.options.configuration, launch: f.launch });
   const clock = createClock(), server = await startHealthServer({ codec, state: monitor, tokenBytes: token(), clock,

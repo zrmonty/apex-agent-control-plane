@@ -79,9 +79,16 @@ test("the production entrypoint import graph never reaches the legacy managed mo
     for (const dependency of dependencies) await visit(dependency);
   }
   await visit(path.join(root, "index.ts"));
-  assert.ok(visited.has(path.join(root, "managed", "startup-loader.ts")));
-  assert.ok(visited.has(path.join(root, "managed", "runtime-config.ts")));
-  assert.ok(visited.has(path.join(root, "live", "managed-runtime.ts")));
+  // Executable composition must reach the real sealed-stage/application/core
+  // owners, not merely the obsolete metadata loader and refusing runtime.
+  for (const boundary of [
+    "managed/process.ts", "managed/application.ts", "managed/application/process-owner.ts", "managed/application/owner.ts",
+    "managed/bootstrap/stage-owner.ts", "managed/bootstrap/environment.ts", "managed/stage-reader.ts", "managed/stage-reader/fs.ts",
+    "managed/bootstrap/runtime-materials.ts", "managed/runtime-config.ts", "managed/runtime-core.ts",
+    "managed/runtime-core/concrete-readiness.ts", "managed/control-transports.ts", "managed/health-server.ts", "managed/ingress.ts",
+  ]) assert.ok(visited.has(path.join(root, boundary)), `missing executable boundary: ${boundary}`);
+  assert.ok(!visited.has(path.join(root, "managed", "startup-loader.ts")));
+  assert.ok(!visited.has(path.join(root, "live", "managed-runtime.ts")));
   assert.ok(!visited.has(path.join(root, "managed", "config.ts")));
   assert.ok(!visited.has(path.join(root, "managed", "cli.ts")));
   assert.ok([...visited].every(file => !file.endsWith(".test.ts") && !file.includes(`${path.sep}testing${path.sep}`)));

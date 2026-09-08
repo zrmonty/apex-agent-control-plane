@@ -1,5 +1,5 @@
-//! Private durable metadata seam. This does not authenticate or enable serving.
-#![allow(dead_code)] // Main's bounded authenticated service owner is a later slice.
+//! Private durable metadata seam. Selection still needs a later applied SERVE.
+#![allow(dead_code)] // Lifecycle/projection consumers are outside this bounded slice.
 
 use super::operation_journal as journal;
 use super::{PostgresProxyStore, configuration_error};
@@ -25,11 +25,26 @@ pub(crate) struct DeploymentRegistration {
     pub proof_sha256: [u8; 32],
 }
 
-/// Metadata from main's authenticated probe, not a constructed authority token.
+/// Metadata from the controller's authenticated probe, not an authority token.
 pub(crate) struct CandidateReadiness {
+    /// Original local health deadline, never renewed by a database handoff.
+    pub expires: std::time::Instant,
     pub report: proto::ReadinessReport,
     pub admitting: bool,
     pub active_calls: u64,
+}
+
+impl CandidateReadiness {
+    fn remaining_us(&self, now: std::time::Instant) -> Result<i64, ProxyError> {
+        let remaining = self
+            .expires
+            .checked_duration_since(now)
+            .ok_or_else(refused)?;
+        i64::try_from(remaining.as_micros().min(5_000_000))
+            .ok()
+            .filter(|us| *us > 0)
+            .ok_or_else(refused)
+    }
 }
 
 /// Point-in-time metadata for main's verifier/projection; not route permission.
@@ -54,6 +69,64 @@ pub(crate) struct AppliedDecision {
 }
 
 impl PostgresProxyStore {
+    /// Fenced, policy-checked preflight for the controller's original launch.
+    /// A selected or closed instance needs no candidate health consumption.
+    pub(crate) fn read_health_candidate_checked(
+        &self,
+        lease: &LeasedProxyOperation,
+        binding: &proto::ManagedDeploymentBinding,
+        check: &impl Fn() -> Result<(), ProxyError>,
+    ) -> Result<Option<DeploymentRecord>, ProxyError> {
+        self.with_deployment(binding, Some(lease), check, |tx, key| {
+            let record = record::read(tx, key, binding)?;
+            if record.terminated
+                || record.mode != proto::ManagedGrantMode::Prepare
+                || record.selected_instance.is_some()
+            {
+                return Ok(None);
+            }
+            let row = transitions::candidate(tx, key, lease, binding)?;
+            let until = transitions::applied_prepare_expiry(tx, key, &row)?;
+            tx.require_valid_until(until);
+            Ok(Some(record))
+        })
+    }
+
+    /// Consumes one original authenticated observation, retaining its local
+    /// lifetime through both transactions. Selection is not applied SERVE.
+    pub(crate) fn select_healthy_candidate_checked(
+        &self,
+        lease: &LeasedProxyOperation,
+        binding: &proto::ManagedDeploymentBinding,
+        observation: crate::proxy::runtime_client::health::HealthObservation,
+        check: &impl Fn() -> Result<(), ProxyError>,
+    ) -> Result<(), ProxyError> {
+        // Anchor before consumption: time spent handing off cannot extend life.
+        let anchor = std::time::Instant::now();
+        let (report, remaining) = observation.into_remaining()?;
+        let expires = anchor.checked_add(remaining).ok_or_else(refused)?;
+        let fresh = || {
+            check()?;
+            if std::time::Instant::now() >= expires {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        let Some(current) = self.read_health_candidate_checked(lease, binding, &fresh)? else {
+            return Ok(());
+        };
+        let observation = CandidateReadiness {
+            report,
+            expires,
+            admitting: current.applied.as_ref().ok_or_else(refused)?.admitting,
+            active_calls: current.active_calls,
+        };
+        let readiness =
+            self.record_candidate_readiness_checked(lease, binding, &observation, &fresh)?;
+        self.select_candidate_checked(lease, binding, readiness, &fresh)?;
+        Ok(())
+    }
+
     /// Read-only candidate policy preflight; never grants call or route authority.
     pub(crate) fn read_eligible_deployment_checked(
         &self,
@@ -102,7 +175,7 @@ impl PostgresProxyStore {
         })
     }
 
-    /// Main supplies an authenticated fresh probe. This type contains only data.
+    /// The controller supplies a fresh authenticated probe and its local expiry.
     pub(crate) fn record_candidate_readiness_checked(
         &self,
         lease: &LeasedProxyOperation,
@@ -110,8 +183,29 @@ impl PostgresProxyStore {
         report: &CandidateReadiness,
         check: &impl Fn() -> Result<(), ProxyError>,
     ) -> Result<Uuid, ProxyError> {
-        self.with_deployment(binding, Some(lease), check, |tx, key| {
-            transitions::readiness(tx, key, lease, binding, report)
+        self.record_candidate_readiness_at_checked(
+            lease,
+            binding,
+            report,
+            check,
+            &std::time::Instant::now,
+        )
+    }
+
+    fn record_candidate_readiness_at_checked(
+        &self,
+        lease: &LeasedProxyOperation,
+        binding: &proto::ManagedDeploymentBinding,
+        report: &CandidateReadiness,
+        check: &impl Fn() -> Result<(), ProxyError>,
+        now: &impl Fn() -> std::time::Instant,
+    ) -> Result<Uuid, ProxyError> {
+        let fresh = || {
+            check()?;
+            report.remaining_us(now()).map(|_| ())
+        };
+        self.with_deployment(binding, Some(lease), &fresh, |tx, key| {
+            transitions::readiness(tx, key, lease, binding, report, now)
         })
     }
 

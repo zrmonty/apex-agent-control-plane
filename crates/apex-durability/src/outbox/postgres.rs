@@ -127,6 +127,20 @@ impl PostgresOutbox {
 }
 
 impl EventOutbox for PostgresOutbox {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        crate::postgres_readiness::check(
+            &mut self.client,
+            crate::postgres_readiness::Store::Outbox,
+            self.capacity,
+            workspace_id,
+            namespace_id,
+        )
+    }
+
     fn enqueue(&mut self, event: &IngestRequest) -> Result<EnqueueResult, GatewayError> {
         if !is_scope_identifier(&event.workspace_id)
             || !is_scope_identifier(&event.namespace_id)

@@ -4,15 +4,178 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
-import type { CheckRuntimeAuthorityRequest, CheckRuntimeAuthorityRequestSchema, RuntimeAuthoritySnapshot } from "./proxy_runtime_authority_pb.js";
-import type { RuntimeAuthentication, RuntimeConfiguration, RuntimeLaunchAttestation, RuntimeNetworkGrant, RuntimeToolSchema } from "./proxy_runtime_pb.js";
 import type { ManagedDeploymentBinding } from "./governance_pb.js";
+import type { RuntimeAuthentication, RuntimeConfiguration, RuntimeHealthSample, RuntimeLaunchAttestation, RuntimeNetworkGrant, RuntimeToolSchema } from "./proxy_runtime_pb.js";
+import type { CheckRuntimeAuthorityRequest, CheckRuntimeAuthorityRequestSchema, RuntimeAuthoritySnapshot } from "./proxy_runtime_authority_pb.js";
 import type { ProxyTelemetryPolicy } from "./proxy_trace_pb.js";
 
 /**
  * Describes the file apex/v1/proxy_runtime_deployment.proto.
  */
 export declare const file_apex_v1_proxy_runtime_deployment: GenFile;
+
+/**
+ * @generated from message apex.v1.RuntimeHealthObservationRequest
+ */
+export declare type RuntimeHealthObservationRequest = Message<"apex.v1.RuntimeHealthObservationRequest"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 2;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * unpredictable32bytes, fresh per call
+   *
+   * @generated from field: bytes nonce = 3;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeHealthObservationRequest.
+ * Use `create(RuntimeHealthObservationRequestSchema)` to create a new message.
+ */
+export declare const RuntimeHealthObservationRequestSchema: GenMessage<RuntimeHealthObservationRequest>;
+
+/**
+ * @generated from message apex.v1.RuntimeHealthObservationResponse
+ */
+export declare type RuntimeHealthObservationResponse = Message<"apex.v1.RuntimeHealthObservationResponse"> & {
+  /**
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 2;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 3;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * Only after successful physical daemon-exec completion and full original
+   * binding validation. Each receiver anchors BEFORE its request and subtracts
+   * all elapsed time. Cached reconciliation replies cannot supply this sample.
+   *
+   * @generated from field: apex.v1.RuntimeHealthSample sample = 4;
+   */
+  sample?: RuntimeHealthSample | undefined;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeHealthObservationResponse.
+ * Use `create(RuntimeHealthObservationResponseSchema)` to create a new message.
+ */
+export declare const RuntimeHealthObservationResponseSchema: GenMessage<RuntimeHealthObservationResponse>;
+
+/**
+ * @generated from message apex.v1.RuntimeNetworkInspectionRequest
+ */
+export declare type RuntimeNetworkInspectionRequest = Message<"apex.v1.RuntimeNetworkInspectionRequest"> & {
+  /**
+   * exactly 1
+   *
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * original immutable installed binding
+   *
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 2;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * unpredictable 32 bytes; one request, never cached or reused
+   *
+   * @generated from field: bytes nonce = 3;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeNetworkInspectionRequest.
+ * Use `create(RuntimeNetworkInspectionRequestSchema)` to create a new message.
+ */
+export declare const RuntimeNetworkInspectionRequestSchema: GenMessage<RuntimeNetworkInspectionRequest>;
+
+/**
+ * Authenticated point-in-time observation, not a reservation or serving grant.
+ * Each receiving hop validates the exact binding and nonce and its own original
+ * monotonic request-start deadline. Relaying/decoding/caching cannot restamp it.
+ * Missing, malformed, stale, incomplete or refused observations never pass NETWORK.
+ *
+ * @generated from message apex.v1.RuntimeNetworkInspectionResponse
+ */
+export declare type RuntimeNetworkInspectionResponse = Message<"apex.v1.RuntimeNetworkInspectionResponse"> & {
+  /**
+   * exactly 1
+   *
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion: number;
+
+  /**
+   * @generated from field: apex.v1.ManagedDeploymentBinding binding = 2;
+   */
+  binding?: ManagedDeploymentBinding | undefined;
+
+  /**
+   * @generated from field: bytes nonce = 3;
+   */
+  nonce: Uint8Array;
+
+  /**
+   * validated owned isolated network binding
+   *
+   * @generated from field: string network_binding_sha256 = 4;
+   */
+  networkBindingSha256: string;
+
+  /**
+   * actual process continuity observation
+   *
+   * @generated from field: string gateway_process_sha256 = 5;
+   */
+  gatewayProcessSha256: string;
+
+  /**
+   * actual process continuity observation
+   *
+   * @generated from field: string guard_process_sha256 = 6;
+   */
+  guardProcessSha256: string;
+
+  /**
+   * >0, <=10000000 from receiver's ORIGINAL request start
+   *
+   * @generated from field: uint64 valid_for_us = 7;
+   */
+  validForUs: bigint;
+
+  /**
+   * true only after complete independent inspection
+   *
+   * @generated from field: bool confined = 8;
+   */
+  confined: boolean;
+};
+
+/**
+ * Describes the message apex.v1.RuntimeNetworkInspectionResponse.
+ * Use `create(RuntimeNetworkInspectionResponseSchema)` to create a new message.
+ */
+export declare const RuntimeNetworkInspectionResponseSchema: GenMessage<RuntimeNetworkInspectionResponse>;
 
 /**
  * @generated from message apex.v1.RegisterRuntimeDeploymentRequest
@@ -279,5 +442,62 @@ export declare const RuntimeDeploymentRegistry: GenService<{
     methodKind: "unary";
     input: typeof RegisterRuntimeDeploymentRequestSchema;
     output: typeof RuntimeDeploymentRegistrationReceiptSchema;
+  },
+}>;
+
+/**
+ * Controller-only mTLS read of independently inspected installed confinement.
+ * The agent uses its owned journal and actual engine, never caller topology,
+ * a successful socket connection, or a requested hash as proof. This has no
+ * create/start/repair/exec/registration/admission effects and no bearer fallback.
+ *
+ * @generated from service apex.v1.RuntimeNetworkInspection
+ */
+export declare const RuntimeNetworkInspection: GenService<{
+  /**
+   * @generated from rpc apex.v1.RuntimeNetworkInspection.Check
+   */
+  check: {
+    methodKind: "unary";
+    input: typeof RuntimeNetworkInspectionRequestSchema;
+    output: typeof RuntimeNetworkInspectionResponseSchema;
+  },
+}>;
+
+/**
+ * Controller-only fresh health collection of the exact installed gateway. The
+ * agent runs only its fixed health executable and owns durable daemon exec IDs.
+ * No caller command, path, environment or container selector is accepted. This
+ * observation neither changes reconciliation state nor selects a serving route.
+ *
+ * @generated from service apex.v1.RuntimeHealthObservation
+ */
+export declare const RuntimeHealthObservation: GenService<{
+  /**
+   * @generated from rpc apex.v1.RuntimeHealthObservation.Observe
+   */
+  observe: {
+    methodKind: "unary";
+    input: typeof RuntimeHealthObservationRequestSchema;
+    output: typeof RuntimeHealthObservationResponseSchema;
+  },
+}>;
+
+/**
+ * Managed workload-only mTLS/token/instance-proof boundary on the control plane.
+ * Authorizes the exact registered deployment and current PREPARE/SERVE selection,
+ * then obtains a fresh nonce-bound Controller->Agent inspection. It never grants
+ * host Agent/Controller authority to the workload. Not a browser API.
+ *
+ * @generated from service apex.v1.ManagedNetworkReadiness
+ */
+export declare const ManagedNetworkReadiness: GenService<{
+  /**
+   * @generated from rpc apex.v1.ManagedNetworkReadiness.Check
+   */
+  check: {
+    methodKind: "unary";
+    input: typeof RuntimeNetworkInspectionRequestSchema;
+    output: typeof RuntimeNetworkInspectionResponseSchema;
   },
 }>;

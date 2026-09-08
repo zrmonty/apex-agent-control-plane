@@ -293,8 +293,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             backlog_alert_depth,
             backlog_alert_age_millis,
         );
+        let readiness = apex_event_ingest::proto::evidence_admission_readiness_server::EvidenceAdmissionReadinessServer::new(
+            service.admission_readiness_service(),
+        ).max_decoding_message_size(1024);
         Server::builder()
             .tls_config(tls)?
+            .add_service(readiness)
             .add_service(bounded_event_ingest_server(service))
             .serve(listen)
             .await?;

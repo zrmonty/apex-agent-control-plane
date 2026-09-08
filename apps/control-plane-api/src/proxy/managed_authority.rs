@@ -10,8 +10,8 @@ mod protected;
 mod refresh;
 mod root;
 pub use root::{
-    ManagedAuthorityOwner, bounded_managed_proxy_governance_server,
-    bounded_managed_runtime_authority_server,
+    ManagedAuthorityOwner, bounded_managed_network_readiness_server,
+    bounded_managed_proxy_governance_server, bounded_managed_runtime_authority_server,
 };
 pub use service::Service as ManagedAuthorityService;
 mod service;

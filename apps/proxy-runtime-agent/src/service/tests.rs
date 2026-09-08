@@ -16,7 +16,9 @@ use pki::{AGENT, CONTROLLER, Pki};
 mod current_callback;
 #[cfg(target_os = "linux")]
 mod dormant;
+mod health_observation;
 mod limits;
+pub(crate) mod network_inspection;
 
 const INSTALL: &str = "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e01";
 struct Callback {

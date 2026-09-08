@@ -12,9 +12,10 @@ export type ManagedRuntime = Readonly<{
   verifier: InboundTokenVerifier;
 }>;
 
-/** Metadata validity is not runtime authority. Tasks 8/13 must wire concrete
- * admission and egress enforcement before this factory can construct anything.
- * No secrets, clients, discovery, listener or permissive callbacks are created. */
+/** Legacy metadata-only component boundary, deliberately non-executable. The
+ * real executable uses managed/process.ts -> the sealed managed/application.ts.
+ * This cannot turn caller-supplied metadata into runtime authority, and creates
+ * no secrets, clients, discovery, listener or permissive callbacks. */
 export async function buildManagedRuntime(
   config: ReadonlyRuntimeConfiguration,
   env: NodeJS.ProcessEnv = process.env,

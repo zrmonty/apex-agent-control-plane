@@ -30,7 +30,9 @@ export function harness(native?: { clock: Clock; session: Pick<OwnedMcpSession, 
     evidenceAgentId: preparation.evidenceAgentId, dataClassification: preparation.dataClassification };
   const auth = deferred<Uint8Array>(), authClosed = deferred<void>(), upstream = deferred<unknown>(), rawClosed = deferred<void>();
   const evidenceReply = deferred<Uint8Array>(), evidenceClosed = deferred<void>(), completionClosed = deferred<void>();
-  for (const pending of [auth.promise, upstream.promise, evidenceReply.promise]) void pending.catch(() => {});
+  const completionReply = deferred<Uint8Array>();
+  let holdCompletionReply = false, replyCompletion: (() => void) | undefined;
+  for (const pending of [auth.promise, upstream.promise, evidenceReply.promise, completionReply.promise]) void pending.catch(() => {});
   const effects: string[] = [], events: ReturnType<typeof fromBinary<typeof EventEnvelopeSchema>>[] = [];
   const evidenceTiming: { start: bigint; deadline: bigint }[] = [];
   let active = 0, current = true;
@@ -41,9 +43,11 @@ export function harness(native?: { clock: Clock; session: Pick<OwnedMcpSession, 
         return { result: auth.promise, closed: authClosed.promise, cancel() { effects.push("cancel-auth"); } };
       }
       effects.push("complete"); const request = fromBinary(ManagedCallCompletionSchema, bytes);
-      return { result: Promise.resolve(toBinary(ManagedCallCompletionReceiptSchema, create(ManagedCallCompletionReceiptSchema,
-        { binding: request.binding, admissionId: request.admissionId, callId: request.callId, released: true }))),
-        closed: completionClosed.promise, cancel() {} };
+      const receipt = toBinary(ManagedCallCompletionReceiptSchema, create(ManagedCallCompletionReceiptSchema,
+        { binding: request.binding, admissionId: request.admissionId, callId: request.callId, released: true }));
+      replyCompletion = () => completionReply.resolve(receipt);
+      return { result: holdCompletionReply ? completionReply.promise : Promise.resolve(receipt),
+        closed: completionClosed.promise, cancel() { effects.push("cancel-completion"); } };
     } } });
   const raw = new OwnedCallCoordinator({ ...profile, business, monotonicNowNs: mono,
     grants: { snapshot: () => ({ mode: "serve", admitting: current, epoch: 23n, activeCalls: active }),
@@ -59,6 +63,8 @@ export function harness(native?: { clock: Clock; session: Pick<OwnedMcpSession, 
   const executor = new CompiledManagedExecutor({ preparation, calls: raw, evidence });
   return { ...f, preparation, profile, executor, raw, evidence, effects, events, evidenceTiming,
     auth, authClosed, upstream, rawClosed, evidenceReply, evidenceClosed, completionClosed,
+    completionReply, holdCompletionReply() { holdCompletionReply = true; },
+    replyCompletion() { if (!replyCompletion) throw Error("completion has not started"); replyCompletion(); },
     start: () => executor.start(f.identity, "portfolio.read", { portfolioId: "p-1" }, f.original, f.deadline),
     authorize(outcome = GovernanceOutcome.ALLOWED, restrictions = ["client.account_number", "client.tax_id", "positions.cost_basis"]) {
       const allowed = outcome === GovernanceOutcome.ALLOWED;
@@ -70,6 +76,7 @@ export function harness(native?: { clock: Clock; session: Pick<OwnedMcpSession, 
     advance(ns: bigint) { at = { ...f.original, monotonicNs: f.original.monotonicNs + ns, unixUs: f.original.unixUs + ns / 1000n }; },
     clock(value: typeof at) { at = value; }, hook(value?: () => void) { clockHook = value; }, revoke() { current = false; },
     async cleanup() { auth.reject(new Error(canary)); upstream.reject(new Error(canary)); evidenceReply.reject(new Error(canary));
+      completionReply.reject(new Error(canary));
       authClosed.resolve(); rawClosed.resolve(); evidenceClosed.resolve(); completionClosed.resolve();
       await raw.close(); await evidence.close(); },
     get active() { return active; } };

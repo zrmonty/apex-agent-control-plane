@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use tonic::transport::{Channel, Endpoint};
 mod attestation;
 mod config;
+pub(crate) mod health;
+pub(crate) mod network;
 pub use config::RuntimeExecutionConfig;
 #[cfg(test)]
 mod tests;
@@ -13,6 +15,16 @@ pub(crate) const RPC_LIMIT: Duration = Duration::from_secs(120);
 pub(crate) struct RuntimeExecutionClient {
     client: proto::runtime_execution_service_client::RuntimeExecutionServiceClient<Channel>,
     installation: String,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Task4 health consumption is a later boundary")
+    )]
+    health: proto::runtime_health_observation_client::RuntimeHealthObservationClient<Channel>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Task4 health consumption is a later boundary")
+    )]
+    config: RuntimeExecutionConfig,
 }
 
 impl RuntimeExecutionClient {
@@ -35,6 +47,12 @@ impl RuntimeExecutionClient {
                 .map_err(|_| unavailable())?;
         Ok(Self {
             installation: config.installation_id.clone(),
+            config: config.clone(),
+            health: proto::runtime_health_observation_client::RuntimeHealthObservationClient::new(
+                channel.clone(),
+            )
+            .max_encoding_message_size(4096)
+            .max_decoding_message_size(32768),
             client: proto::runtime_execution_service_client::RuntimeExecutionServiceClient::new(
                 channel,
             )

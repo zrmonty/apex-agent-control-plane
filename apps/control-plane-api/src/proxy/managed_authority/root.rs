@@ -50,6 +50,19 @@ impl ManagedAuthorityOwner {
             )
             .map_err(unavailable)
     }
+    /// Bind the already validated deployment-owned Controller transport before
+    /// start. No workload request supplies endpoints, credentials or host roles.
+    pub fn configure_network_inspection(
+        &mut self,
+        execution: &crate::RuntimeExecutionOwner,
+    ) -> Result<(), ProxyError> {
+        if self.settings.is_none() {
+            return Err(unavailable(Refused));
+        }
+        self.inner
+            .configure_network(execution.configuration().clone())
+            .map_err(unavailable)
+    }
     pub fn request_shutdown(&self) {
         self.inner.request_shutdown();
     }
@@ -71,6 +84,13 @@ pub fn bounded_managed_proxy_governance_server(
     proto::managed_proxy_governance_server::ManagedProxyGovernanceServer::new(service)
         .max_decoding_message_size(16_384)
         .max_encoding_message_size(16_384)
+}
+pub fn bounded_managed_network_readiness_server(
+    service: service::Service,
+) -> proto::managed_network_readiness_server::ManagedNetworkReadinessServer<service::Service> {
+    proto::managed_network_readiness_server::ManagedNetworkReadinessServer::new(service)
+        .max_decoding_message_size(4096)
+        .max_encoding_message_size(4096)
 }
 fn unavailable(_: Refused) -> ProxyError {
     ProxyError::new(

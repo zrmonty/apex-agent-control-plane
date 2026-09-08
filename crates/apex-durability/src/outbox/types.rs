@@ -20,6 +20,17 @@ pub enum EnqueueResult {
 /// the downstream fanout begins; `mark_complete` is only called after every
 /// projection acknowledges the event. Pending rows are replay work.
 pub trait EventOutbox: Send {
+    /// Observes durable admission capability without enqueueing, claiming or
+    /// replaying any event. Success does not reserve capacity or guarantee a
+    /// future write. Unsupported/in-memory stores fail closed; callers own I/O.
+    fn check_admission_readiness(
+        &mut self,
+        _workspace_id: &str,
+        _namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::internal())
+    }
+
     fn enqueue(&mut self, event: &IngestRequest) -> Result<EnqueueResult, GatewayError>;
     fn mark_complete(&mut self, key: &OutboxKey) -> Result<(), GatewayError>;
 
@@ -126,6 +137,14 @@ pub trait EventOutbox: Send {
 }
 
 impl<T: EventOutbox + ?Sized> EventOutbox for Box<T> {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        (**self).check_admission_readiness(workspace_id, namespace_id)
+    }
+
     fn enqueue(&mut self, event: &IngestRequest) -> Result<EnqueueResult, GatewayError> {
         (**self).enqueue(event)
     }

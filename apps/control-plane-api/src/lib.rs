@@ -58,8 +58,8 @@ pub use proxy::{
 };
 #[cfg(feature = "postgres")]
 pub use proxy::{
-    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_proxy_governance_server,
-    bounded_managed_runtime_authority_server,
+    ManagedAuthorityOwner, ManagedAuthorityService, bounded_managed_network_readiness_server,
+    bounded_managed_proxy_governance_server, bounded_managed_runtime_authority_server,
 };
 #[cfg(feature = "postgres")]
 pub use proxy::{RuntimeExecutionConfig, RuntimeExecutionOwner, RuntimeExecutionStatus};

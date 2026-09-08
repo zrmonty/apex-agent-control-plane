@@ -142,7 +142,7 @@ impl LaunchCatalog {
     }
 
     // Private deterministic seam: generated data alone is never public authority.
-    fn prepare_data(
+    pub(crate) fn prepare_data(
         &self,
         authority: &proto::RuntimeAuthoritySnapshot,
         configuration: &proto::RuntimeConfiguration,

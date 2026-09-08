@@ -72,6 +72,7 @@ fn selected(f: &Fixture) -> proto::ManagedDeploymentGrant {
             &f.lease,
             &f.registration.binding,
             &CandidateReadiness {
+                expires: std::time::Instant::now() + std::time::Duration::from_secs(5),
                 admitting: false,
                 active_calls: 0,
                 report: proto::ReadinessReport {

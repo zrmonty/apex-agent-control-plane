@@ -270,6 +270,43 @@ impl FileIdempotencyStore {
 }
 
 impl IdempotencyStore for FileIdempotencyStore {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        if !is_scope_identifier(workspace_id) || !is_scope_identifier(namespace_id) {
+            return Err(GatewayError::new(GatewayErrorCode::ScopeDenied));
+        }
+        let in_scope = |key: &&IdempotencyKey| {
+            key.workspace_id == workspace_id && key.namespace_id == namespace_id
+        };
+        let scoped = self.committed.keys().filter(in_scope).count()
+            + self
+                .pending
+                .values()
+                .map(|(key, _)| key)
+                .filter(in_scope)
+                .count();
+        if scoped >= scope_capacity(self.capacity)
+            || self.committed.len() + self.pending.len() >= self.capacity
+            || self.next_token == u64::MAX
+        {
+            return Err(GatewayError::new(GatewayErrorCode::IdempotencyCapacity));
+        }
+        let file = self.file.as_ref().ok_or_else(GatewayError::internal)?;
+        let metadata = file.metadata().map_err(|_| GatewayError::internal())?;
+        if !metadata.is_file()
+            || metadata.permissions().readonly()
+            || metadata.len() >= MAX_IDEMPOTENCY_FILE_BYTES
+        {
+            return Err(GatewayError::internal());
+        }
+        // Flush the actual owned journal, never a synthetic write or a reopened
+        // pathname. This is observational capability, not future disk allocation.
+        file.sync_data().map_err(|_| GatewayError::internal())
+    }
+
     fn reserve(
         &mut self,
         key: IdempotencyKey,

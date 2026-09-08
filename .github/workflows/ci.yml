@@ -328,6 +328,18 @@ jobs:
         # Dependency unit tests are not run by the application test command.
         # These self-contained real-socket/TLS tests require no external database.
         run: cargo test -p apex-durability --locked --all-features --lib postgres_transport::worker -- --nocapture
+      - name: Verify authenticated runtime health client
+        env:
+          APEX_RUNTIME_FIXTURE_PATH: ${{ runner.temp }}/runtime-revision.json
+          CARGO_NET_RETRY: "10"
+          CARGO_HTTP_MULTIPLEXING: "false"
+          RUST_BACKTRACE: "1"
+        run: |
+          set -euo pipefail
+          mkdir "${RUNNER_TEMP}/runtime-health-launch"
+          APEX_LAUNCH_EXPORT_DIR="${RUNNER_TEMP}/runtime-health-launch" cargo test --locked -p apex-proxy-runtime-agent --lib launch::tests::export::export_launch_parity_fixture -- --exact --ignored
+          APEX_RUNTIME_FIXTURE_PATH="${RUNNER_TEMP}/runtime-health-launch/runtime-revision.json" cargo test --locked -p apex-control-plane-api --features "test-support,postgres,valkey" --lib proxy::runtime_client::health::tests:: -- --ignored --nocapture | tee "${RUNNER_TEMP}/runtime-health-client.log"
+          node -e "const text=require('node:fs').readFileSync(process.argv[1],'utf8'); const match=text.match(/^test result: ok\. ([0-9]+) passed; 0 failed; 0 ignored;/m); const passed=Number(match?.[1] ?? 0); if (passed < 11) throw new Error('runtime health suite missing, failed or skipped');" "${RUNNER_TEMP}/runtime-health-client.log"
       - name: Verify Linux runtime provisioning boundaries
         # Privileged acceptance runs only on this disposable CI host.
         working-directory: .

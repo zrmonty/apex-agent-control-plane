@@ -11,7 +11,9 @@ test('component: startup suite runs eight fixed original-entrypoint cases with c
     const env = args.flatMap((value, index) => value === '--env' ? [args[index + 1]] : []);
     const identity = env.filter((value) =>
       /^APEX_MCP_(?:PRINCIPAL|AGENT_ID|WORKSPACE_ID|NAMESPACE_ID|TRACE_ID)=/.test(value));
-    assert.deepEqual(identity, expectedIdentity, 'every case must supply exactly five valid fixed identity entries');
+    const development = env.includes('APEX_MCP_PROFILE=development-standalone');
+    assert.deepEqual(identity, development ? expectedIdentity : [],
+      'only explicit development accepts caller identity env; managed cases must not fail on injected legacy identity');
   }
   assert.equal(creates.length, 8);
   assert.equal(report.ok, true, report.code);

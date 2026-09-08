@@ -24,6 +24,7 @@ mod fixture;
 #[path = "../../../../../proxy-runtime-agent/tests/runtime_peer_pair/pki.rs"]
 mod pki;
 mod registration;
+mod network;
 
 fn request(
     binding: &proto::ManagedDeploymentBinding,

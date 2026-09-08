@@ -6,9 +6,9 @@ export function token(): Buffer { return Buffer.alloc(32, 0x5a); }
 export function wire(path = "/readyz", headers = `Host: 127.0.0.1:8081\r\nAuthorization: Bearer ${token().toString("base64url")}`): string {
   return `GET ${path} HTTP/1.1\r\n${headers}\r\nConnection: close\r\n\r\n`;
 }
-export function requestText(request: string): Promise<{ status: number; headers: Record<string, string>; body: string; raw: string }> {
+export function requestText(request: string, port = 8081): Promise<{ status: number; headers: Record<string, string>; body: string; raw: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection({ host: "127.0.0.1", port: 8081 });
+    const socket = createConnection({ host: "127.0.0.1", port });
     const storage = Buffer.alloc(16384);
     let length = 0, failure: Error | undefined;
     const fuse = setTimeout(() => { failure = new Error("test peer fuse expired"); socket.destroy(); }, 4000);

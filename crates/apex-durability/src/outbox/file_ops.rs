@@ -111,6 +111,30 @@ impl FileOutbox {
 }
 
 impl EventOutbox for FileOutbox {
+    fn check_admission_readiness(
+        &mut self,
+        workspace_id: &str,
+        namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        if !crate::is_scope_identifier(workspace_id) || !crate::is_scope_identifier(namespace_id) {
+            return Err(GatewayError::new(crate::GatewayErrorCode::ScopeDenied));
+        }
+        if self.pending.len() + self.complete.len() + self.quarantined.len() >= self.capacity {
+            return Err(GatewayError::new(
+                crate::GatewayErrorCode::IdempotencyCapacity,
+            ));
+        }
+        let file = self.file.as_ref().ok_or_else(GatewayError::internal)?;
+        let metadata = file.metadata().map_err(|_| GatewayError::internal())?;
+        if !metadata.is_file()
+            || metadata.permissions().readonly()
+            || metadata.len() >= MAX_OUTBOX_FILE_BYTES
+        {
+            return Err(GatewayError::internal());
+        }
+        file.sync_data().map_err(|_| GatewayError::internal())
+    }
+
     fn enqueue(&mut self, event: &IngestRequest) -> Result<EnqueueResult, GatewayError> {
         let key = OutboxKey {
             workspace_id: event.workspace_id.clone(),

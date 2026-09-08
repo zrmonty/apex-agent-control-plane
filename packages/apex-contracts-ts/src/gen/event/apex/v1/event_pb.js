@@ -9,7 +9,7 @@ import { file_google_protobuf_struct } from "@bufbuild/protobuf/wkt";
  * Describes the file apex/v1/event.proto.
  */
 export const file_apex_v1_event = /*@__PURE__*/
-  fileDesc("ChNhcGV4L3YxL2V2ZW50LnByb3RvEgdhcGV4LnYxIv8CCg1FdmVudEVudmVsb3BlEhAKCGV2ZW50X2lkGAEgASgJEhEKCXRpbWVzdGFtcBgCIAEoCRIgCgR0eXBlGAMgASgOMhIuYXBleC52MS5FdmVudFR5cGUSEAoIYWdlbnRfaWQYBCABKAkSDgoGcnVuX2lkGAUgASgJEhoKDXBhcmVudF9ydW5faWQYBiABKAlIAIgBARIQCgh0cmFjZV9pZBgHIAEoCRIdCgVzY29wZRgIIAEoCzIOLmFwZXgudjEuU2NvcGUSHQoFYWN0b3IYCSABKAsyDi5hcGV4LnYxLkFjdG9yEiEKB3ZlcnNpb24YCiABKAsyEC5hcGV4LnYxLlZlcnNpb24SJQoEZGF0YRgLIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QSJQoJaW50ZWdyaXR5GAwgASgLMhIuYXBleC52MS5JbnRlZ3JpdHkSFgoOc2NoZW1hX3ZlcnNpb24YDSABKA1CEAoOX3BhcmVudF9ydW5faWQiIwoOSW5nZXN0UmVzcG9uc2USEQoJZHVwbGljYXRlGAEgASgIIkwKBVNjb3BlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIUCgxuYW1lc3BhY2VfaWQYAiABKAkSFwoPYWdlbnRfZ3JvdXBfaWRzGAMgAygJIjUKBUFjdG9yEiAKBHR5cGUYASABKA4yEi5hcGV4LnYxLkFjdG9yVHlwZRIKCgJpZBgCIAEoCSI8CgdWZXJzaW9uEhIKCmFnZW50X2NvZGUYASABKAkSDgoGcHJvbXB0GAIgASgJEg0KBW1vZGVsGAMgASgJIkUKCUludGVncml0eRIWCglwcmV2X2hhc2gYASABKAlIAIgBARISCgpldmVudF9oYXNoGAIgASgJQgwKCl9wcmV2X2hhc2giwQEKDkNvbnRyb2xQYXlsb2FkEiYKBmFjdGlvbhgBIAEoDjIWLmFwZXgudjEuQ29udHJvbEFjdGlvbhIwCgtlbmZvcmNlbWVudBgCIAEoDjIbLmFwZXgudjEuQ29udHJvbEVuZm9yY2VtZW50EhgKC3JlYXNvbl9jb2RlGAMgASgJSACIAQESKwoKcGFyYW1ldGVycxgEIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3RCDgoMX3JlYXNvbl9jb2RlKsEBCglFdmVudFR5cGUSGgoWRVZFTlRfVFlQRV9VTlNQRUNJRklFRBAAEg4KClRVUk5fU1RBUlQQARIHCgNMTE0QAhIICgRUT09MEAMSCwoHTUVTU0FHRRAEEgoKBk1FTU9SWRAFEgwKCERFQ0lTSU9OEAYSDAoIV09SS0ZMT1cQBxIPCgtBR0VOVF9TUEFXThAIEgsKB0NPTlRST0wQCRIJCgVTQ09SRRAKEgwKCFRVUk5fRU5EEAsSCQoFRVJST1IQDCpWCglBY3RvclR5cGUSGgoWQUNUT1JfVFlQRV9VTlNQRUNJRklFRBAAEggKBFVTRVIQARIJCgVBR0VOVBACEgoKBlNZU1RFTRADEgwKCFNDSEVEVUxFEAQqbAoNQ29udHJvbEFjdGlvbhIeChpDT05UUk9MX0FDVElPTl9VTlNQRUNJRklFRBAAEggKBFNUT1AQARIJCgVQQVVTRRACEgoKBlJFU1VNRRADEgoKBklOSkVDVBAEEg4KClNFVF9CVURHRVQQBSpKChJDb250cm9sRW5mb3JjZW1lbnQSIwofQ09OVFJPTF9FTkZPUkNFTUVOVF9VTlNQRUNJRklFRBAAEg8KC0NPT1BFUkFUSVZFEAEySAoLRXZlbnRJbmdlc3QSOQoGSW5nZXN0EhYuYXBleC52MS5FdmVudEVudmVsb3BlGhcuYXBleC52MS5Jbmdlc3RSZXNwb25zZWIGcHJvdG8z", [file_google_protobuf_struct]);
+  fileDesc("ChNhcGV4L3YxL2V2ZW50LnByb3RvEgdhcGV4LnYxIv8CCg1FdmVudEVudmVsb3BlEhAKCGV2ZW50X2lkGAEgASgJEhEKCXRpbWVzdGFtcBgCIAEoCRIgCgR0eXBlGAMgASgOMhIuYXBleC52MS5FdmVudFR5cGUSEAoIYWdlbnRfaWQYBCABKAkSDgoGcnVuX2lkGAUgASgJEhoKDXBhcmVudF9ydW5faWQYBiABKAlIAIgBARIQCgh0cmFjZV9pZBgHIAEoCRIdCgVzY29wZRgIIAEoCzIOLmFwZXgudjEuU2NvcGUSHQoFYWN0b3IYCSABKAsyDi5hcGV4LnYxLkFjdG9yEiEKB3ZlcnNpb24YCiABKAsyEC5hcGV4LnYxLlZlcnNpb24SJQoEZGF0YRgLIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QSJQoJaW50ZWdyaXR5GAwgASgLMhIuYXBleC52MS5JbnRlZ3JpdHkSFgoOc2NoZW1hX3ZlcnNpb24YDSABKA1CEAoOX3BhcmVudF9ydW5faWQiIwoOSW5nZXN0UmVzcG9uc2USEQoJZHVwbGljYXRlGAEgASgIIowBCh1FdmlkZW5jZUFkbWlzc2lvblByb2JlUmVxdWVzdBIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIVCg1yZXF1ZXN0X25vbmNlGAIgASgMEhQKDHdvcmtzcGFjZV9pZBgDIAEoCRIUCgxuYW1lc3BhY2VfaWQYBCABKAkSEAoIYWdlbnRfaWQYBSABKAkisgEKHkV2aWRlbmNlQWRtaXNzaW9uUHJvYmVSZXNwb25zZRIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIVCg1yZXF1ZXN0X25vbmNlGAIgASgMEhQKDHdvcmtzcGFjZV9pZBgDIAEoCRIUCgxuYW1lc3BhY2VfaWQYBCABKAkSEAoIYWdlbnRfaWQYBSABKAkSFAoMdmFsaWRfZm9yX3VzGAYgASgEEg0KBXJlYWR5GAcgASgIIkwKBVNjb3BlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIUCgxuYW1lc3BhY2VfaWQYAiABKAkSFwoPYWdlbnRfZ3JvdXBfaWRzGAMgAygJIjUKBUFjdG9yEiAKBHR5cGUYASABKA4yEi5hcGV4LnYxLkFjdG9yVHlwZRIKCgJpZBgCIAEoCSI8CgdWZXJzaW9uEhIKCmFnZW50X2NvZGUYASABKAkSDgoGcHJvbXB0GAIgASgJEg0KBW1vZGVsGAMgASgJIkUKCUludGVncml0eRIWCglwcmV2X2hhc2gYASABKAlIAIgBARISCgpldmVudF9oYXNoGAIgASgJQgwKCl9wcmV2X2hhc2giwQEKDkNvbnRyb2xQYXlsb2FkEiYKBmFjdGlvbhgBIAEoDjIWLmFwZXgudjEuQ29udHJvbEFjdGlvbhIwCgtlbmZvcmNlbWVudBgCIAEoDjIbLmFwZXgudjEuQ29udHJvbEVuZm9yY2VtZW50EhgKC3JlYXNvbl9jb2RlGAMgASgJSACIAQESKwoKcGFyYW1ldGVycxgEIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3RCDgoMX3JlYXNvbl9jb2RlKsEBCglFdmVudFR5cGUSGgoWRVZFTlRfVFlQRV9VTlNQRUNJRklFRBAAEg4KClRVUk5fU1RBUlQQARIHCgNMTE0QAhIICgRUT09MEAMSCwoHTUVTU0FHRRAEEgoKBk1FTU9SWRAFEgwKCERFQ0lTSU9OEAYSDAoIV09SS0ZMT1cQBxIPCgtBR0VOVF9TUEFXThAIEgsKB0NPTlRST0wQCRIJCgVTQ09SRRAKEgwKCFRVUk5fRU5EEAsSCQoFRVJST1IQDCpWCglBY3RvclR5cGUSGgoWQUNUT1JfVFlQRV9VTlNQRUNJRklFRBAAEggKBFVTRVIQARIJCgVBR0VOVBACEgoKBlNZU1RFTRADEgwKCFNDSEVEVUxFEAQqbAoNQ29udHJvbEFjdGlvbhIeChpDT05UUk9MX0FDVElPTl9VTlNQRUNJRklFRBAAEggKBFNUT1AQARIJCgVQQVVTRRACEgoKBlJFU1VNRRADEgoKBklOSkVDVBAEEg4KClNFVF9CVURHRVQQBSpKChJDb250cm9sRW5mb3JjZW1lbnQSIwofQ09OVFJPTF9FTkZPUkNFTUVOVF9VTlNQRUNJRklFRBAAEg8KC0NPT1BFUkFUSVZFEAEySAoLRXZlbnRJbmdlc3QSOQoGSW5nZXN0EhYuYXBleC52MS5FdmVudEVudmVsb3BlGhcuYXBleC52MS5Jbmdlc3RSZXNwb25zZTJ2ChpFdmlkZW5jZUFkbWlzc2lvblJlYWRpbmVzcxJYCgVDaGVjaxImLmFwZXgudjEuRXZpZGVuY2VBZG1pc3Npb25Qcm9iZVJlcXVlc3QaJy5hcGV4LnYxLkV2aWRlbmNlQWRtaXNzaW9uUHJvYmVSZXNwb25zZWIGcHJvdG8z", [file_google_protobuf_struct]);
 
 /**
  * Describes the message apex.v1.EventEnvelope.
@@ -26,39 +26,53 @@ export const IngestResponseSchema = /*@__PURE__*/
   messageDesc(file_apex_v1_event, 1);
 
 /**
+ * Describes the message apex.v1.EvidenceAdmissionProbeRequest.
+ * Use `create(EvidenceAdmissionProbeRequestSchema)` to create a new message.
+ */
+export const EvidenceAdmissionProbeRequestSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_event, 2);
+
+/**
+ * Describes the message apex.v1.EvidenceAdmissionProbeResponse.
+ * Use `create(EvidenceAdmissionProbeResponseSchema)` to create a new message.
+ */
+export const EvidenceAdmissionProbeResponseSchema = /*@__PURE__*/
+  messageDesc(file_apex_v1_event, 3);
+
+/**
  * Describes the message apex.v1.Scope.
  * Use `create(ScopeSchema)` to create a new message.
  */
 export const ScopeSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_event, 2);
+  messageDesc(file_apex_v1_event, 4);
 
 /**
  * Describes the message apex.v1.Actor.
  * Use `create(ActorSchema)` to create a new message.
  */
 export const ActorSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_event, 3);
+  messageDesc(file_apex_v1_event, 5);
 
 /**
  * Describes the message apex.v1.Version.
  * Use `create(VersionSchema)` to create a new message.
  */
 export const VersionSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_event, 4);
+  messageDesc(file_apex_v1_event, 6);
 
 /**
  * Describes the message apex.v1.Integrity.
  * Use `create(IntegritySchema)` to create a new message.
  */
 export const IntegritySchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_event, 5);
+  messageDesc(file_apex_v1_event, 7);
 
 /**
  * Describes the message apex.v1.ControlPayload.
  * Use `create(ControlPayloadSchema)` to create a new message.
  */
 export const ControlPayloadSchema = /*@__PURE__*/
-  messageDesc(file_apex_v1_event, 6);
+  messageDesc(file_apex_v1_event, 8);
 
 /**
  * Describes the enum apex.v1.EventType.
@@ -116,3 +130,13 @@ export const ControlEnforcement = /*@__PURE__*/
  */
 export const EventIngest = /*@__PURE__*/
   serviceDesc(file_apex_v1_event, 0);
+
+/**
+ * Non-admitting readiness over the same authenticated workload and actual
+ * durable stores as EventIngest. Never submits an event or reserves capacity.
+ * This separate service preserves the frozen EventIngest RPC interface.
+ *
+ * @generated from service apex.v1.EvidenceAdmissionReadiness
+ */
+export const EvidenceAdmissionReadiness = /*@__PURE__*/
+  serviceDesc(file_apex_v1_event, 1);

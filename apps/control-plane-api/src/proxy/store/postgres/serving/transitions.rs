@@ -1,7 +1,7 @@
 //! No route projection here. Selection still requires a later applied SERVE ack.
 use super::*;
 
-fn candidate<F: Fn() -> Result<(), ProxyError>>(
+pub(super) fn candidate<F: Fn() -> Result<(), ProxyError>>(
     tx: &mut CheckedTransaction<'_, '_, F>,
     key: &BindingKey,
     lease: &LeasedProxyOperation,
@@ -21,7 +21,7 @@ fn candidate<F: Fn() -> Result<(), ProxyError>>(
     Ok(row)
 }
 
-fn applied_prepare_expiry<F: Fn() -> Result<(), ProxyError>>(
+pub(super) fn applied_prepare_expiry<F: Fn() -> Result<(), ProxyError>>(
     tx: &mut CheckedTransaction<'_, '_, F>,
     key: &BindingKey,
     row: &postgres::Row,
@@ -43,6 +43,7 @@ pub(super) fn readiness<F: Fn() -> Result<(), ProxyError>>(
     lease: &LeasedProxyOperation,
     binding: &proto::ManagedDeploymentBinding,
     observation: &CandidateReadiness,
+    local_now: &impl Fn() -> std::time::Instant,
 ) -> Result<Uuid, ProxyError> {
     let report = &observation.report;
     let row = candidate(tx, key, lease, binding)?;
@@ -74,13 +75,14 @@ pub(super) fn readiness<F: Fn() -> Result<(), ProxyError>>(
     {
         return Err(refused());
     }
-    // Applied PREPARE must itself still be valid in the database. Main's local
-    // authenticated probe checkpoint establishes freshness across host clocks.
+    // Sample DB time BEFORE reading the remaining local lifetime. SQL latency
+    // only shortens the persisted bound; no subtraction between host clocks.
     let applied_until = applied_prepare_expiry(tx, key, &row)?;
     let now = tx.now()?;
+    let remaining_us = observation.remaining_us(local_now())?;
     let id = Uuid::now_v7();
     let until = now
-        .checked_add(5_000_000)
+        .checked_add(remaining_us)
         .ok_or_else(refused)?
         .min(applied_until);
     tx.require_valid_until(until);

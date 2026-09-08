@@ -1,0 +1,290 @@
+[
+    {
+        "Id": "83903b5885fcaa9675be92721d4bbd2525dd89eaf5a539190e31c638930041f9",
+        "Created": "2026-09-08T04:18:58.368677005Z",
+        "Path": "/usr/local/bin/node",
+        "Args": [
+            "/app/apps/mcp-gateway/dist/managed/guard/main.js"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 405484,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-09-08T04:19:05.239257509Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:d9190ff5bddce13d066e63202bcbf0c8fc99615022cdacb30302fbe05cb3f8db",
+        "ResolvConfPath": "/var/lib/docker/containers/83903b5885fcaa9675be92721d4bbd2525dd89eaf5a539190e31c638930041f9/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/83903b5885fcaa9675be92721d4bbd2525dd89eaf5a539190e31c638930041f9/hostname",
+        "HostsPath": "/var/lib/docker/containers/83903b5885fcaa9675be92721d4bbd2525dd89eaf5a539190e31c638930041f9/hosts",
+        "LogPath": "",
+        "Name": "/apex-guard-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "none",
+                "Config": {}
+            },
+            "NetworkMode": "da841b7e91c6f3bbb4732349364215b1923ceb3948338d01d0ba99bf1d19b49b",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": [
+                "ALL"
+            ],
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [
+                "ndots:0"
+            ],
+            "DnsSearch": [
+                "."
+            ],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": true,
+            "SecurityOpt": [
+                "no-new-privileges:true"
+            ],
+            "Tmpfs": {
+                "/tmp": "rw,noexec,nosuid,nodev,size=16777216,mode=1777"
+            },
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Sysctls": {
+                "net.ipv4.ip_forward": "0",
+                "net.ipv6.conf.all.disable_ipv6": "1",
+                "net.ipv6.conf.all.forwarding": "0"
+            },
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 268435456,
+            "NanoCpus": 1000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 268435456,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": 128,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": "/var/lib/docker/volumes/apex-task3a-01a073bf-owned/_data/task4z-01a07f3d-827a-7be2-88d8-5bb09b12e6bd/staging/apex-guard-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                    "Target": "/apex/runtime",
+                    "ReadOnly": true,
+                    "BindOptions": {
+                        "Propagation": "rslave",
+                        "NonRecursive": true
+                    }
+                }
+            ],
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "/var/lib/docker/volumes/apex-task3a-01a073bf-owned/_data/task4z-01a07f3d-827a-7be2-88d8-5bb09b12e6bd/staging/apex-guard-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                "Destination": "/apex/runtime",
+                "Mode": "",
+                "RW": false,
+                "Propagation": "rslave"
+            }
+        ],
+        "Config": {
+            "Hostname": "83903b5885fc",
+            "Domainname": "",
+            "User": "10001:10001",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "APEX_NETWORK_BINDING_SHA256=c697a039bf0070f60c0286d2dd7c9c21df7797380d7ccb99cc1de3933f1c4586",
+                "APEX_PROCESS_INSTANCE_ID=01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                "NODE_ENV=production",
+                "NODE_VERSION",
+                "APEX_MCP_GUARD_BOOTSTRAP=sealed-stage-v1",
+                "APEX_NETWORK_TOPOLOGY_SHA256=cc340f51d1cd932aa432bb425f4afe9222c5a008a1073dccd6b12e554523c27c",
+                "APEX_STAGE_MANIFEST_SHA256=7b30e34bc0f258f29a14834a2c29f320bc5ef607ce966c169a9086e63c618305",
+                "HOME=/tmp/apex",
+                "PATH",
+                "YARN_VERSION",
+                "APEX_INSTALLATION_ID=018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e01",
+                "APEX_MCP_PROFILE=guard"
+            ],
+            "Cmd": [
+                "/app/apps/mcp-gateway/dist/managed/guard/main.js"
+            ],
+            "Healthcheck": {
+                "Test": [
+                    "NONE"
+                ]
+            },
+            "Image": "sha256:d9190ff5bddce13d066e63202bcbf0c8fc99615022cdacb30302fbe05cb3f8db",
+            "Volumes": null,
+            "WorkingDir": "/app/apps/mcp-gateway",
+            "Entrypoint": [
+                "/usr/local/bin/node"
+            ],
+            "Labels": {
+                "io.apex.runtime.config-hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "io.apex.runtime.container-role": "guard",
+                "io.apex.runtime.fencing-token": "9007199254740993",
+                "io.apex.runtime.generation": "1",
+                "io.apex.runtime.installation-id": "018f3d4a-8b9c-7d0e-8f12-3a4b5c6d7e01",
+                "io.apex.runtime.launch-context-hash": "2615ea0960d0d9ce06c34aebe553d46c8cee79a37ad8280489dc24d2b361efa7",
+                "io.apex.runtime.namespace-id": "prod",
+                "io.apex.runtime.network-topology-hash": "cc340f51d1cd932aa432bb425f4afe9222c5a008a1073dccd6b12e554523c27c",
+                "io.apex.runtime.pair-binding-hash": "92c7bfc80a16f413a31a50516b99aa2d78437e15c33d7115cb59e3fa2d0229cf",
+                "io.apex.runtime.paired-container-name": "apex-runtime-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                "io.apex.runtime.process-instance-id": "01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                "io.apex.runtime.proxy-id": "0191b7f1-7f2c-7c13-9a61-2f29f2be1001",
+                "io.apex.runtime.revision-id": "0191b7f1-7f2c-7c13-9a61-2f29f2be1002",
+                "io.apex.runtime.runtime-manifest-hash": "db5ddc4670e5f901240e1c2910d9f78dd8a65237c86f197d13938be967afe5da",
+                "io.apex.runtime.workspace-id": "acme"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "1a9943a596a70811f39d3c78300fd7badac12a5c8f0563937efadd1ea1dcbeff",
+            "SandboxKey": "/var/run/docker/netns/1a9943a596a7",
+            "Ports": {},
+            "Networks": {
+                "apex-net-01a07f3d-827a-7be2-88d8-5bb09b12e6bd": {
+                    "IPAMConfig": {
+                        "IPv4Address": "10.246.0.3"
+                    },
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "da841b7e91c6f3bbb4732349364215b1923ceb3948338d01d0ba99bf1d19b49b",
+                    "EndpointID": "fcbc95639eee01213e5ba1d1d8aaa8d22aa70ffeb6ede259aabc43704410dfd6",
+                    "Gateway": "",
+                    "IPAddress": "10.246.0.3",
+                    "MacAddress": "6a:66:4a:87:1b:12",
+                    "IPPrefixLen": 29,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "apex-guard-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                        "83903b5885fc"
+                    ]
+                },
+                "task4z-native-01a07f3d-827a-7be2-88d8-5bb09b12e6bd": {
+                    "IPAMConfig": {
+                        "IPv4Address": "10.247.252.16"
+                    },
+                    "Links": null,
+                    "Aliases": [],
+                    "DriverOpts": {},
+                    "GwPriority": 0,
+                    "NetworkID": "ec9468fe21edd8b67a321db1745ea97734e4d943d374edaf2b8f62227d232f0e",
+                    "EndpointID": "975c6d2350502c5e6b3d32f5ee9e1fc5f62aade9813b5d913281b7f0f6add41c",
+                    "Gateway": "10.247.252.1",
+                    "IPAddress": "10.247.252.16",
+                    "MacAddress": "86:ad:a5:a0:44:b3",
+                    "IPPrefixLen": 24,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "apex-guard-01a07f3d-827a-7be2-88d8-5bb09b12e6bd",
+                        "83903b5885fc"
+                    ]
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:a7385095a508c7abfe5ca312b89a9b2c491be4242b21d8a83699c3e59e2e342d",
+            "size": 2757,
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]

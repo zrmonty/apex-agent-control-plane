@@ -30,6 +30,8 @@ mod backoff;
 #[cfg(feature = "postgres")]
 mod postgres_client;
 #[cfg(feature = "postgres")]
+mod postgres_readiness;
+#[cfg(feature = "postgres")]
 mod postgres_transport;
 
 pub mod permissions {
@@ -47,6 +49,17 @@ pub enum PublishOutcome {
 
 /// The event-publishing boundary used by admission and replay.
 pub trait EventPublisher {
+    /// Read-only observation of this publisher's durable admission boundary.
+    /// Direct fanout and memory publishers are not durable admission; their
+    /// default is unavailable. This must never publish a synthetic event.
+    fn check_admission_readiness(
+        &mut self,
+        _workspace_id: &str,
+        _namespace_id: &str,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::internal())
+    }
+
     fn publish(&mut self, event: &IngestRequest) -> Result<PublishOutcome, GatewayError>;
 
     /// Returns true only when a durable outbox can prove a completed publish

@@ -1,4 +1,5 @@
-//! Concrete dormant provisioning owner. No start or admission operation exists.
+//! Concrete provisioning owner with guarded paired process start and recovery.
+//! Process start does not establish readiness or admission.
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
@@ -8,6 +9,10 @@ mod guard_stage;
 #[cfg(target_os = "linux")]
 mod guard_staging;
 #[cfg(target_os = "linux")]
+pub(crate) mod health;
+#[cfg(any(test, target_os = "linux"))]
+mod health_record;
+#[cfg(target_os = "linux")]
 mod journal;
 #[cfg(target_os = "linux")]
 pub(crate) mod metadata;
@@ -15,10 +20,16 @@ mod network;
 #[cfg(target_os = "linux")]
 pub(crate) mod network_owner;
 #[cfg(target_os = "linux")]
+pub(crate) mod network_readiness;
+#[cfg(target_os = "linux")]
+mod paired;
+#[cfg(target_os = "linux")]
 mod pool;
 #[cfg(target_os = "linux")]
 mod provision;
 mod record;
+#[cfg(any(test, target_os = "linux"))]
+mod reservation;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod testing;
 #[cfg(all(test, target_os = "linux"))]

@@ -57,6 +57,7 @@ pub(super) async fn exercise(
     authority.renew_deployment(ack).await.unwrap();
     tokio::task::block_in_place(|| {
         let ready = CandidateReadiness {
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(5),
             admitting: false,
             active_calls: 0,
             report: proto::ReadinessReport {
