@@ -65,6 +65,16 @@ target/
 *.p12
 *.pfx
 
+# Exact public synthetic fixtures already embedded in tls-role-fixture.ts.
+# Never broaden this to allow generated credentials or other PEM files.
+!apps/event-ingest/tests/readiness-pki/ca.pem
+!apps/event-ingest/tests/readiness-pki/server.pem
+!apps/event-ingest/tests/readiness-pki/server-key.pem
+!apps/event-ingest/tests/readiness-pki/client.pem
+!apps/event-ingest/tests/readiness-pki/client-key.pem
+!apps/event-ingest/tests/readiness-pki/wrong-client.pem
+!apps/event-ingest/tests/readiness-pki/wrong-client-key.pem
+
 # Runtime data
 data/
 tmp/

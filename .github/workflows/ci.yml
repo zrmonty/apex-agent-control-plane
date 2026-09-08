@@ -162,6 +162,8 @@ jobs:
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
         run: cargo test --locked --lib --features "test-support,valkey,postgres" -- --nocapture
+      - name: Test readiness admission and real mTLS authentication
+        run: cargo test --locked --features "test-support,valkey,postgres" --test admission_readiness --test admission_readiness_mtls -- --nocapture
       - name: Check PostgreSQL feature
         env:
           CARGO_NET_RETRY: "10"

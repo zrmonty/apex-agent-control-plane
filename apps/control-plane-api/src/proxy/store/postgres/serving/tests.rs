@@ -6,11 +6,11 @@ use fixture::Fixture;
 mod attested;
 mod boundaries;
 mod concurrency;
+mod health_consumption;
 mod ordering;
 mod policy;
 mod readiness_progress;
 mod schema;
-mod health_consumption;
 
 fn renewal(
     f: &Fixture,
